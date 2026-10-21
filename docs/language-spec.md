@@ -83,6 +83,7 @@ here is not part of the language.
 | `[T; N]` | `N * size(T)` | `align(T)` | fixed-size inline array, `N > 0` |
 | `[T]` | 16 | 8 | slice: `{ data: *T, len: usize }` by value |
 | `str` | 16 | 8 | byte slice, layout identical to `[u8]` |
+| `vec<T>` | 24 | 8 | dynamic array: `{ data: *mut T, len: usize, cap: usize }` |
 | `struct Name { ... }` | natural | natural | named product type, by value |
 | `enum Name { ... }` | 4 | 4 | named `i32` discriminant |
 
@@ -99,7 +100,7 @@ here is not part of the language.
   passing, and return. Copying a slice copies the pointer and length, not the
   referenced elements.
 - There are no unions, tuples, references, function pointers, trait objects, or
-  generic parameters.
+  user-defined generic parameters; `vec<T>` is the only built-in generic type.
 
 ### 3.2 Mutability and pointer types
 
@@ -139,9 +140,26 @@ let mut name = expression;        // inferred, mutable
 - A binding is visible from its declaration to the end of the enclosing block.
 - Redeclaring a name in the same block is `E0202`. Shadowing a name from an
   outer block, a parameter, or a global is allowed; locals win.
-- Arrays, structs, slices, and `str` are copied on binding as described in §3.1.
+- Arrays, structs, slices, `str`, and `vec<T>` are copied on binding as described
+  in §3.1; vector copies are shallow.
 
-### 4.2 Globals
+### 4.2 Compile-time constants
+
+```
+const NAME: Type = constant_expression;
+```
+
+- A `const` is substituted at compile time and has no storage, address, or
+  lifetime; `&NAME` is `E0211`.
+- Supported types are integers, `bool`, `char`, floats, enums, `str`, and
+  pointers to globals. Aggregate constants (arrays, structs, slices, `vec`) are
+  `E0231`.
+- The initializer follows the global constant-expression rules and may read
+  previously declared `const` values. Forward references are `E0226`.
+- Constants share the value namespace with functions and globals; duplicates are
+  `E0202`. Builtin names are reserved.
+
+### 4.3 Globals
 
 ```
 static NAME: Type = constant_expression;
@@ -161,7 +179,7 @@ static mut NAME: Type = constant_expression;
 - Globals share one value namespace with functions; duplicates are `E0202`.
   Builtin names are reserved.
 
-### 4.3 Enums and structs
+### 4.4 Enums and structs
 
 ```
 enum Color { Red, Green = 5, Blue }
@@ -184,7 +202,23 @@ struct Point { x: i32, y: i32 }
   passing, and return copy the whole object. Structs may be array elements.
 - Struct type names share the type namespace with enums (`E0228`).
 
-### 4.4 Functions
+### 4.5 Imports
+
+```
+import "relative/or/absolute/path.cx";
+```
+
+- Imports are resolved recursively relative to the importing file; repeated
+  imports of the same canonical file are included once, and cycles terminate.
+- Every file is a module, but all top-level items are merged into one **flat
+  global namespace**. There are no qualified module names, visibility modifiers,
+  or per-module scopes: top-level names must be unique across the program.
+- Imports are compile-time file inclusion, not runtime loading. Diagnostics map
+  source spans back to the originating file and line.
+- `main`/`_start` may live in any imported module; the usual duplicate-name and
+  entry-point rules apply.
+
+### 4.6 Functions
 
 ```
 fn name(param: Type, ...) -> ReturnType { ... }
@@ -201,10 +235,13 @@ fn name(param: Type, ...) { ... }          // returns nothing
   returned indirectly by the compiler.
 - Parameters are immutable unless the function copies them into a `let mut`
   binding.
-- Top-level items are functions, `static` globals, enums, and structs. There are
-  no modules, imports, `extern` declarations, or FFI.
+- Top-level items are functions, `const` declarations, `static` globals, enums,
+  structs, and `import` declarations. There are no `extern` declarations or FFI.
+  Imports share one flat namespace (§4.5).
+- Function pointers are not implemented; the current compiler-style programs
+  dispatch through enums and conditionals instead.
 
-### 4.5 Entry point
+### 4.7 Entry point
 
 At least one of these must exist. If both are defined, `_start` is used:
 
@@ -401,6 +438,22 @@ return value, array element, or nested struct field. Field reads use `.`, and
 
 ---
 
+### 6.9 Dynamic arrays (`vec<T>`)
+
+- `vec<T>` is a 24-byte header `{data, len, cap}`. `vec_new(capacity)` allocates
+  `capacity * size(T)` bytes; the element type must come from context
+  (`let v: vec<T> = ...`, a parameter, or a return), otherwise `E0230`.
+  `vec_new(0)` stores a null data pointer and zero capacity.
+- `vec_push(&mut v, value)` appends; when full it grows to `max(4, cap * 2)`,
+  allocates a new block, copies the live elements, frees the old block, and
+  stores the value. `len(v)` and `v[i]` work like slices; indexing is bounds
+  checked. `vec_free(&mut v)` frees the backing block and resets the header.
+- `vec_slice(&v)` returns a `[T]` view of the live elements.
+- Copying a `vec<T>` copies the 24-byte header and shares the backing block.
+  There is no reference counting or move checking: two owners can double-free.
+  Treat a vector as owned by one binding and pass `&mut`/`&` for access.
+- `vec<T>` is not printable and has no equality operator.
+
 ## 7. Integer semantics
 
 All integer behavior is **defined**; nothing in this section is undefined.
@@ -480,7 +533,15 @@ syscall(number: usize, a1: usize, ..., a6: usize) -> isize
 alloc(bytes: usize) -> *mut u8
 free(pointer: *mut u8, bytes: usize) -> ()
 print(value: integer | bool | char | float | enum | str | [u8]) -> ()
-len(value: array | slice | str) -> usize
+len(value: array | slice | str | vec<T>) -> usize
+vec_new(capacity: usize) -> vec<T>                 // T from context
+vec_push(v: *mut vec<T>, value: T) -> ()
+vec_free(v: *mut vec<T>) -> ()
+vec_slice(v: *vec<T>) -> [T]
+read_file(path: str | [u8]) -> vec<u8>
+write_file(path: str | [u8], data: str | [u8]) -> i32
+panic(message: str | [u8]) -> ()
+assert(condition: bool, message: str | [u8]) -> ()
 ```
 
 - `print` writes its argument to stdout (fd 1) followed by a newline:
@@ -507,9 +568,24 @@ len(value: array | slice | str) -> usize
 - `free` calls `munmap(pointer, bytes)`. The length must be the same value passed
   to `alloc`; a mismatch leaks or unmaps the wrong range. The return value is
   ignored.
-- `len` is safe for arrays, slices, and `str`; arrays produce the constant `N`,
-  slices/`str` load the length word. It takes exactly one argument (`E0204`) and
-  rejects other types (`E0210`).
+- `len` is safe for arrays, slices, `str`, and `vec<T>`; arrays produce the
+  constant `N`, slices/`str` load the length word, and vectors load their `len`
+  field. It takes exactly one argument (`E0204`) and rejects other types
+  (`E0210`).
+- `vec_new`/`vec_push`/`vec_free`/`vec_slice` are the dynamic-array API from
+  §6.9. `vec_free` requires `&mut v` (`E0203` otherwise).
+- `read_file(path)` reads a whole file into a caller-owned `vec<u8>`; on failure
+  it returns an empty vector. `write_file(path, data)` truncates/creates the file
+  and returns `0` on success or `-1` on failure. Paths are byte strings and are
+  NUL-terminated internally; they are not UTF-8 validated. File I/O is safe (no
+  `unsafe` required) and uses `open`/`read`/`write`/`lseek`/`close` syscalls.
+- `panic(message)` writes the bytes plus a newline to fd 2 and exits 101. It
+  never returns, so a tail `panic(...)` satisfies return analysis.
+- `assert(condition, message)` does nothing when true; when false it panics via
+  the same path. It returns no value and does not affect return analysis.
+- CoreX has no exceptions, `Result`, `Option`, or `?`. Recoverable errors are
+  represented with ordinary values (error codes, enums, bools); `panic`/`assert`
+  are for unrecoverable failures.
 
 There is no `malloc`, no `printf`, no standard library, and no panic mechanism.
 
@@ -524,9 +600,13 @@ There is no `malloc`, no `printf`, no standard library, and no panic mechanism.
   ABI, not a stable C ABI. There are no variadic or register-only parameters.
 - Locals live in the entry block's `alloca`s; arrays, structs, slices, and
   `str` are copied by value. `alloca` never executes inside a loop.
-- Aggregate parameters are passed as a pointer to caller storage and copied
-  into the callee's slot at entry; aggregate returns use a hidden `ptr` result
-  parameter (`sret`) written by the callee. Scalars use the System V registers.
+- Aggregate parameters (arrays, structs, slices, `str`, `vec<T>`) are passed as
+  a pointer to caller storage and copied into the callee's slot at entry;
+  aggregate returns use a hidden `ptr` result parameter (`sret`) written by the
+  callee. Scalars use the System V registers.
+- Dynamic-array growth and file I/O use compiler-generated helpers
+  (`__corex_alloc`/`__corex_free`/`__corex_memcpy`, `__corex_cstr`,
+  `__corex_read_file`, `__corex_write_file`, `__corex_panic`).
 - Globals are emitted as LLVM globals; immutable globals use the `constant`
   linkage class, mutable ones `global`.
 - Code generation uses opaque pointers and emits no data layout, so `llc`
@@ -558,6 +638,10 @@ There is no `malloc`, no `printf`, no standard library, and no panic mechanism.
 | `MIN / -1`, `MIN % -1` | abort, exit 101 |
 | dynamic index out of bounds | abort, exit 101 |
 | slice range out of bounds | abort, exit 101 (`corex: slice range out of bounds`) |
+| vector index out of bounds | abort, exit 101 |
+| `read_file` failure | empty `vec<u8>` |
+| `write_file` failure | returns `-1` |
+| `panic` / failed `assert` | message + newline on fd 2, exit 101 |
 | constant index/range out of bounds | compile error `E0222` |
 | float overflow to infinity | IEEE 754 infinity (printed `inf`) |
 | float `0.0/0.0` | NaN (printed `nan`) |
@@ -636,6 +720,9 @@ error[E0203]: type mismatch in assignment: expected `i32`, found `u8`
 | `E0227` | unknown struct field / field access on a non-struct |
 | `E0228` | duplicate type, enum variant, struct field, or field initializer |
 | `E0229` | missing struct field in a literal |
+| `E0230` | `vec_new` element type cannot be inferred |
+| `E0231` | unsupported `const` value type |
+| `E0232` | invalid import path or unreadable import |
 | `E0300` | IR verification or native toolchain failure |
 | `E0303` | required LLVM/linker tool not found |
 
@@ -648,8 +735,10 @@ program was killed).
 ## 12. Not in v0.2
 
 Explicitly out of scope, so syntax is not reserved for them: unions, tuples,
-generic parameters, traits, closures, function pointers, modules/imports,
-`extern`/FFI, increment/decrement, labeled break, `match`, macros, attributes,
-async, threads, `?`, debug info, and cross-compilation targets other than Linux
-x86-64. Strings and slices have no concatenation, formatting, or comparison
-operators; use `len`, indexing, and ranges.
+generic parameters beyond the built-in `vec<T>`, traits, closures, function
+pointers, namespaced modules/visibility, `extern`/FFI, increment/decrement,
+labeled break, `match`, macros, attributes, async, threads, `?`, debug info, and
+cross-compilation targets other than Linux x86-64. Imports concatenate files into
+one flat namespace. Strings and slices have no concatenation, formatting, or
+comparison operators; use `len`, indexing, and ranges. Error handling is
+`panic`/`assert` plus ordinary error values, not exceptions or `Result`.

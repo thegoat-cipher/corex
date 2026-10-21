@@ -20,8 +20,10 @@ pub fn parse(tokens: &[Token]) -> Result<Program, Vec<Diagnostic>> {
         next_id: 0,
         depth: 0,
     };
+    let mut imports = Vec::new();
     let mut fns = Vec::new();
     let mut globals = Vec::new();
+    let mut consts = Vec::new();
     let mut enums = Vec::new();
     let mut structs = Vec::new();
     while !p.at(&TokenKind::Eof) && p.diags.len() < 100 {
@@ -32,9 +34,19 @@ pub fn parse(tokens: &[Token]) -> Result<Program, Vec<Diagnostic>> {
                     fns.push(f);
                 }
             }
+            TokenKind::Import => {
+                if let Ok(import) = p.parse_import() {
+                    imports.push(import);
+                }
+            }
             TokenKind::Static => {
                 if let Ok(g) = p.parse_global() {
                     globals.push(g);
+                }
+            }
+            TokenKind::Const => {
+                if let Ok(c) = p.parse_const() {
+                    consts.push(c);
                 }
             }
             TokenKind::Enum => {
@@ -64,8 +76,10 @@ pub fn parse(tokens: &[Token]) -> Result<Program, Vec<Diagnostic>> {
     }
     if p.diags.is_empty() {
         Ok(Program {
+            imports,
             fns,
             globals,
+            consts,
             enums,
             structs,
         })
@@ -144,6 +158,8 @@ impl<'a> Parser<'a> {
             self.peek(),
             TokenKind::Fn
                 | TokenKind::Static
+                | TokenKind::Const
+                | TokenKind::Import
                 | TokenKind::Enum
                 | TokenKind::Struct
                 | TokenKind::Eof
@@ -255,6 +271,13 @@ impl<'a> Parser<'a> {
             TokenKind::F32 => Type::Float(FloatTy::F32),
             TokenKind::F64 => Type::Float(FloatTy::F64),
             TokenKind::StrType => Type::Str,
+            TokenKind::VecType => {
+                self.advance();
+                self.expect(&TokenKind::Lt, "after `vec`")?;
+                let elem = self.parse_type()?;
+                self.expect(&TokenKind::Gt, "after `vec` element type")?;
+                Type::Vec(Box::new(elem))
+            }
             TokenKind::Star => {
                 self.advance();
                 let mutable = if self.at(&TokenKind::Mut) {
@@ -552,6 +575,55 @@ impl<'a> Parser<'a> {
             ty,
             mutable,
             init,
+            span: kw.span.merge(semi.span),
+        })
+    }
+
+    fn parse_import(&mut self) -> Result<ImportDecl, ()> {
+        let kw = self.expect(&TokenKind::Import, "start of import")?;
+        let span = self.peek_span();
+        let path = match self.peek().clone() {
+            TokenKind::Str(bytes) => {
+                self.advance();
+                match String::from_utf8(bytes) {
+                    Ok(path) => path,
+                    Err(_) => {
+                        return self.error(
+                            "E0232",
+                            span,
+                            "import path must be valid UTF-8",
+                        );
+                    }
+                }
+            }
+            other => {
+                return self.error(
+                    "E0232",
+                    span,
+                    format!("expected a string import path, found {}", other.describe()),
+                );
+            }
+        };
+        let semi = self.expect(&TokenKind::Semi, "after import path")?;
+        Ok(ImportDecl {
+            path,
+            span: kw.span.merge(semi.span),
+        })
+    }
+
+    fn parse_const(&mut self) -> Result<ConstDecl, ()> {
+        let kw = self.expect(&TokenKind::Const, "start of constant")?;
+        let (name, name_span) = self.expect_ident("constant name")?;
+        self.expect(&TokenKind::Colon, "after constant name")?;
+        let ty = self.parse_type()?;
+        self.expect(&TokenKind::Assign, "before constant value")?;
+        let value = self.parse_expr()?;
+        let semi = self.expect(&TokenKind::Semi, "after constant value")?;
+        Ok(ConstDecl {
+            name,
+            name_span,
+            ty,
+            value,
             span: kw.span.merge(semi.span),
         })
     }

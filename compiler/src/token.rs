@@ -12,7 +12,9 @@ pub enum TokenKind {
 
     // Keywords.
     Fn,
+    Import,
     Static,
+    Const,
     Enum,
     Struct,
     Let,
@@ -45,6 +47,7 @@ pub enum TokenKind {
     F32,
     F64,
     StrType,
+    VecType,
 
     // Delimiters and punctuation.
     LParen,
@@ -113,7 +116,9 @@ impl TokenKind {
     pub fn symbol(&self) -> &'static str {
         match self {
             TokenKind::Fn => "fn",
+            TokenKind::Import => "import",
             TokenKind::Static => "static",
+            TokenKind::Const => "const",
             TokenKind::Enum => "enum",
             TokenKind::Struct => "struct",
             TokenKind::Let => "let",
@@ -144,6 +149,7 @@ impl TokenKind {
             TokenKind::F32 => "f32",
             TokenKind::F64 => "f64",
             TokenKind::StrType => "str",
+            TokenKind::VecType => "vec",
             TokenKind::LParen => "(",
             TokenKind::RParen => ")",
             TokenKind::LBrace => "{",

@@ -10,13 +10,16 @@
  *)
 
 program        = { item } EOF ;
-item           = function | global | enum_decl | struct_decl ;
+item           = function | global | const_decl | import_decl
+               | enum_decl | struct_decl ;
 
 function       = "fn" IDENT "(" [ param_list ] ")" [ "->" type ] block ;
 param_list     = param { "," param } ;
 param          = IDENT ":" type ;
 
 global         = "static" [ "mut" ] IDENT ":" type "=" expression ";" ;
+const_decl     = "const" IDENT ":" type "=" expression ";" ;
+import_decl    = "import" STRING ";" ;
 
 enum_decl      = "enum" IDENT "{" [ variant { "," variant } [ "," ] ] "}" ;
 variant        = IDENT [ "=" expression ] ;
@@ -27,6 +30,7 @@ field_decl     = IDENT ":" type ;
 type           = primitive
                | "[" type ";" INTEGER "]"
                | "[" type "]"
+               | "vec" "<" type ">"
                | "*" [ "mut" ] type
                | IDENT ;
 
@@ -150,10 +154,11 @@ OCTDIGIT       = "0"…"7" ;
 
 (* ----- reserved words (cannot be identifiers) -----
 
-   fn static enum struct let mut if else while loop break continue return
-   unsafe as true false
-   i8 i16 i32 i64 u8 u16 u32 u64 usize isize bool char f32 f64 str
+   fn import static const enum struct let mut if else while loop break
+   continue return unsafe as true false
+   i8 i16 i32 i64 u8 u16 u32 u64 usize isize bool char f32 f64 str vec
 
    Builtin function names, reserved everywhere (functions, bindings, parameters):
-   syscall alloc free print len
+   syscall alloc free print len vec_new vec_push vec_free vec_slice
+   read_file write_file panic assert
 *)

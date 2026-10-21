@@ -591,7 +591,9 @@ impl<'a> Lexer<'a> {
 fn keyword(text: &str) -> Option<TokenKind> {
     Some(match text {
         "fn" => TokenKind::Fn,
+        "import" => TokenKind::Import,
         "static" => TokenKind::Static,
+        "const" => TokenKind::Const,
         "enum" => TokenKind::Enum,
         "struct" => TokenKind::Struct,
         "let" => TokenKind::Let,
@@ -622,6 +624,7 @@ fn keyword(text: &str) -> Option<TokenKind> {
         "f32" => TokenKind::F32,
         "f64" => TokenKind::F64,
         "str" => TokenKind::StrType,
+        "vec" => TokenKind::VecType,
         _ => return None,
     })
 }

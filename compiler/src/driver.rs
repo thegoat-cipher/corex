@@ -7,6 +7,7 @@
 //!
 //! Tool lookup order: `COREX_LLVM_BIN`, then `PATH`, then `/usr/lib/llvm-N/bin`.
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
@@ -29,10 +30,104 @@ pub struct Artifacts {
 
 /// Lex, parse, and analyze without touching external tools.
 pub fn check(file: &SourceFile) -> Result<Frontend, Vec<Diagnostic>> {
-    let tokens = lexer::lex(&file.text)?;
+    let expanded = load_source(file)?;
+    let tokens = lexer::lex(&expanded.text)?;
     let program = parser::parse(&tokens)?;
     let analysis = semantic::analyze(&program)?;
     Ok(Frontend { program, analysis })
+}
+
+/// Expand `import "path";` declarations into one virtual source file. Imports
+/// are resolved relative to the importing file, deduplicated by canonical path,
+/// and concatenated into a single translation unit (flat global namespace).
+pub fn load_source(file: &SourceFile) -> Result<SourceFile, Vec<Diagnostic>> {
+    if file.expanded {
+        return Ok(file.clone());
+    }
+    if file.name.starts_with('<') {
+        return Ok(SourceFile::new(file.name.clone(), file.text.clone()));
+    }
+
+    struct Unit {
+        display: String,
+        text: String,
+        path: PathBuf,
+    }
+
+    let root_path = std::fs::canonicalize(&file.name)
+        .unwrap_or_else(|_| PathBuf::from(&file.name));
+    let mut units = vec![Unit {
+        display: file.name.clone(),
+        text: file.text.clone(),
+        path: root_path.clone(),
+    }];
+    let mut seen = HashSet::new();
+    seen.insert(root_path);
+
+    let mut index = 0;
+    while index < units.len() {
+        let imports = parse_imports(&units[index].text)?;
+        let base = units[index]
+            .path
+            .parent()
+            .map(|p| p.to_path_buf())
+            .unwrap_or_else(|| PathBuf::from("."));
+        for import in imports {
+            let raw = Path::new(&import.path);
+            let candidate = if raw.is_absolute() {
+                raw.to_path_buf()
+            } else {
+                base.join(raw)
+            };
+            let canonical = std::fs::canonicalize(&candidate).map_err(|e| {
+                vec![Diagnostic::error(
+                    "E0232",
+                    import.span,
+                    format!("cannot import `{}`: {e}", import.path),
+                )]
+            })?;
+            if !seen.insert(canonical.clone()) {
+                continue;
+            }
+            let text = std::fs::read_to_string(&canonical).map_err(|e| {
+                vec![Diagnostic::error(
+                    "E0232",
+                    import.span,
+                    format!("cannot read import `{}`: {e}", canonical.display()),
+                )]
+            })?;
+            units.push(Unit {
+                display: canonical.display().to_string(),
+                text,
+                path: canonical,
+            });
+        }
+        index += 1;
+    }
+
+    let mut combined = String::new();
+    let mut segments = Vec::new();
+    for unit in units {
+        if !combined.is_empty() && !combined.ends_with('\n') {
+            combined.push('\n');
+        }
+        segments.push((combined.len(), unit.display));
+        combined.push_str(&unit.text);
+        if !combined.ends_with('\n') {
+            combined.push('\n');
+        }
+    }
+    Ok(SourceFile::with_segments(
+        file.name.clone(),
+        combined,
+        segments,
+    ))
+}
+
+fn parse_imports(text: &str) -> Result<Vec<crate::ast::ImportDecl>, Vec<Diagnostic>> {
+    let tokens = lexer::lex(text)?;
+    let program = parser::parse(&tokens)?;
+    Ok(program.imports)
 }
 
 pub fn module_name(file: &SourceFile) -> String {

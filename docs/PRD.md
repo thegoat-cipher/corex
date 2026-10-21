@@ -20,7 +20,7 @@ The product thesis is narrow: a systems language whose entire semantics fit in o
 
 v0.1 succeeds when a developer can install a pinned toolchain, run `corex build hello.cx`, receive a static ELF, execute it on Linux x86-64, and rely on the documented behavior of arithmetic, memory, and `unsafe`.
 
-CoreX v0.2 is not a general-purpose application language. It is a single-compilation-unit language with no standard library, intended for programs that own their memory layout and speak to the kernel directly. It has first-class integers, `bool`, `char`, `f32`/`f64`, raw pointers, arrays, slices, `str`, enums, and structs, plus explicit globals, but no collections, formatting library, or package ecosystem.
+CoreX v0.2 is not a general-purpose application language. It is a single-program language with no standard library, intended for programs that own their memory layout and speak to the kernel directly. It has first-class integers, `bool`, `char`, `f32`/`f64`, raw pointers, arrays, slices, `str`, `vec<T>`, enums, and structs, plus explicit globals and file imports, but no general-purpose collections, formatting library, or package ecosystem.
 
 ## 2. Target developers
 
@@ -139,7 +139,7 @@ Unknown commands, unknown flags, missing operands, and unreadable files MUST pro
 
 **FR-23 Test deliverables.** The repository MUST contain: unit tests for lexer, parser, type checker, and code generation; integration tests that compile and execute programs and assert exit status and byte output; invalid-program tests that assert diagnostic code and span; and IR-verification tests using `llvm-as`. A single documented command MUST run all of them.
 
-### 4.7 Extended language features
+### 4.7 Extended language and runtime features
 
 **FR-24 Compound assignment and inference.** `+= -= *= /= %= &= |= ^= <<= >>=` MUST be statements assigning through a mutable place, with integer and (for arithmetic/remainder) float operands. `let` MAY omit its type annotation and MUST infer the initializer's type; a `void` initializer is `E0225`.
 
@@ -153,7 +153,19 @@ Unknown commands, unknown flags, missing operands, and unreadable files MUST pro
 
 **FR-29 Structs.** Structs MUST support comma-separated fields, natural layout, literals with exactly-one initialization per field, nested structs, arrays of structs, field access through places, value-copy semantics, and by-value parameters/returns. Direct recursive layout is `E0224`; unknown/missing/duplicate fields are `E0227`/`E0229`/`E0228`.
 
-*Verification for FR-24–FR-29:* `tests/features.rs` (end-to-end) and `tests/diagnostics.rs` (rejection codes).
+**FR-30 Dynamic arrays.** `vec<T>` MUST support `vec_new(capacity)` with the element type inferred from context, `vec_push(&mut v, value)`, `vec_free(&mut v)`, `vec_slice(&v)`, `len(v)`, indexed reads/writes, and geometric growth. `vec<T>` is a 24-byte `{data,len,cap}` header; copies are shallow and ownership is manual.
+
+**FR-31 Compile-time constants.** `const NAME: Type = expression;` MUST be evaluated at compile time, substituted at use sites, have no address, and support integers, `bool`, `char`, floats, enums, `str`, and pointers to globals. Aggregate constants and forward references are rejected.
+
+**FR-32 Imports.** `import "path.cx";` MUST resolve recursively relative to the importing file, deduplicate canonical paths, terminate cycles, and merge all items into one flat global namespace. Diagnostics MUST map spans back to the originating file and line.
+
+**FR-33 File I/O.** `read_file(path)` MUST return an owned `vec<u8>` (empty on failure); `write_file(path, data)` MUST create/truncate and return `0` or `-1`. Paths and data are byte strings; no `unsafe` is required.
+
+**FR-34 Error handling.** `panic(message)` and `assert(condition, message)` MUST write the message plus a newline to stderr and exit 101. A tail `panic` MUST satisfy return analysis. There are no exceptions, `Result`, `Option`, or `?`.
+
+**FR-35 Function pointers.** Function pointers are NOT required by the current compiler design: dispatch is expressed with enums, structs, and conditionals. The feature is explicitly not implemented.
+
+*Verification for FR-24–FR-35:* `tests/features.rs`, `tests/compiler_caps.rs` (end-to-end), and `tests/diagnostics.rs` (rejection codes).
 
 ## 5. Non-functional requirements
 
@@ -177,7 +189,7 @@ Detail lives in `docs/NFR.md`; this table is the index. Every performance figure
 
 | Area | v0.1 content |
 |---|---|
-| Language | The types, statements, operators, casts, arrays, pointers, functions, and `unsafe` blocks in FR-1..FR-17, plus compound assignment, inference, characters, globals, enums, floats, structs, slices, and strings in FR-24..FR-29 |
+| Language | The types, statements, operators, casts, arrays, pointers, functions, and `unsafe` blocks in FR-1..FR-17; compound assignment, inference, characters, globals, enums, floats, structs, slices, and strings in FR-24..FR-29; dynamic arrays, `const`, imports, file I/O, and panic/assert error handling in FR-30..FR-34 |
 | Semantics | Wrapping arithmetic, masked shifts, division-by-zero trap, no implicit conversions, no runtime |
 | Memory | `alloc`/`free` over `mmap`/`munmap`, raw pointers, no heap metadata |
 | Kernel interface | `syscall` builtin with up to six arguments and zero defaults |
@@ -203,7 +215,7 @@ The following are deliberate exclusions, not missing work:
 - **Generics.** No type parameters or monomorphization.
 - **Traits.** No type classes, interfaces, or operator overloading beyond the built-in operators.
 - **Closures.** No function values, captures, or lambdas.
-- **Modules and packages.** A program is one compilation unit; there is no import system or package manager.
+- **Namespaced modules and packages.** A program is one compilation unit assembled from file imports with a flat namespace; there is no visibility system or package manager.
 - **Macros.** No declarative or procedural macros.
 - **Threading.** No threads, atomics, synchronization, or concurrency primitives.
 - **FFI to C.** No `extern` declarations, no C ABI calls, no linking against C libraries.

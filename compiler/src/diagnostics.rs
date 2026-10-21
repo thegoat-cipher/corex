@@ -51,17 +51,18 @@ impl Diagnostic {
     }
 
     pub fn render(&self, file: &SourceFile) -> String {
-        let (line, col) = file.location(self.span.start);
-        let gutter = file.line_count().to_string().len();
+        let (global_line, _) = file.location(self.span.start);
+        let (source_name, line, col) = file.source_location(self.span.start);
+        let gutter = line.to_string().len().max(global_line.to_string().len());
         let raw_len = self.span.end.saturating_sub(self.span.start);
-        let (line_text, caret_start) = crop_line(file.line_text(line), col.saturating_sub(1));
+        let (line_text, caret_start) = crop_line(file.line_text(global_line), col.saturating_sub(1));
         let caret_len = raw_len
             .max(1)
             .min(line_text.chars().count().saturating_sub(caret_start).max(1));
 
         let mut out = String::new();
         let _ = writeln!(out, "error[{}]: {}", self.code, self.message);
-        let _ = writeln!(out, "{:width$}--> {}:{}:{}", "", file.name, line, col, width = gutter + 1);
+        let _ = writeln!(out, "{:width$}--> {}:{}:{}", "", source_name, line, col, width = gutter + 1);
         let _ = writeln!(out, "{:width$} |", "", width = gutter);
         let _ = writeln!(out, "{:>width$} | {}", line, line_text, width = gutter);
         let _ = writeln!(
@@ -114,10 +115,19 @@ fn crop_line(line: &str, caret_byte: usize) -> (String, usize) {
 }
 
 /// A parsed source file; knows how to map byte offsets to line/column.
+#[derive(Clone)]
 pub struct SourceFile {
     pub name: String,
     pub text: String,
     line_starts: Vec<usize>,
+    segments: Vec<SourceSegment>,
+    pub(crate) expanded: bool,
+}
+
+#[derive(Clone, Debug)]
+struct SourceSegment {
+    start: usize,
+    name: String,
 }
 
 impl SourceFile {
@@ -129,10 +139,54 @@ impl SourceFile {
                 line_starts.push(i + 1);
             }
         }
+        let name = name.into();
         SourceFile {
-            name: name.into(),
+            segments: vec![SourceSegment {
+                start: 0,
+                name: name.clone(),
+            }],
+            name,
             text,
             line_starts,
+            expanded: false,
+        }
+    }
+
+    /// Build a virtual source file assembled from several real files. Segment
+    /// starts must be byte offsets into `text`, in ascending order.
+    pub fn with_segments(
+        name: impl Into<String>,
+        text: impl Into<String>,
+        segments: Vec<(usize, String)>,
+    ) -> SourceFile {
+        let text: String = text.into();
+        let name: String = name.into();
+        let mut line_starts = vec![0];
+        for (i, b) in text.bytes().enumerate() {
+            if b == b'\n' {
+                line_starts.push(i + 1);
+            }
+        }
+        let mut segments: Vec<SourceSegment> = segments
+            .into_iter()
+            .map(|(start, name)| SourceSegment { start, name })
+            .collect();
+        segments.sort_by_key(|s| s.start);
+        if segments.first().map(|s| s.start) != Some(0) {
+            segments.insert(
+                0,
+                SourceSegment {
+                    start: 0,
+                    name: name.clone(),
+                },
+            );
+        }
+        SourceFile {
+            name,
+            text,
+            line_starts,
+            segments,
+            expanded: true,
         }
     }
 
@@ -148,6 +202,24 @@ impl SourceFile {
             Err(i) => i - 1,
         };
         (idx + 1, pos - self.line_starts[idx] + 1)
+    }
+
+    /// Source name and 1-based local line/column for a byte offset. Without
+    /// segments this is identical to `location`.
+    pub fn source_location(&self, pos: usize) -> (String, usize, usize) {
+        let pos = pos.min(self.text.len());
+        let (global_line, col) = self.location(pos);
+        let seg = self
+            .segments
+            .iter()
+            .rev()
+            .find(|s| s.start <= pos)
+            .or_else(|| self.segments.first());
+        let Some(seg) = seg else {
+            return (self.name.clone(), global_line, col);
+        };
+        let (seg_line, _) = self.location(seg.start);
+        (seg.name.clone(), global_line - seg_line + 1, col)
     }
 
     pub fn line_text(&self, line: usize) -> &str {

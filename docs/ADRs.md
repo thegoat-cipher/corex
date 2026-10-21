@@ -770,3 +770,56 @@ for aggregates and a non-C ABI. `Rc<StructInfo>` uses interior mutability, but
 only semantic analysis mutates it; after analysis the layout is immutable in
 practice. Forward references between constants are not supported, which is
 documented rather than hidden.
+
+## ADR-0024 — Compiler-capability runtime: vectors, imports, files, and panics
+
+**Date:** 2026-10-21
+**Status:** Accepted
+**Context:** CoreX needed enough runtime and data-structure support to host
+compiler-style programs: token streams and AST node lists, source buffers,
+identifiers/paths, module-sized source files, whole-file I/O, and unrecoverable
+error paths. The language already had structs, enums, pointers, slices, and
+strings; adding general generics/traits/function pointers would be much larger
+than the requirement.
+
+**Decision:**
+
+1. **One built-in generic container.** `vec<T>` is a compiler-known type with a
+   24-byte `{data,len,cap}` header, not a user-definable generic. `vec_new`,
+   `vec_push`, `vec_free`, and `vec_slice` are builtins; `len` and indexing work
+   through the existing slice/array paths. Element types may be any sized type,
+   including structs, slices, and `str`. Growth is `max(4, cap * 2)` with
+   allocate/copy/free, using `__corex_memcpy`.
+2. **Shallow vector ownership.** Copying a vector copies the header and shares
+   the backing block. There is no move checking or reference counting; the
+   documentation states the double-free hazard. This matches CoreX's manual
+   memory model and keeps the implementation small.
+3. **Compile-time `const`.** `const` declarations are evaluated by the same
+   restricted constant evaluator as globals and inlined at use sites. They have
+   no storage/address. Arrays/structs/vectors and forward references are
+   rejected; this is enough for token kinds, sizes, and path/name constants.
+4. **Imports are file inclusion with a flat namespace.** `import "path";` is
+   resolved recursively, canonicalized, deduplicated, and appended to one
+   virtual source. Each file is a module in the organizational sense, but all
+   top-level names share one global namespace. Source segments preserve
+   per-file diagnostic names and line numbers. Namespace/visibility syntax was
+   intentionally not added in this pass.
+5. **Whole-file I/O builtins.** `read_file` uses `open`/`lseek`/`read`/`close`
+   and returns a caller-owned `vec<u8>`; `write_file` uses
+   `open(O_TRUNC|O_CREAT)`/looped `write`/`close` and returns `0`/`-1`. Paths
+   are copied to NUL-terminated heap buffers and freed after each call. Both are
+   safe builtins; no `unsafe` block is required.
+6. **Panic/assert instead of exceptions.** `panic` and `assert` write a message
+   plus newline to fd 2 and exit 101. A tail `panic` is a diverging expression
+   for return analysis. There is no `Result`/`Option`/`?`; recoverable failures
+   are ordinary return values.
+7. **No function pointers.** Compiler dispatch is expressed with enums,
+   structs, and conditionals; no runtime indirect-call facility is needed by the
+   current implementation. Function pointers remain out of scope.
+
+**Consequences:** Compiler-shaped programs can now tokenize, build node lists,
+read/write whole files, split across files, and abort deterministically without
+libc. The costs are explicit: flat module names, shallow vector copies, unchecked
+vector-capacity overflow, whole-file I/O rather than streaming handles, and
+`panic`-based fatal errors. These limits are documented in the spec, memory
+model, README, and tests.

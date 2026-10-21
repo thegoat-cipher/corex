@@ -4,7 +4,7 @@ Status values: NOT STARTED, IN PROGRESS, BLOCKED, COMPLETED. Validated status
 changed only after the acceptance criteria passed. Evidence names the command or
 test that proves completion; counts are from the run on 2026-10-21.
 
-Test totals: `cargo test` → **133 passed, 0 failed** (53 unit, 80 integration).
+Test totals: `cargo test` → **142 passed, 0 failed** (53 unit, 89 integration).
 
 | ID | Description | Workstream | Priority | Depends on | Status | Acceptance criteria | Validation evidence |
 |---|---|---|---|---|---|---|---|
@@ -12,7 +12,7 @@ Test totals: `cargo test` → **133 passed, 0 failed** (53 unit, 80 integration)
 | T-002 | Install user-local Rust toolchain | Maintainer (Environment) | P0 | — | COMPLETED | `rustc` and `cargo` resolve without root | `rustc 1.99.1`; `cargo 1.99.1`; installed under `$HOME/.cargo` / `$HOME/.rustup` |
 | T-003 | Install user-local LLVM 20 toolchain | Maintainer (Environment) | P0 | — | COMPLETED | `llvm-as`, `llc`, `opt`, `llvm-config` run; freestanding static ELF links and executes | `llvm-as --version` → 20.1.8; `llc --version` → 20.1.8; hand-written asm binary exits 42 |
 | T-004 | Research existing systems languages and compiler patterns | Research (parallel workstream) | P0 | T-001 | COMPLETED | Evidence-labelled findings with source URLs and dates | `docs/research.md` (868 lines, 46 cited URLs; spot-checked HTTP 200); `docs/competitor-analysis.md` (140 lines) |
-| T-005 | Product requirements and non-functional requirements | Product Requirements (parallel workstream) | P0 | T-004 | COMPLETED | Vision, users, use cases, numbered FRs, MVP, non-goals, risks, DoD, measurable NFRs | `docs/PRD.md` (23 FRs, 13 non-goals, 12-point DoD); `docs/NFR.md` (62 NFRs, each Enforced/Unvalidated/Aspirational) |
+| T-005 | Product requirements and non-functional requirements | Product Requirements (parallel workstream) | P0 | T-004 | COMPLETED | Vision, users, use cases, numbered FRs, MVP, non-goals, risks, DoD, measurable NFRs | `docs/PRD.md` (35 FRs, 13 non-goals, 12-point DoD); `docs/NFR.md` (62 NFRs, each Enforced/Unvalidated/Aspirational) |
 | T-006 | Language specification and normative grammar | Language Specification (isolated workstream) | P0 | T-005 | COMPLETED | Every implemented construct documented; grammar matches parser | `docs/language-spec.md`; `docs/grammar.ebnf`; parser tests parse the documented forms |
 | T-007 | Memory model manifesto | Memory Management (isolated workstream) | P0 | T-006 | COMPLETED | Syntax/semantics for stack, heap, pointers, unsafe; safety invariants; honest guarantee matrix; no false safety claims | `docs/memory-model.md` §3–§7; enforced by `semantic.rs` (`E0209`, `E0205`, `E0220`, `E0222`) and tested |
 | T-008 | Lexer with spans, comments, literals, error codes | Lexer/Parser (isolated workstream) | P0 | T-006 | COMPLETED | Toolchain-free tokenization; keywords, numbers in 4 bases, escapes, comments; structured errors | `cargo test --lib lexer::` → 8 passed |
@@ -42,6 +42,12 @@ Test totals: `cargo test` → **133 passed, 0 failed** (53 unit, 80 integration)
 | T-044 | Structs: layout, literals, fields, by-value ABI | Maintainer (Language + Backend) | P0 | T-042 | COMPLETED | Natural layout, nested/array structs, copy semantics, by-value params/returns, field assignment | `tests/features.rs::struct_values_fields_params_returns_and_arrays`; `tests/diagnostics.rs::rejects_recursive_structs_and_bad_fields` |
 | T-045 | Slices, `str`, `len`, and ranges | Maintainer (Language + Backend) | P0 | T-044 | COMPLETED | `[T]`/`str` two-word values, array-to-slice coercion, indexing, `len`, `a..b` sub-slices, checked bounds | `tests/features.rs::slices_strings_len_and_ranges`, `runtime_slice_bounds_abort`; `tests/diagnostics.rs::rejects_invalid_slice_ranges_and_printables` |
 | T-046 | Documentation, grammar, and example for extended features | Documentation (isolated workstream) | P0 | T-041…T-045 | COMPLETED | Spec/grammar/README/memory/architecture/PRD/task tracker match implemented behavior; checked-in example | `examples/features.cx`; `tests/features.rs::features_example_runs`; docs updated 2026-10-21 |
+| T-049 | Dynamic arrays (`vec<T>`) for compiler data | Maintainer (Language + Backend) | P0 | T-046 | COMPLETED | `vec_new`/`vec_push`/`vec_free`/`vec_slice`, `len`, indexing, growth, element types incl. structs | `tests/compiler_caps.rs::dynamic_arrays_grow_index_and_free`, `recursive_structs_via_pointers`; IR verified |
+| T-050 | Compile-time `const` declarations | Maintainer (Language) | P0 | T-046 | COMPLETED | Scalar/str/pointer constants, previous-constant references, no address, init errors | `tests/compiler_caps.rs::compile_time_constants`; `tests/diagnostics.rs` |
+| T-051 | File I/O builtins | Maintainer (Runtime + Language) | P0 | T-049 | COMPLETED | `read_file` returns owned `vec<u8>`; `write_file` returns 0/-1; syscall helpers and failure behavior | `tests/compiler_caps.rs::file_io_round_trip_and_missing_file` |
+| T-052 | Recursive imports and multi-file diagnostics | Maintainer (Driver) | P0 | T-049 | COMPLETED | Relative import resolution, dedup/cycles, flat namespace, per-file span mapping | `tests/compiler_caps.rs::imports_resolve_relative_files_and_diagnose_paths` |
+| T-053 | Panic/assert error handling | Maintainer (Language + Backend) | P0 | T-049 | COMPLETED | Message + newline on fd 2, exit 101, panic satisfies return analysis | `tests/compiler_caps.rs::panic_and_assert_abort_with_messages`, `panic_satisfies_return_analysis` |
+| T-054 | Compiler-data capability example and docs | Documentation (isolated workstream) | P0 | T-049…T-053 | COMPLETED | Tokenizer example using enums/structs/const/vec/strings/slices/assert; docs and grammar updated | `examples/compiler_data.cx`; `tests/compiler_caps.rs::compiler_data_example_tokenizes`; README/spec/grammar/memory/architecture/PRD updated |
 
 ## Backlog (NOT STARTED)
 
@@ -58,6 +64,6 @@ Test totals: `cargo test` → **133 passed, 0 failed** (53 unit, 80 integration)
 
 ## Status summary
 
-- COMPLETED: T-001 … T-028 and T-041 … T-046 (34 tasks).
+- COMPLETED: T-001 … T-028, T-041 … T-046, and T-049 … T-054 (40 tasks).
 - IN PROGRESS: none.
 - BLOCKED: none.

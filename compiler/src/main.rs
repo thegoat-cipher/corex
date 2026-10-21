@@ -145,7 +145,14 @@ fn load(file: &Path) -> Result<SourceFile, i32> {
             eprintln!("error: cannot read stdin: {e}");
             return Err(2);
         }
-        return Ok(SourceFile::new("<stdin>", text));
+        let base = SourceFile::new("<stdin>", text);
+        return match driver::load_source(&base) {
+            Ok(f) => Ok(f),
+            Err(diags) => {
+                report(&base, &diags);
+                Err(exit_code_for(&diags))
+            }
+        };
     }
 
     let text = match std::fs::read_to_string(file) {
@@ -155,7 +162,14 @@ fn load(file: &Path) -> Result<SourceFile, i32> {
             return Err(2);
         }
     };
-    Ok(SourceFile::new(file.display().to_string(), text))
+    let base = SourceFile::new(file.display().to_string(), text);
+    match driver::load_source(&base) {
+        Ok(f) => Ok(f),
+        Err(diags) => {
+            report(&base, &diags);
+            Err(exit_code_for(&diags))
+        }
+    }
 }
 
 fn report(file: &SourceFile, diags: &[Diagnostic]) {

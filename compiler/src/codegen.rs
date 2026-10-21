@@ -38,6 +38,9 @@ pub fn generate(program: &Program, analysis: &Analysis, module_name: &str) -> St
         used_print_char: false,
         used_print_f64: false,
         used_print_str: false,
+        used_memcpy: false,
+        used_file_io: false,
+        used_panic: false,
         used_print_i64: false,
         used_print_bool: false,
         current_ret: Type::Unit,
@@ -113,6 +116,9 @@ struct CodeGen<'a> {
     used_print_char: bool,
     used_print_f64: bool,
     used_print_str: bool,
+    used_memcpy: bool,
+    used_file_io: bool,
+    used_panic: bool,
     used_print_i64: bool,
     used_print_bool: bool,
     current_ret: Type,
@@ -195,7 +201,8 @@ impl<'a> CodeGen<'a> {
             || self.used_print_bool
             || self.used_print_char
             || self.used_print_f64
-            || self.used_print_str;
+            || self.used_print_str
+            || self.used_panic;
         if need_syscall {
             h.push_str(
                 "define internal i64 @__corex_syscall(i64 %nr, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5, i64 %a6) {\nentry:\n  %r = call i64 asm sideeffect \"syscall\", \"={rax},{rax},{rdi},{rsi},{rdx},{r10},{r8},{r9},~{rcx},~{r11},~{memory}\"(i64 %nr, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5, i64 %a6)\n  ret i64 %r\n}\n\n",
@@ -363,6 +370,110 @@ ok:
             h.push_str(&format!(
                 "define internal void @__corex_print_bool(i8 %value) {{\nentry:\n  %t = icmp ne i8 %value, 0\n  %p = select i1 %t, ptr {t}, ptr {f}\n  %n = select i1 %t, i64 4, i64 5\n  %pi = ptrtoint ptr %p to i64\n  %w = call i64 @__corex_syscall(i64 1, i64 1, i64 %pi, i64 %n, i64 0, i64 0, i64 0)\n  call void @__corex_newline()\n  ret void\n}}\n\n"
             ));
+        }
+        if self.used_memcpy {
+            h.push_str(
+                "define internal void @__corex_memcpy(ptr %dst, ptr %src, i64 %n) {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [ 0, %entry ], [ %next, %body ]\n  %cond = icmp ult i64 %i, %n\n  br i1 %cond, label %body, label %done\nbody:\n  %sp = getelementptr inbounds i8, ptr %src, i64 %i\n  %b = load i8, ptr %sp, align 1\n  %dp = getelementptr inbounds i8, ptr %dst, i64 %i\n  store i8 %b, ptr %dp, align 1\n  %next = add i64 %i, 1\n  br label %loop\ndone:\n  ret void\n}\n\n",
+            );
+        }
+        if self.used_panic {
+            let nl = self.add_string(b"\n");
+            h.push_str(&format!(
+                "define internal void @__corex_panic(ptr %msg, i64 %len) {{\nentry:\n  %mp = ptrtoint ptr %msg to i64\n  %w = call i64 @__corex_syscall(i64 1, i64 2, i64 %mp, i64 %len, i64 0, i64 0, i64 0)\n  %np = ptrtoint ptr {nl} to i64\n  %nw = call i64 @__corex_syscall(i64 1, i64 2, i64 %np, i64 1, i64 0, i64 0, i64 0)\n  %x = call i64 @__corex_syscall(i64 60, i64 101, i64 0, i64 0, i64 0, i64 0, i64 0)\n  unreachable\n}}\n\n"
+            ));
+        }
+        if self.used_file_io {
+            h.push_str(
+                r#"define internal ptr @__corex_cstr(ptr %data, i64 %len) {
+entry:
+  %n = add i64 %len, 1
+  %p = call ptr @__corex_alloc(i64 %n)
+  call void @__corex_memcpy(ptr %p, ptr %data, i64 %len)
+  %end = getelementptr inbounds i8, ptr %p, i64 %len
+  store i8 0, ptr %end, align 1
+  ret ptr %p
+}
+
+define internal i32 @__corex_write_all(i64 %fd, ptr %data, i64 %len) {
+entry:
+  br label %loop
+loop:
+  %off = phi i64 [ 0, %entry ], [ %next, %more ]
+  %left = sub i64 %len, %off
+  %done = icmp eq i64 %left, 0
+  br i1 %done, label %finish, label %body
+body:
+  %p = getelementptr inbounds i8, ptr %data, i64 %off
+  %pi = ptrtoint ptr %p to i64
+  %w = call i64 @__corex_syscall(i64 1, i64 %fd, i64 %pi, i64 %left, i64 0, i64 0, i64 0)
+  %bad = icmp sle i64 %w, 0
+  br i1 %bad, label %fail, label %more
+more:
+  %next = add i64 %off, %w
+  br label %loop
+finish:
+  ret i32 0
+fail:
+  ret i32 -1
+}
+
+define internal { ptr, i64, i64 } @__corex_read_file(ptr %path, i64 %plen) {
+entry:
+  %c = call ptr @__corex_cstr(ptr %path, i64 %plen)
+  %ci = ptrtoint ptr %c to i64
+  %fd = call i64 @__corex_syscall(i64 2, i64 %ci, i64 0, i64 0, i64 0, i64 0, i64 0)
+  %bad = icmp slt i64 %fd, 0
+  br i1 %bad, label %fail, label %ok
+fail:
+  %clen0 = add i64 %plen, 1
+  call void @__corex_free(ptr %c, i64 %clen0)
+  ret { ptr, i64, i64 } zeroinitializer
+ok:
+  %size = call i64 @__corex_syscall(i64 8, i64 %fd, i64 0, i64 2, i64 0, i64 0, i64 0)
+  %back = call i64 @__corex_syscall(i64 8, i64 %fd, i64 0, i64 0, i64 0, i64 0, i64 0)
+  %empty = icmp sle i64 %size, 0
+  br i1 %empty, label %none, label %alloc
+none:
+  %cl0 = call i64 @__corex_syscall(i64 3, i64 %fd, i64 0, i64 0, i64 0, i64 0, i64 0)
+  %clen1 = add i64 %plen, 1
+  call void @__corex_free(ptr %c, i64 %clen1)
+  ret { ptr, i64, i64 } zeroinitializer
+alloc:
+  %data = call ptr @__corex_alloc(i64 %size)
+  %datapi = ptrtoint ptr %data to i64
+  %r = call i64 @__corex_syscall(i64 0, i64 %fd, i64 %datapi, i64 %size, i64 0, i64 0, i64 0)
+  %cl = call i64 @__corex_syscall(i64 3, i64 %fd, i64 0, i64 0, i64 0, i64 0, i64 0)
+  %clen2 = add i64 %plen, 1
+  call void @__corex_free(ptr %c, i64 %clen2)
+  %neg = icmp slt i64 %r, 0
+  %len = select i1 %neg, i64 0, i64 %r
+  %v0 = insertvalue { ptr, i64, i64 } zeroinitializer, ptr %data, 0
+  %v1 = insertvalue { ptr, i64, i64 } %v0, i64 %len, 1
+  %v2 = insertvalue { ptr, i64, i64 } %v1, i64 %size, 2
+  ret { ptr, i64, i64 } %v2
+}
+
+define internal i32 @__corex_write_file(ptr %path, i64 %plen, ptr %data, i64 %dlen) {
+entry:
+  %c = call ptr @__corex_cstr(ptr %path, i64 %plen)
+  %ci = ptrtoint ptr %c to i64
+  %fd = call i64 @__corex_syscall(i64 2, i64 %ci, i64 577, i64 420, i64 0, i64 0, i64 0)
+  %bad = icmp slt i64 %fd, 0
+  br i1 %bad, label %fail, label %ok
+fail:
+  %clen0 = add i64 %plen, 1
+  call void @__corex_free(ptr %c, i64 %clen0)
+  ret i32 -1
+ok:
+  %wr = call i32 @__corex_write_all(i64 %fd, ptr %data, i64 %dlen)
+  %cl = call i64 @__corex_syscall(i64 3, i64 %fd, i64 0, i64 0, i64 0, i64 0, i64 0)
+  %clen1 = add i64 %plen, 1
+  call void @__corex_free(ptr %c, i64 %clen1)
+  ret i32 %wr
+}
+
+"#,
+            );
         }
         if self.used_free {
             h.push_str(
@@ -718,7 +829,11 @@ ok:
     fn store_value(&mut self, dest: &str, val: &Val) {
         match val.ty {
             Type::Unit => {}
-            Type::Array { .. } | Type::Struct(_) | Type::Slice(_) | Type::Str => {
+            Type::Array { .. }
+            | Type::Struct(_)
+            | Type::Slice(_)
+            | Type::Str
+            | Type::Vec(_) => {
                 // Aggregate values are represented by a pointer to storage;
                 // materialize the value before copying it into `dest`.
                 let loaded = self.fresh_val();
@@ -847,7 +962,12 @@ ok:
                     Val { ssa: ptr, ty }
                 }
             }
-            ExprKind::Ident(_) => {
+            ExprKind::Ident(name) => {
+                if self.analysis.idents.get(&e.id).is_none() {
+                    if let Some((cty, cv)) = self.analysis.consts.get(name).cloned() {
+                        return self.const_val(&cty, &cv);
+                    }
+                }
                 let (ptr, ty) = self.gen_place(e);
                 if ty.is_aggregate() {
                     Val { ssa: ptr, ty }
@@ -944,13 +1064,18 @@ ok:
                 let (data, len, elem) = if let ExprKind::Str(bytes) = &base.kind {
                     (self.add_string(bytes), bytes.len().to_string(), Type::Int(IntTy::U8))
                 } else {
-                    let base_is_place = matches!(
-                        base.kind,
-                        ExprKind::Ident(_)
-                            | ExprKind::Field { .. }
-                            | ExprKind::Index { .. }
-                            | ExprKind::Unary { op: UnOp::Deref, .. }
+                    let const_base = matches!(
+                        &base.kind,
+                        ExprKind::Ident(name) if self.analysis.consts.contains_key(name)
                     );
+                    let base_is_place = !const_base
+                        && matches!(
+                            base.kind,
+                            ExprKind::Ident(_)
+                                | ExprKind::Field { .. }
+                                | ExprKind::Index { .. }
+                                | ExprKind::Unary { op: UnOp::Deref, .. }
+                        );
                     let (base_ptr, base_ty) = if base_is_place {
                         self.gen_place(base)
                     } else {
@@ -1518,10 +1643,265 @@ ok:
                             ty: Type::Int(IntTy::Usize),
                         }
                     }
+                    Type::Vec(_) => {
+                        let p = self.vec_field(&v.ssa, 1);
+                        let n = self.fresh_val();
+                        self.inst(format!("{n} = load i64, ptr {p}, align 8"));
+                        Val {
+                            ssa: n,
+                            ty: Type::Int(IntTy::Usize),
+                        }
+                    }
                     _ => Val {
                         ssa: "0".to_string(),
                         ty: Type::Int(IntTy::Usize),
                     },
+                }
+            }
+            Callee::Panic => {
+                let msg = self.gen_expr(&args[0]);
+                let (data, len) = self.load_slice_parts(&msg.ssa);
+                self.used_panic = true;
+                self.terminate(format!(
+                    "call void @__corex_panic(ptr {data}, i64 {len})\n  unreachable"
+                ));
+                Val {
+                    ssa: String::new(),
+                    ty: Type::Unit,
+                }
+            }
+            Callee::Assert => {
+                let cond = self.gen_expr(&args[0]);
+                let msg = self.gen_expr(&args[1]);
+                let (data, len) = self.load_slice_parts(&msg.ssa);
+                let ok = self.fresh_val();
+                self.inst(format!("{ok} = icmp ne i8 {}, 0", cond.ssa));
+                let good_l = self.fresh_label();
+                let bad_l = self.fresh_label();
+                self.terminate(format!(
+                    "br i1 {ok}, label %{good_l}, label %{bad_l}"
+                ));
+                self.label(&bad_l);
+                self.used_panic = true;
+                self.terminate(format!(
+                    "call void @__corex_panic(ptr {data}, i64 {len})\n  unreachable"
+                ));
+                self.label(&good_l);
+                Val {
+                    ssa: String::new(),
+                    ty: Type::Unit,
+                }
+            }
+            Callee::ReadFile => {
+                let path = self.gen_expr(&args[0]);
+                let (pdata, plen) = self.load_slice_parts(&path.ssa);
+                self.used_file_io = true;
+                self.used_alloc = true;
+                self.used_free = true;
+                self.used_memcpy = true;
+                self.used_syscall = true;
+                let res = self.fresh_val();
+                self.inst(format!(
+                    "{res} = call {{ ptr, i64, i64 }} @__corex_read_file(ptr {pdata}, i64 {plen})"
+                ));
+                let tmp = self.fresh_val();
+                self.entry.push_str(&format!(
+                    "  {tmp} = alloca {{ ptr, i64, i64 }}, align 8\n"
+                ));
+                self.inst(format!(
+                    "store {{ ptr, i64, i64 }} {res}, ptr {tmp}, align 8"
+                ));
+                Val {
+                    ssa: tmp,
+                    ty: ty.clone(),
+                }
+            }
+            Callee::WriteFile => {
+                let path = self.gen_expr(&args[0]);
+                let data = self.gen_expr(&args[1]);
+                let (pdata, plen) = self.load_slice_parts(&path.ssa);
+                let (ddata, dlen) = self.load_slice_parts(&data.ssa);
+                self.used_file_io = true;
+                self.used_alloc = true;
+                self.used_free = true;
+                self.used_memcpy = true;
+                self.used_syscall = true;
+                let res = self.fresh_val();
+                self.inst(format!(
+                    "{res} = call i32 @__corex_write_file(ptr {pdata}, i64 {plen}, ptr {ddata}, i64 {dlen})"
+                ));
+                Val {
+                    ssa: res,
+                    ty: Type::Int(IntTy::I32),
+                }
+            }
+            Callee::VecNew => {
+                let elem = ty.vec_elem().unwrap_or(Type::Int(IntTy::U8));
+                let esize = elem.size_bytes();
+                let cap = self.gen_expr(&args[0]);
+                let vecptr = self.fresh_val();
+                self.entry.push_str(&format!(
+                    "  {vecptr} = alloca {{ ptr, i64, i64 }}, align 8\n"
+                ));
+                let is_zero = self.fresh_val();
+                self.inst(format!("{is_zero} = icmp eq i64 {}, 0", cap.ssa));
+                let alloc_l = self.fresh_label();
+                let empty_l = self.fresh_label();
+                let join_l = self.fresh_label();
+                self.terminate(format!(
+                    "br i1 {is_zero}, label %{empty_l}, label %{alloc_l}"
+                ));
+                self.label(&alloc_l);
+                self.used_alloc = true;
+                let bytes = self.fresh_val();
+                self.inst(format!("{bytes} = mul i64 {}, {esize}", cap.ssa));
+                let data = self.fresh_val();
+                self.inst(format!("{data} = call ptr @__corex_alloc(i64 {bytes})"));
+                self.terminate(format!("br label %{join_l}"));
+                self.label(&empty_l);
+                self.terminate(format!("br label %{join_l}"));
+                self.label(&join_l);
+                let data_phi = self.fresh_val();
+                self.inst(format!(
+                    "{data_phi} = phi ptr [ {data}, %{alloc_l} ], [ null, %{empty_l} ]"
+                ));
+                let f0 = self.vec_field(&vecptr, 0);
+                self.inst(format!("store ptr {data_phi}, ptr {f0}, align 8"));
+                let f1 = self.vec_field(&vecptr, 1);
+                self.inst(format!("store i64 0, ptr {f1}, align 8"));
+                let f2 = self.vec_field(&vecptr, 2);
+                self.inst(format!("store i64 {}, ptr {f2}, align 8", cap.ssa));
+                Val {
+                    ssa: vecptr,
+                    ty: ty.clone(),
+                }
+            }
+            Callee::VecPush => {
+                let vecptr = self.gen_expr(&args[0]).ssa;
+                let value = self.gen_expr(&args[1]);
+                let elem = value.ty.clone();
+                let esize = elem.size_bytes();
+                let f0 = self.vec_field(&vecptr, 0);
+                let f1 = self.vec_field(&vecptr, 1);
+                let f2 = self.vec_field(&vecptr, 2);
+                let data = self.fresh_val();
+                let len = self.fresh_val();
+                let cap = self.fresh_val();
+                self.inst(format!("{data} = load ptr, ptr {f0}, align 8"));
+                self.inst(format!("{len} = load i64, ptr {f1}, align 8"));
+                self.inst(format!("{cap} = load i64, ptr {f2}, align 8"));
+                let full = self.fresh_val();
+                self.inst(format!("{full} = icmp eq i64 {len}, {cap}"));
+                let grow_l = self.fresh_label();
+                let nogrow_l = self.fresh_label();
+                let join_l = self.fresh_label();
+                self.terminate(format!(
+                    "br i1 {full}, label %{grow_l}, label %{nogrow_l}"
+                ));
+                self.label(&grow_l);
+                self.used_alloc = true;
+                self.used_free = true;
+                self.used_memcpy = true;
+                let dbl = self.fresh_val();
+                let isz = self.fresh_val();
+                let ncap = self.fresh_val();
+                self.inst(format!("{dbl} = mul i64 {cap}, 2"));
+                self.inst(format!("{isz} = icmp eq i64 {cap}, 0"));
+                self.inst(format!("{ncap} = select i1 {isz}, i64 4, i64 {dbl}"));
+                let nbytes = self.fresh_val();
+                self.inst(format!("{nbytes} = mul i64 {ncap}, {esize}"));
+                let ndata = self.fresh_val();
+                self.inst(format!("{ndata} = call ptr @__corex_alloc(i64 {nbytes})"));
+                let oldbytes = self.fresh_val();
+                self.inst(format!("{oldbytes} = mul i64 {len}, {esize}"));
+                self.inst(format!(
+                    "call void @__corex_memcpy(ptr {ndata}, ptr {data}, i64 {oldbytes})"
+                ));
+                let cbytes = self.fresh_val();
+                self.inst(format!("{cbytes} = mul i64 {cap}, {esize}"));
+                self.inst(format!(
+                    "call void @__corex_free(ptr {data}, i64 {cbytes})"
+                ));
+                self.inst(format!("store ptr {ndata}, ptr {f0}, align 8"));
+                self.inst(format!("store i64 {ncap}, ptr {f2}, align 8"));
+                self.terminate(format!("br label %{join_l}"));
+                self.label(&nogrow_l);
+                self.terminate(format!("br label %{join_l}"));
+                self.label(&join_l);
+                let data2 = self.fresh_val();
+                self.inst(format!(
+                    "{data2} = phi ptr [ {ndata}, %{grow_l} ], [ {data}, %{nogrow_l} ]"
+                ));
+                let slot = self.fresh_val();
+                self.inst(format!(
+                    "{slot} = getelementptr inbounds {}, ptr {data2}, i64 {len}",
+                    elem.llvm()
+                ));
+                self.store_value(&slot, &value);
+                let nlen = self.fresh_val();
+                self.inst(format!("{nlen} = add i64 {len}, 1"));
+                self.inst(format!("store i64 {nlen}, ptr {f1}, align 8"));
+                Val {
+                    ssa: String::new(),
+                    ty: Type::Unit,
+                }
+            }
+            Callee::VecFree => {
+                let vecptr = self.gen_expr(&args[0]).ssa;
+                let elem = self
+                    .analysis
+                    .expr_types
+                    .get(&args[0].id)
+                    .and_then(|t| t.pointee().cloned())
+                    .and_then(|t| t.vec_elem())
+                    .unwrap_or(Type::Int(IntTy::U8));
+                let esize = elem.size_bytes();
+                let f0 = self.vec_field(&vecptr, 0);
+                let f1 = self.vec_field(&vecptr, 1);
+                let f2 = self.vec_field(&vecptr, 2);
+                let data = self.fresh_val();
+                let cap = self.fresh_val();
+                self.inst(format!("{data} = load ptr, ptr {f0}, align 8"));
+                self.inst(format!("{cap} = load i64, ptr {f2}, align 8"));
+                self.used_free = true;
+                // `munmap(null, 0)` is harmless, so no branch is needed.
+                let cbytes = self.fresh_val();
+                self.inst(format!("{cbytes} = mul i64 {cap}, {esize}"));
+                self.inst(format!(
+                    "call void @__corex_free(ptr {data}, i64 {cbytes})"
+                ));
+                self.inst(format!("store ptr null, ptr {f0}, align 8"));
+                self.inst(format!("store i64 0, ptr {f1}, align 8"));
+                self.inst(format!("store i64 0, ptr {f2}, align 8"));
+                Val {
+                    ssa: String::new(),
+                    ty: Type::Unit,
+                }
+            }
+            Callee::VecSlice => {
+                let vecptr = self.gen_expr(&args[0]).ssa;
+                let f0 = self.vec_field(&vecptr, 0);
+                let f1 = self.vec_field(&vecptr, 1);
+                let data = self.fresh_val();
+                let len = self.fresh_val();
+                self.inst(format!("{data} = load ptr, ptr {f0}, align 8"));
+                self.inst(format!("{len} = load i64, ptr {f1}, align 8"));
+                let tmp = self.fresh_val();
+                self.entry
+                    .push_str(&format!("  {tmp} = alloca {{ ptr, i64 }}, align 8\n"));
+                let p0 = self.fresh_val();
+                let p1 = self.fresh_val();
+                self.inst(format!(
+                    "{p0} = getelementptr inbounds {{ ptr, i64 }}, ptr {tmp}, i64 0, i32 0"
+                ));
+                self.inst(format!("store ptr {data}, ptr {p0}, align 8"));
+                self.inst(format!(
+                    "{p1} = getelementptr inbounds {{ ptr, i64 }}, ptr {tmp}, i64 0, i32 1"
+                ));
+                self.inst(format!("store i64 {len}, ptr {p1}, align 8"));
+                Val {
+                    ssa: tmp,
+                    ty: ty.clone(),
                 }
             }
             Callee::Free => {
@@ -1776,6 +2156,14 @@ ok:
         }
     }
 
+    fn vec_field(&mut self, base_ptr: &str, index: u32) -> String {
+        let p = self.fresh_val();
+        self.inst(format!(
+            "{p} = getelementptr inbounds {{ ptr, i64, i64 }}, ptr {base_ptr}, i64 0, i32 {index}"
+        ));
+        p
+    }
+
     fn load_slice_parts(&mut self, base_ptr: &str) -> (String, String) {
         let daddr = self.fresh_val();
         let laddr = self.fresh_val();
@@ -1856,6 +2244,10 @@ ok:
             }
             ExprKind::Index { base, index } => {
                 let (base_ptr, base_ty) = match &base.kind {
+                    ExprKind::Ident(name) if self.analysis.consts.contains_key(name) => {
+                        let v = self.gen_expr(base);
+                        (v.ssa, v.ty)
+                    }
                     ExprKind::Ident(_)
                     | ExprKind::Index { .. }
                     | ExprKind::Str(_)
@@ -1886,6 +2278,15 @@ ok:
                         self.inst(format!(
                             "{laddr} = getelementptr inbounds {{ ptr, i64 }}, ptr {base_ptr}, i64 0, i32 1"
                         ));
+                        self.inst(format!("{l} = load i64, ptr {laddr}, align 8"));
+                        ((**elem).clone(), data, l, true)
+                    }
+                    Type::Vec(elem) => {
+                        let data = self.fresh_val();
+                        let l = self.fresh_val();
+                        let daddr = self.vec_field(&base_ptr, 0);
+                        let laddr = self.vec_field(&base_ptr, 1);
+                        self.inst(format!("{data} = load ptr, ptr {daddr}, align 8"));
                         self.inst(format!("{l} = load i64, ptr {laddr}, align 8"));
                         ((**elem).clone(), data, l, true)
                     }
@@ -1950,6 +2351,53 @@ ok:
             _ => {
                 let v = self.gen_expr(e);
                 (v.ssa, v.ty)
+            }
+        }
+    }
+}
+
+impl<'a> CodeGen<'a> {
+    fn const_val(&mut self, ty: &Type, value: &ConstValue) -> Val {
+        match value {
+            ConstValue::Int(v) => Val {
+                ssa: int_const(ty, *v),
+                ty: ty.clone(),
+            },
+            ConstValue::Bool(b) => Val {
+                ssa: if *b { "1" } else { "0" }.to_string(),
+                ty: Type::Bool,
+            },
+            ConstValue::Char(c) => Val {
+                ssa: int_const(ty, *c as u64),
+                ty: Type::Char,
+            },
+            ConstValue::Float(v) => Val {
+                ssa: float_const(ty, *v),
+                ty: ty.clone(),
+            },
+            ConstValue::GlobalAddr(name) => Val {
+                ssa: format!("@{name}"),
+                ty: ty.clone(),
+            },
+            ConstValue::Str(bytes) => {
+                let data = self.add_string(bytes);
+                let ptr = self.fresh_val();
+                self.entry
+                    .push_str(&format!("  {ptr} = alloca {{ ptr, i64 }}, align 8\n"));
+                let p0 = self.fresh_val();
+                let p1 = self.fresh_val();
+                self.inst(format!(
+                    "{p0} = getelementptr inbounds {{ ptr, i64 }}, ptr {ptr}, i64 0, i32 0"
+                ));
+                self.inst(format!("store ptr {data}, ptr {p0}, align 8"));
+                self.inst(format!(
+                    "{p1} = getelementptr inbounds {{ ptr, i64 }}, ptr {ptr}, i64 0, i32 1"
+                ));
+                self.inst(format!("store i64 {}, ptr {p1}, align 8", bytes.len()));
+                Val {
+                    ssa: ptr,
+                    ty: Type::Str,
+                }
             }
         }
     }

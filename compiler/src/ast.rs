@@ -139,6 +139,7 @@ pub enum Type {
     Enum(String),
     Slice(Box<Type>),
     Str,
+    Vec(Box<Type>),
     Struct(Rc<StructInfo>),
     /// Unresolved named type produced by the parser (`Color`, `Point`).
     Named(String),
@@ -177,6 +178,17 @@ impl Type {
 
     pub fn is_slice(&self) -> bool {
         matches!(self, Type::Slice(_) | Type::Str)
+    }
+
+    pub fn is_vec(&self) -> bool {
+        matches!(self, Type::Vec(_))
+    }
+
+    pub fn vec_elem(&self) -> Option<Type> {
+        match self {
+            Type::Vec(elem) => Some((**elem).clone()),
+            _ => None,
+        }
     }
 
     pub fn slice_elem(&self) -> Option<Type> {
@@ -219,7 +231,11 @@ impl Type {
     pub fn is_aggregate(&self) -> bool {
         matches!(
             self,
-            Type::Array { .. } | Type::Struct(_) | Type::Slice(_) | Type::Str
+            Type::Array { .. }
+                | Type::Struct(_)
+                | Type::Slice(_)
+                | Type::Str
+                | Type::Vec(_)
         )
     }
 
@@ -247,6 +263,7 @@ impl Type {
             Type::Enum(_) => 4,
             Type::Struct(info) => info.size.get(),
             Type::Slice(_) | Type::Str => 16,
+            Type::Vec(_) => 24,
             Type::Named(_) => 0,
         }
     }
@@ -258,6 +275,7 @@ impl Type {
             Type::Enum(_) => 4,
             Type::Struct(info) => info.align.get().max(1),
             Type::Slice(_) | Type::Str => 8,
+            Type::Vec(_) => 8,
             Type::Named(_) => 1,
             other => other.size_bytes().max(1),
         }
@@ -282,6 +300,7 @@ impl Type {
             }
             Type::Slice(elem) => format!("{{ ptr, i64 }} /* [{}] */", elem.display()),
             Type::Str => "{ ptr, i64 }".to_string(),
+            Type::Vec(_) => "{ ptr, i64, i64 }".to_string(),
             Type::Named(name) => format!("<unresolved {name}>"),
         }
     }
@@ -305,6 +324,7 @@ impl Type {
             Type::Struct(info) => info.name.clone(),
             Type::Slice(elem) => format!("[{}]", elem.display()),
             Type::Str => "str".to_string(),
+            Type::Vec(elem) => format!("vec<{}>", elem.display()),
             Type::Named(name) => name.clone(),
         }
     }
@@ -318,8 +338,10 @@ impl fmt::Display for Type {
 
 #[derive(Clone, Debug)]
 pub struct Program {
+    pub imports: Vec<ImportDecl>,
     pub fns: Vec<FnDecl>,
     pub globals: Vec<GlobalDecl>,
+    pub consts: Vec<ConstDecl>,
     pub enums: Vec<EnumDecl>,
     pub structs: Vec<StructDecl>,
 }
@@ -346,6 +368,21 @@ pub struct GlobalDecl {
     pub ty: Type,
     pub mutable: bool,
     pub init: Expr,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct ImportDecl {
+    pub path: String,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct ConstDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub ty: Type,
+    pub value: Expr,
     pub span: Span,
 }
 

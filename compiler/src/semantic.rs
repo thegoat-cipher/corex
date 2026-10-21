@@ -24,7 +24,7 @@ use crate::ast::*;
 use crate::diagnostics::{Diagnostic, Span};
 
 /// Names that are always in scope and cannot be redefined.
-pub const BUILTINS: [&str; 5] = ["syscall", "alloc", "free", "print", "len"];
+pub const BUILTINS: [&str; 13] = ["syscall", "alloc", "free", "print", "len", "vec_new", "vec_push", "vec_free", "vec_slice", "read_file", "write_file", "panic", "assert"];
 
 /// Maximum size of a stack-allocated value. Keeps `alloca` within a sane
 /// fraction of the default 8 MiB process stack and prevents overflow in size
@@ -39,6 +39,14 @@ pub enum Callee {
     Free,
     Print,
     Len,
+    VecNew,
+    VecPush,
+    VecFree,
+    VecSlice,
+    ReadFile,
+    WriteFile,
+    Panic,
+    Assert,
 }
 
 #[derive(Clone, Debug)]
@@ -92,6 +100,7 @@ pub struct Analysis {
     pub fn_sigs: HashMap<String, FnSig>,
     pub layouts: HashMap<String, FnLayout>,
     pub globals: Vec<GlobalDef>,
+    pub consts: HashMap<String, (Type, ConstValue)>,
     pub enums: HashMap<String, EnumInfo>,
     pub cast_types: HashMap<NodeId, Type>,
     /// `&array` expression id -> array length when coerced to a slice.
@@ -112,6 +121,7 @@ pub fn analyze(program: &Program) -> Result<Analysis, Vec<Diagnostic>> {
         calls: HashMap::new(),
         layouts: HashMap::new(),
         globals: HashMap::new(),
+        consts: HashMap::new(),
         global_order: Vec::new(),
         global_inits: HashMap::new(),
         enum_defs: HashMap::new(),
@@ -135,6 +145,7 @@ pub fn analyze(program: &Program) -> Result<Analysis, Vec<Diagnostic>> {
     a.collect_structs(program);
     a.collect_fns(program);
     a.collect_globals(program);
+    a.collect_consts(program);
     let entry = a.check_entry(program);
     a.check_global_inits(program);
 
@@ -150,6 +161,7 @@ pub fn analyze(program: &Program) -> Result<Analysis, Vec<Diagnostic>> {
             calls: a.calls,
             fn_sigs: a.sigs,
             layouts: a.layouts,
+            consts: a.consts,
             globals: a
                 .global_order
                 .iter()
@@ -186,6 +198,7 @@ struct Analyzer {
     calls: HashMap<NodeId, Callee>,
     layouts: HashMap<String, FnLayout>,
     globals: HashMap<String, (Type, bool)>,
+    consts: HashMap<String, (Type, ConstValue)>,
     global_order: Vec<String>,
     global_inits: HashMap<String, ConstValue>,
     enum_defs: HashMap<String, EnumInfo>,
@@ -298,6 +311,7 @@ impl Analyzer {
                 Type::array_of(elem, *len)
             }
             Type::Slice(elem) => Type::Slice(Box::new(self.resolve_type(elem, span))),
+            Type::Vec(elem) => Type::Vec(Box::new(self.resolve_type(elem, span))),
             other => other.clone(),
         }
     }
@@ -444,6 +458,62 @@ impl Analyzer {
         }
     }
 
+    fn collect_consts(&mut self, program: &Program) {
+        for c in &program.consts {
+            if BUILTINS.contains(&c.name.as_str()) {
+                self.error(
+                    "E0202",
+                    c.name_span,
+                    format!("`{}` is a reserved builtin name", c.name),
+                );
+            }
+            if self.sigs.contains_key(&c.name)
+                || self.globals.contains_key(&c.name)
+                || self.consts.contains_key(&c.name)
+            {
+                self.error(
+                    "E0202",
+                    c.name_span,
+                    format!("duplicate declaration `{}`", c.name),
+                );
+                continue;
+            }
+            let ty = self.resolve_type(&c.ty, c.name_span);
+            self.check_value_size(&ty, c.name_span);
+            let allowed = matches!(
+                ty,
+                Type::Int(_)
+                    | Type::Bool
+                    | Type::Char
+                    | Type::Float(_)
+                    | Type::Enum(_)
+                    | Type::Str
+                    | Type::Ptr { .. }
+            );
+            if !allowed {
+                self.error(
+                    "E0231",
+                    c.name_span,
+                    format!(
+                        "`const` values must be scalar, `str`, or a pointer; found `{}`",
+                        ty.display()
+                    ),
+                );
+                continue;
+            }
+            let Ok(found) = self.check_expr(&c.value, Some(&ty)) else {
+                continue;
+            };
+            if !self.compatible(&ty, &found) {
+                self.type_mismatch(c.value.span, &ty, &found, " in constant initializer");
+                continue;
+            }
+            if let Some(value) = self.const_value(&c.value, &ty) {
+                self.consts.insert(c.name.clone(), (ty, value));
+            }
+        }
+    }
+
     fn check_global_inits(&mut self, program: &Program) {
         for g in &program.globals {
             if !self.globals.contains_key(&g.name) {
@@ -473,6 +543,9 @@ impl Analyzer {
             ExprKind::Char(c) => ConstValue::Char(*c),
             ExprKind::Str(bytes) => ConstValue::Str(bytes.clone()),
             ExprKind::Ident(name) => {
+                if let Some((_, value)) = self.consts.get(name) {
+                    return Some(value.clone());
+                }
                 let (_, mutable) = self
                     .globals
                     .get(name)
@@ -1024,7 +1097,7 @@ impl Analyzer {
             }
             Type::Ptr { pointee, .. } => self.validate_type(pointee, span),
             Type::Array { elem, .. } => self.validate_type(elem, span),
-            Type::Slice(elem) => self.validate_type(elem, span),
+            Type::Slice(elem) | Type::Vec(elem) => self.validate_type(elem, span),
             Type::Named(name) => {
                 self.error("E0201", span, format!("undefined type `{name}`"));
             }
@@ -1207,6 +1280,10 @@ impl Analyzer {
                     let ty = ty.clone();
                     self.expr_types.insert(e.id, ty.clone());
                     ty
+                } else if let Some((ty, _)) = self.consts.get(name) {
+                    let ty = ty.clone();
+                    self.expr_types.insert(e.id, ty.clone());
+                    ty
                 } else if self.sigs.contains_key(name) || BUILTINS.contains(&name.as_str()) {
                     self.error(
                         "E0218",
@@ -1332,7 +1409,9 @@ impl Analyzer {
                 }
             },
             ExprKind::Binary { op, lhs, rhs } => self.check_binary(e, *op, lhs, rhs, expected)?,
-            ExprKind::Call { callee, args } => self.check_call(e, callee, args)?,
+            ExprKind::Call { callee, args } => {
+                self.check_call(e, callee, args, expected)?
+            }
             ExprKind::Index { .. } => {
                 let (t, _) = self.check_place(e)?;
                 t
@@ -1694,7 +1773,31 @@ impl Analyzer {
         Ok(lt)
     }
 
-    fn check_call(&mut self, e: &Expr, callee: &Expr, args: &[Expr]) -> Result<Type, ()> {
+    fn check_byte_string_arg(&mut self, e: &Expr, context: &str) -> Result<(), ()> {
+        let t = self.check_expr(e, Some(&Type::Str))?;
+        let ok = match &t {
+            Type::Str => true,
+            Type::Slice(elem) => **elem == Type::Int(IntTy::U8),
+            _ => false,
+        };
+        if !ok {
+            self.error(
+                "E0203",
+                e.span,
+                format!("{context} must be `str` or `[u8]`, found `{}`", t.display()),
+            );
+            return Err(());
+        }
+        Ok(())
+    }
+
+    fn check_call(
+        &mut self,
+        e: &Expr,
+        callee: &Expr,
+        args: &[Expr],
+        expected: Option<&Type>,
+    ) -> Result<Type, ()> {
         let ExprKind::Ident(name) = &callee.kind else {
             self.error(
                 "E0218",
@@ -1703,6 +1806,242 @@ impl Analyzer {
             );
             return Err(());
         };
+
+        if name == "panic" {
+            if args.len() != 1 {
+                self.error(
+                    "E0204",
+                    e.span,
+                    format!("`panic` takes 1 argument, found {}", args.len()),
+                );
+                return Err(());
+            }
+            if self.check_byte_string_arg(&args[0], "`panic` message").is_err() {
+                return Err(());
+            }
+            self.calls.insert(e.id, Callee::Panic);
+            return Ok(Type::Unit);
+        }
+        if name == "assert" {
+            if args.len() != 2 {
+                self.error(
+                    "E0204",
+                    e.span,
+                    format!("`assert` takes 2 arguments, found {}", args.len()),
+                );
+                return Err(());
+            }
+            if let Ok(t) = self.check_expr(&args[0], Some(&Type::Bool)) {
+                if t != Type::Bool {
+                    self.error(
+                        "E0203",
+                        args[0].span,
+                        format!("`assert` condition must be `bool`, found `{}`", t.display()),
+                    );
+                    return Err(());
+                }
+            }
+            if self
+                .check_byte_string_arg(&args[1], "`assert` message")
+                .is_err()
+            {
+                return Err(());
+            }
+            self.calls.insert(e.id, Callee::Assert);
+            return Ok(Type::Unit);
+        }
+        if name == "read_file" {
+            if args.len() != 1 {
+                self.error(
+                    "E0204",
+                    e.span,
+                    format!("`read_file` takes 1 argument, found {}", args.len()),
+                );
+                return Err(());
+            }
+            if self
+                .check_byte_string_arg(&args[0], "`read_file` path")
+                .is_err()
+            {
+                return Err(());
+            }
+            self.calls.insert(e.id, Callee::ReadFile);
+            return Ok(Type::Vec(Box::new(Type::Int(IntTy::U8))));
+        }
+        if name == "write_file" {
+            if args.len() != 2 {
+                self.error(
+                    "E0204",
+                    e.span,
+                    format!("`write_file` takes 2 arguments, found {}", args.len()),
+                );
+                return Err(());
+            }
+            if self
+                .check_byte_string_arg(&args[0], "`write_file` path")
+                .is_err()
+            {
+                return Err(());
+            }
+            let data_ty = Type::Slice(Box::new(Type::Int(IntTy::U8)));
+            if let Ok(t) = self.check_expr(&args[1], Some(&data_ty)) {
+                let ok = match &t {
+                    Type::Str => true,
+                    Type::Slice(elem) => **elem == Type::Int(IntTy::U8),
+                    _ => false,
+                };
+                if !ok {
+                    self.error(
+                        "E0203",
+                        args[1].span,
+                        format!(
+                            "`write_file` expects `str` or `[u8]` data, found `{}`",
+                            t.display()
+                        ),
+                    );
+                    return Err(());
+                }
+            }
+            self.calls.insert(e.id, Callee::WriteFile);
+            return Ok(Type::Int(IntTy::I32));
+        }
+        if name == "vec_new" {
+            if args.len() != 1 {
+                self.error(
+                    "E0204",
+                    e.span,
+                    format!("`vec_new` takes 1 argument, found {}", args.len()),
+                );
+                return Err(());
+            }
+            let Some(Type::Vec(elem)) = expected.cloned() else {
+                self.error(
+                    "E0230",
+                    e.span,
+                    "cannot infer the element type of `vec_new`; annotate the binding or context",
+                );
+                return Err(());
+            };
+            if let Ok(t) = self.check_expr(&args[0], Some(&Type::Int(IntTy::Usize))) {
+                if t != Type::Int(IntTy::Usize) {
+                    self.error(
+                        "E0203",
+                        args[0].span,
+                        format!("`vec_new` capacity must be `usize`, found `{}`", t.display()),
+                    );
+                    return Err(());
+                }
+            }
+            if *elem == Type::Unit {
+                self.error("E0216", e.span, "`vec<void>` is not allowed");
+                return Err(());
+            }
+            self.calls.insert(e.id, Callee::VecNew);
+            return Ok(Type::Vec(elem));
+        }
+        if name == "vec_push" {
+            if args.len() != 2 {
+                self.error(
+                    "E0204",
+                    e.span,
+                    format!("`vec_push` takes 2 arguments, found {}", args.len()),
+                );
+                return Err(());
+            }
+            let first = self.check_expr(&args[0], None)?;
+            let elem = match &first {
+                Type::Ptr {
+                    mutable: true,
+                    pointee,
+                } => match &**pointee {
+                    Type::Vec(elem) => (**elem).clone(),
+                    other => {
+                        self.error(
+                            "E0203",
+                            args[0].span,
+                            format!("`vec_push` expects `*mut vec<T>`, found `{}`", other.display()),
+                        );
+                        return Err(());
+                    }
+                },
+                other => {
+                    self.error(
+                        "E0203",
+                        args[0].span,
+                        format!("`vec_push` expects `*mut vec<T>`, found `{}`", other.display()),
+                    );
+                    return Err(());
+                }
+            };
+            if let Ok(t) = self.check_expr(&args[1], Some(&elem)) {
+                if !self.compatible(&elem, &t) {
+                    self.type_mismatch(args[1].span, &elem, &t, " in `vec_push`");
+                }
+            }
+            self.calls.insert(e.id, Callee::VecPush);
+            return Ok(Type::Unit);
+        }
+        if name == "vec_free" {
+            if args.len() != 1 {
+                self.error(
+                    "E0204",
+                    e.span,
+                    format!("`vec_free` takes 1 argument, found {}", args.len()),
+                );
+                return Err(());
+            }
+            let first = self.check_expr(&args[0], None)?;
+            if !matches!(
+                &first,
+                Type::Ptr {
+                    mutable: true,
+                    pointee
+                } if matches!(&**pointee, Type::Vec(_))
+            ) {
+                self.error(
+                    "E0203",
+                    args[0].span,
+                    format!("`vec_free` expects `*mut vec<T>`, found `{}`", first.display()),
+                );
+                return Err(());
+            }
+            self.calls.insert(e.id, Callee::VecFree);
+            return Ok(Type::Unit);
+        }
+        if name == "vec_slice" {
+            if args.len() != 1 {
+                self.error(
+                    "E0204",
+                    e.span,
+                    format!("`vec_slice` takes 1 argument, found {}", args.len()),
+                );
+                return Err(());
+            }
+            let first = self.check_expr(&args[0], None)?;
+            let elem = match &first {
+                Type::Ptr { pointee, .. } => match &**pointee {
+                    Type::Vec(elem) => (**elem).clone(),
+                    other => {
+                        self.error(
+                            "E0203",
+                            args[0].span,
+                            format!("`vec_slice` expects `*vec<T>`, found `*{}`", other.display()),
+                        );
+                        return Err(());
+                    }
+                },
+                other => {
+                    self.error(
+                        "E0203",
+                        args[0].span,
+                        format!("`vec_slice` expects `*vec<T>`, found `{}`", other.display()),
+                    );
+                    return Err(());
+                }
+            };
+            self.calls.insert(e.id, Callee::VecSlice);
+            return Ok(Type::Slice(Box::new(elem)));
+        }
 
         if name == "len" {
             self.builtins.len = true;
@@ -1715,7 +2054,10 @@ impl Analyzer {
                 return Err(());
             }
             let arg_ty = self.check_expr(&args[0], None)?;
-            if !matches!(arg_ty, Type::Array { .. } | Type::Slice(_) | Type::Str) {
+            if !matches!(
+                arg_ty,
+                Type::Array { .. } | Type::Slice(_) | Type::Str | Type::Vec(_)
+            ) {
                 self.error(
                     "E0210",
                     args[0].span,
@@ -1901,6 +2243,14 @@ impl Analyzer {
         match &e.kind {
             ExprKind::Ident(name) => {
                 let Some(local) = self.lookup(name) else {
+                    if self.consts.contains_key(name) {
+                        self.error(
+                            "E0211",
+                            e.span,
+                            "a `const` is a compile-time value and is not a place",
+                        );
+                        return Err(());
+                    }
                     if let Some((ty, mutable)) = self.globals.get(name).cloned() {
                         self.expr_types.insert(e.id, ty.clone());
                         return Ok((ty, mutable));
@@ -1957,7 +2307,7 @@ impl Analyzer {
                 let base_ty = self.check_expr(base, None)?;
                 let (elem, len) = match &base_ty {
                     Type::Array { elem, len } => ((**elem).clone(), Some(*len)),
-                    Type::Slice(elem) => ((**elem).clone(), None),
+                    Type::Slice(elem) | Type::Vec(elem) => ((**elem).clone(), None),
                     Type::Str => (Type::Int(IntTy::U8), None),
                     Type::Ptr { .. } => {
                         self.error(
@@ -2046,6 +2396,7 @@ fn checked_size(ty: &Type) -> Option<u64> {
         Type::Array { elem, len } => checked_size(elem)?.checked_mul(*len),
         Type::Enum(_) => Some(4),
         Type::Slice(_) | Type::Str => Some(16),
+        Type::Vec(_) => Some(24),
         Type::Struct(info) => {
             if info.resolved.get() {
                 Some(info.size.get())
@@ -2102,6 +2453,9 @@ fn is_process_exit(e: &Expr) -> bool {
     let ExprKind::Ident(name) = &callee.kind else {
         return false;
     };
+    if name == "panic" {
+        return true;
+    }
     if name != "syscall" {
         return false;
     }

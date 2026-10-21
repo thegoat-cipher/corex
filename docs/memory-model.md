@@ -13,7 +13,7 @@ Related: [`language-spec.md`](language-spec.md), [`ADRs.md`](ADRs.md) (ADR-0003)
 
 - **Manual, explicit allocation.** Memory exists in three places: read-only
   literals, stack slots for locals, and anonymous `mmap` regions requested with
-  `alloc`.
+  `alloc` (including vector growth and `read_file`).
 - **No garbage collector, no reference counting, no background reclamation.**
   Nothing frees memory implicitly. A function return destroys its stack frame;
   heap regions live until `free` (or process exit).
@@ -21,6 +21,9 @@ Related: [`language-spec.md`](language-spec.md), [`ADRs.md`](ADRs.md) (ADR-0003)
   never allocates. Arrays and structs are copied inline. A string literal is
   read-only bytes in the object file plus a two-word `str` view (`{ptr, len}`)
   built on the stack; slices copy only those two words, never the elements.
+  `vec<T>` is a three-word header whose backing block is explicitly allocated
+  by `vec_new`/`vec_push` and released by `vec_free`/`process exit`.
+  `const` declarations are compile-time substitutions and occupy no storage.
 - **Type and mutability are checked; lifetime and validity are not.**
   - Compile time: every place has one type; writes require a mutable place; raw
     pointer dereference, pointer arithmetic, integer/pointer casts, `alloc`,
@@ -55,9 +58,9 @@ slice binding is mutable.
 
 ### 2.2 Stack
 
-- Every local binding, array temporary, struct temporary, and slice view gets
-  one `alloca` in the function's entry block. Allocation therefore costs nothing
-  at runtime inside loops.
+- Every local binding, array/struct temporary, slice view, and `vec<T>` header
+  gets one `alloca` in the function's entry block. Allocation therefore costs
+  nothing at runtime inside loops. A vector's element block is heap memory.
 - Lifetime: the enclosing function activation. A pointer to a local becomes
   dangling when the function returns.
 - Size: fixed at compile time. No variable-length arrays. Structs use natural
@@ -95,7 +98,20 @@ free(pointer: *mut u8, bytes: usize) // munmap(pointer, bytes)
 - No `realloc`, no `calloc`, no alignment control beyond page alignment, no
   allocator metadata, no leak detector.
 
-### 2.4 Printing (`print`)
+### 2.4 Dynamic arrays and files
+
+- `vec_new(cap)` allocates `cap * size(T)` heap bytes (except `cap == 0`).
+  `vec_push` grows to `max(4, cap * 2)`, copies live elements, frees the old
+  block, and stores the new one. `vec_free` frees `cap * size(T)` bytes.
+- A `vec<T>` copy is shallow: both headers point at the same block. Freeing both
+  is a double free; the language has no move checking. Keep one owning binding.
+- `read_file(path)` returns a `vec<u8>` whose block is allocated by the runtime;
+  free it with `vec_free`. `write_file` allocates a temporary NUL-terminated path
+  buffer and frees it before returning. Both use ordinary file syscalls.
+- `read_file` failure returns an empty vector; `write_file` failure returns
+  `-1`. `panic`/failed `assert` writes the message to fd 2 and exits 101.
+
+### 2.5 Printing (`print`)
 
 `print` is a compiler-provided runtime helper, not a library call. It formats
 integers into a 20-byte `alloca` in the helper's entry block, commands into a
@@ -208,6 +224,10 @@ errors, and dynamic bounds/division checks still run.
 | No use after free | — | — | yes |
 | Dynamic indices in bounds | — | abort 101 | — |
 | Slice ranges in bounds | — | abort 101 | — |
+| Vector index bounds | — | abort 101 | — |
+| Vector capacity arithmetic | best-effort | — | overflow is unchecked |
+| `panic`/`assert` failure | — | exit 101 with message | — |
+| File open/read/write failure | — | empty vector / `-1` | — |
 | Division by zero | — | abort 101 | — |
 | Allocation failure | — | abort 101 | — |
 | Integer overflow | defined (wraps) | — | — |
@@ -226,9 +246,13 @@ The following are undefined; the compiler makes no promise about the result:
 5. Formatting or interpreting bytes as a type they are not (there are no unions
    in v0.1, so this requires pointer casts).
 6. Double free, `free` with the wrong length, or use after `free`.
-7. Writing through a pointer to read-only memory (string literals).
-8. Executing an arbitrary `syscall` number with arguments the kernel interprets
-   as pointers or lengths that your program does not own.
+7. Writing through a pointer to read-only memory (string literals), including a
+   `str`/`[u8]` slice that points at a literal.
+8. Freeing a vector backing block twice, including via a shallow vector copy.
+9. Growing a vector until `cap * size(T)` overflows `usize`; the current
+   implementation does not check this arithmetic.
+10. Executing an arbitrary `syscall` number with arguments the kernel interprets
+    as pointers or lengths that your program does not own.
 
 Everything in §10.1 of the language specification is defined.
 

@@ -37,8 +37,9 @@ MVP definition-of-done is met for the implemented language subset.**
 | 4. LLVM backend | COMPLETED | LLVM 20 textual IR; verifier in the build loop; 6 IR tests |
 | 5. Executable compiler | COMPLETED | `corex build`/`run` produce and execute static ELF; factorial prints 3628800 |
 | 6. Low-level capabilities | COMPLETED | Pointers, pointer arithmetic, arrays, `alloc`/`free` via mmap/munmap, direct syscalls |
-| 7. Hardening | IN PROGRESS | 133 tests, benchmark harness, documented defect fixes; fuzzing, golden IR, and debug info remain |
+| 7. Hardening | IN PROGRESS | 142 tests, benchmark harness, documented defect fixes; fuzzing, golden IR, and debug info remain |
 | 8. Extended language surface | COMPLETED | Compound assignment, inference, `char`, globals, enums, floats, structs, slices, `str`, `len`, ranges, ABI, docs, example |
+| 9. Compiler data and runtime | COMPLETED | Dynamic arrays, compile-time constants, recursive imports with per-file diagnostics, whole-file I/O, panic/assert, tokenizer example |
 
 Definition-of-done status (all satisfied):
 
@@ -52,7 +53,7 @@ Definition-of-done status (all satisfied):
 7. Factorial compiles to native — `corex run examples/factorial.cx`.
 8. Factorial returns expected results — prints `3628800`, exit 0.
 9. Hello World via direct syscall — prints `Hello, World!`, exit 0.
-10. Automated tests pass — 133/133.
+10. Automated tests pass — 142/142.
 11. Documentation matches behavior — spec §11 codes verified against
     `semantic.rs`; grammar matches `parser.rs`.
 12. Task tracker has completion evidence — `docs/tasks.md`.
@@ -74,8 +75,8 @@ Definition-of-done status (all satisfied):
   → static x86-64 ELF
 ```
 
-- Rust 1.99.1, zero external crates: 8996 lines of compiler source and 2058
-  lines of integration tests (11054 total).
+- Rust 1.99.1, zero external crates: 10097 lines of compiler source and 2312
+  lines of integration tests (12409 total).
 - Backend writes IR text; no FFI to LLVM (ADR-0002).
 - Memory model: explicit allocation with raw pointers and lexical `unsafe`
   capability gating (ADR-0003); no borrow checker and no false safety claims.

@@ -308,3 +308,23 @@ fn rejects_invalid_slice_ranges_and_printables() {
         "E0203",
     );
 }
+
+#[test]
+fn rejects_phase2_misuse() {
+    assert_rejected(
+        "fn main() -> i32 { let v = vec_new(1); return 0; }",
+        "E0230",
+    );
+    assert_rejected(
+        "const A: [u8; 2] = \"hi\"; fn main() -> i32 { return 0; }",
+        "E0231",
+    );
+    assert_rejected(
+        "import \"definitely-missing-corex-file.cx\"; fn main() -> i32 { return 0; }",
+        "E0232",
+    );
+    assert_rejected(
+        "fn main() -> i32 { panic(123); return 0; }",
+        "E0203",
+    );
+}
