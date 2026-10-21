@@ -228,8 +228,8 @@ are unchanged.
 - **R1/R3/R4/R5 (reproducibility):** the compiler has no external crates; the
   pinned toolchain is Rust 1.99.1 and LLVM 20.1.8, recorded in README and
   architecture.
-- **G1-G9 (diagnostics):** 34 stable error codes are documented in
-  `docs/language-spec.md` §11; 24 invalid programs are asserted against specific
+- **G1-G9 (diagnostics):** 41 stable error codes are documented in
+  `docs/language-spec.md` §11; 28 invalid programs are asserted against specific
   codes in `tests/diagnostics.rs`.
-- **T1-T8 (testability):** 122 tests pass (53 unit, 69 integration); integration
+- **T1-T8 (testability):** 133 tests pass (53 unit, 80 integration); integration
   tests link and execute real binaries.

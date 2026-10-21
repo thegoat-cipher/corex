@@ -20,7 +20,7 @@ The product thesis is narrow: a systems language whose entire semantics fit in o
 
 v0.1 succeeds when a developer can install a pinned toolchain, run `corex build hello.cx`, receive a static ELF, execute it on Linux x86-64, and rely on the documented behavior of arithmetic, memory, and `unsafe`.
 
-CoreX v0.1 is not a general-purpose application language. It is a single-compilation-unit language with no standard library, no floats, and no string type, intended for programs that own their memory layout and speak to the kernel directly.
+CoreX v0.2 is not a general-purpose application language. It is a single-compilation-unit language with no standard library, intended for programs that own their memory layout and speak to the kernel directly. It has first-class integers, `bool`, `char`, `f32`/`f64`, raw pointers, arrays, slices, `str`, enums, and structs, plus explicit globals, but no collections, formatting library, or package ecosystem.
 
 ## 2. Target developers
 
@@ -33,7 +33,7 @@ CoreX v0.1 is not a general-purpose application language. It is a single-compila
 
 Prerequisites for users: familiarity with two's-complement integers, memory layout, and the Linux x86-64 syscall ABI. Rust knowledge is required only to build the compiler, not to use the language.
 
-Explicit non-audience for v0.1: application developers who need strings, floats, collections, or a package ecosystem; teams that need to call C libraries; anyone who requires memory safety without manual review.
+Explicit non-audience for v0.2: application developers who need collections, a formatting/standard library, or a package ecosystem; teams that need to call C libraries; anyone who requires memory safety without manual review.
 
 ## 3. Primary use cases
 
@@ -58,13 +58,13 @@ Each requirement is testable and is covered by at least one automated test (see 
 **FR-1 Primitive integer and boolean types.** The compiler MUST accept `i8`, `i16`, `i32`, `i64`, `u8`, `u16`, `u32`, `u64`, `usize`, `isize`, and `bool`. Widths are 8/16/32/64 bits for the explicit types; `usize` and `isize` are 64 bits on the v0.1 x86-64 target. `bool` is 1 byte and has exactly the values `true` and `false`. Signed types use two's-complement representation.
 *Verification:* compile-and-run programs per type that produce observable results at each width; a test asserting `usize`/`isize` are 64-bit (via `[T; N]` sizing or allocation arithmetic).
 
-**FR-2 Unsupported types are rejected.** Float types, character types, string types, and any other type name outside FR-1, FR-3, and FR-4 MUST be rejected with a diagnostic. There is no implicit `bool`/integer conversion.
+**FR-2 Unknown types are rejected.** Any type name outside the implemented set (integers, `bool`, `char`, `f32`, `f64`, pointers, arrays, slices, `str`, named enums/structs) MUST be rejected with `E0201`. There is no implicit `bool`/integer conversion. Numeric conversions require `as`.
 *Verification:* negative tests per rejected type name; negative test assigning an integer to a `bool`.
 
 **FR-3 Raw pointer types.** The compiler MUST support `*T` and `*mut T` for every supported element type `T`, including nested pointers. `*T` and `*mut T` are distinct types. `*mut T` is accepted where `*T` is expected (never the reverse); conversion to and from integers requires `as` inside `unsafe`.
 *Verification:* positive declaration and `unsafe` use of `*T`, `*mut T`, `**T`; negative test passing `*mut T` where `*T` is required without a cast.
 
-**FR-4 Fixed-size arrays.** The compiler MUST support `[T; N]` where `N` is a constant integer expression known at compile time. Arrays are value types with copy semantics on binding and assignment. Arrays cannot be passed or returned by value (`E0216`); pass `*T` instead. Indexing uses zero-based `usize` indices. Slicing does not exist.
+**FR-4 Fixed-size arrays and slices.** The compiler MUST support `[T; N]` where `N` is a constant integer expression known at compile time, and slice types `[T]`/`str` with a `{ptr, len}` layout. Arrays are value types copied on binding and assignment; slices copy their two words and share elements. Arrays cannot be passed or returned by value (`E0216`); slices, `str`, and structs can. Indexing and ranges use zero-based `usize` bounds and are checked at runtime. A slice is created by a string literal, by `&array` in a slice context, or by `s[a..b]`.
 *Verification:* arrays of primitives and pointers; assignment copies; out-of-range constant index handling per OQ-1; negative test for non-constant `N`.
 
 **FR-5 Explicit numeric casts.** The `as` operator MUST convert between numeric types, and (inside `unsafe`) between integers and pointers; pointer-to-pointer casts are also allowed. Narrowing truncates, and widening sign- or zero-extends according to the source signedness. No implicit widening, narrowing, or sign conversion is permitted anywhere, including in function arguments, returns, and operators.
@@ -72,7 +72,7 @@ Each requirement is testable and is covered by at least one automated test (see 
 
 ### 4.2 Functions and statements
 
-**FR-6 Function declarations.** Functions use the form `fn name(p1: T1, p2: T2) -> R`. The return type is optional: omitting `->` declares a function that returns no value. There is no writable `void` type. Parameters are passed by value. Functions may call themselves and each other recursively. Overloading, default parameters, variadic user functions, closures, and nested function definitions are not supported.
+**FR-6 Function declarations.** Functions use the form `fn name(p1: T1, p2: T2) -> R`. The return type is optional: omitting `->` declares a function that returns no value. There is no writable `void` type. Scalar parameters and returns use registers; struct/slice aggregate parameters are passed indirectly and copied at the boundary, and aggregate returns use a hidden result pointer. Functions may call themselves and each other recursively. Overloading, default parameters, variadic user functions, closures, and nested function definitions are not supported.
 *Verification:* positive tests for multi-parameter functions, mutual recursion, deep recursion within stack limits; negative tests for missing return type, duplicate parameter names, and overload attempts.
 
 **FR-7 Entry point and exit status.** Compilation MUST produce an executable whose entry point runs the program's designated entry function and terminates the process through the kernel. The entry function is `fn main() -> i32` or `fn _start()`; `_start` takes precedence. For `main` the compiler synthesizes `_start`, and the returned value becomes the process exit status (low 8 bits, as on Linux). A `_start` body that falls through exits 0; a `_start` body ending in `exit` gets no synthesized exit.
@@ -138,7 +138,22 @@ Unknown commands, unknown flags, missing operands, and unreadable files MUST pro
 *Verification:* ELF header/section inspection in tests (`no PT_INTERP`, no `.dynamic`, no undefined symbols); execution on Linux x86-64.
 
 **FR-23 Test deliverables.** The repository MUST contain: unit tests for lexer, parser, type checker, and code generation; integration tests that compile and execute programs and assert exit status and byte output; invalid-program tests that assert diagnostic code and span; and IR-verification tests using `llvm-as`. A single documented command MUST run all of them.
-*Verification:* CI runs the documented command from a clean clone and fails on any test failure.
+
+### 4.7 Extended language features
+
+**FR-24 Compound assignment and inference.** `+= -= *= /= %= &= |= ^= <<= >>=` MUST be statements assigning through a mutable place, with integer and (for arithmetic/remainder) float operands. `let` MAY omit its type annotation and MUST infer the initializer's type; a `void` initializer is `E0225`.
+
+**FR-25 Characters.** `char` MUST be a one-byte type with `'a'`-style literals and string-style escapes. It supports equality/ordering with `char`, explicit conversion to/from integers, and `print`.
+
+**FR-26 Globals.** `static` and `static mut` declarations MUST define process-lifetime globals with mandatory constant initializers. Supported initializers are literals, operators on constants, casts, enum variants, string/array literals, and `&global`; non-constant or forward references are `E0226`. Globals MUST be addressable, immutable globals MUST reject assignment, and globals share a value namespace with functions.
+
+**FR-27 Enums.** Named enums with `i32` discriminants MUST support explicit discriminants, `Name::Variant` values, duplicate detection, same-enum comparisons, enum→integer casts, and printing the underlying discriminant. Enums MUST NOT implicitly mix with integers.
+
+**FR-28 Floats.** `f32`/`f64` MUST support literals, IEEE 754 arithmetic, ordered comparisons, int↔float and float↔float casts, compound assignment, globals, globals' printing in fixed six-decimal form, and defined `nan`/`inf` output. There is no implicit integer/float conversion.
+
+**FR-29 Structs.** Structs MUST support comma-separated fields, natural layout, literals with exactly-one initialization per field, nested structs, arrays of structs, field access through places, value-copy semantics, and by-value parameters/returns. Direct recursive layout is `E0224`; unknown/missing/duplicate fields are `E0227`/`E0229`/`E0228`.
+
+*Verification for FR-24–FR-29:* `tests/features.rs` (end-to-end) and `tests/diagnostics.rs` (rejection codes).
 
 ## 5. Non-functional requirements
 
@@ -162,7 +177,7 @@ Detail lives in `docs/NFR.md`; this table is the index. Every performance figure
 
 | Area | v0.1 content |
 |---|---|
-| Language | The types, statements, operators, casts, arrays, pointers, functions, and `unsafe` blocks in FR-1..FR-17 |
+| Language | The types, statements, operators, casts, arrays, pointers, functions, and `unsafe` blocks in FR-1..FR-17, plus compound assignment, inference, characters, globals, enums, floats, structs, slices, and strings in FR-24..FR-29 |
 | Semantics | Wrapping arithmetic, masked shifts, division-by-zero trap, no implicit conversions, no runtime |
 | Memory | `alloc`/`free` over `mmap`/`munmap`, raw pointers, no heap metadata |
 | Kernel interface | `syscall` builtin with up to six arguments and zero defaults |
@@ -190,7 +205,6 @@ The following are deliberate exclusions, not missing work:
 - **Closures.** No function values, captures, or lambdas.
 - **Modules and packages.** A program is one compilation unit; there is no import system or package manager.
 - **Macros.** No declarative or procedural macros.
-- **Floats.** No floating-point types, literals, or operations.
 - **Threading.** No threads, atomics, synchronization, or concurrency primitives.
 - **FFI to C.** No `extern` declarations, no C ABI calls, no linking against C libraries.
 - **Borrow checking.** No ownership or lifetime analysis; aliasing is the programmer's responsibility.
@@ -273,7 +287,7 @@ Adopting an item means editing section 7 first. Items in section 7 are not backl
 | ASSM-2 | `as` casts exist only between numeric types; pointer casts do not exist in v0.1. | FR-5 narrows further or gains pointer-cast rules |
 | ASSM-3 | `&place` is allowed in safe code and yields a raw pointer; dereference and arithmetic require `unsafe`. | FR-16 changes; one more negative test per operation |
 | ASSM-4 | Operator precedence is C-like, with `as` tighter than binary operators. | FR-10 precedence table and tests change |
-| ASSM-5 | A byte-array literal form exists and is the only string-like literal; there is no string type. Exact syntax is not fixed by this document. | UC-1 and the language reference must use the implemented syntax |
+| ASSM-5 | String literals have type `str` (a byte slice) by default, and are accepted as `[u8; N]` when exactly `N` bytes are expected. | UC-1, the spec, and the compiler must change together |
 | ASSM-6 | `--opt` defaults to 0; `build` derives the default output name from the source stem. | FR-18 documentation and CLI tests change |
 | ASSM-7 | `corex run` returns the executed program's exit status. | FR-18/FR-19 tests change |
 | ASSM-8 | Arrays are value types and copy on assignment and by-value passing. | FR-4 and its tests change; performance expectations change |

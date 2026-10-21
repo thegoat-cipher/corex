@@ -1,5 +1,5 @@
 (*
- * CoreX v0.1 grammar (EBNF).
+ * CoreX v0.2 grammar (EBNF).
  *
  * This grammar is normative and matches compiler/src/parser.rs. Where the
  * parser is intentionally more permissive than the grammar (for error recovery),
@@ -9,19 +9,31 @@
  * "[ x ]" is optional, "|" is alternation.
  *)
 
-program        = { function } EOF ;
+program        = { item } EOF ;
+item           = function | global | enum_decl | struct_decl ;
 
 function       = "fn" IDENT "(" [ param_list ] ")" [ "->" type ] block ;
 param_list     = param { "," param } ;
 param          = IDENT ":" type ;
 
+global         = "static" [ "mut" ] IDENT ":" type "=" expression ";" ;
+
+enum_decl      = "enum" IDENT "{" [ variant { "," variant } [ "," ] ] "}" ;
+variant        = IDENT [ "=" expression ] ;
+
+struct_decl    = "struct" IDENT "{" [ field_decl { "," field_decl } [ "," ] ] "}" ;
+field_decl     = IDENT ":" type ;
+
 type           = primitive
+               | "[" type ";" INTEGER "]"
+               | "[" type "]"
                | "*" [ "mut" ] type
-               | "[" type ";" INTEGER "]" ;
+               | IDENT ;
 
 primitive      = "i8"  | "i16" | "i32" | "i64"
                | "u8"  | "u16" | "u32" | "u64"
-               | "usize" | "isize" | "bool" ;
+               | "usize" | "isize" | "bool"
+               | "char" | "f32" | "f64" | "str" ;
 
 block          = "{" { statement } "}" ;
 
@@ -38,7 +50,7 @@ statement      = let_stmt
                | expression_stmt
                | empty_stmt ;
 
-let_stmt       = "let" [ "mut" ] IDENT ":" type "=" expression ";" ;
+let_stmt       = "let" [ "mut" ] IDENT [ ":" type ] "=" expression ";" ;
 if_stmt        = "if" expression block [ "else" ( if_stmt | block ) ] ;
 while_stmt     = "while" expression block ;
 loop_stmt      = "loop" block ;
@@ -48,9 +60,11 @@ return_stmt    = "return" [ expression ] ";" ;
 unsafe_stmt    = "unsafe" block ;
 empty_stmt     = ";" ;
 
-(* [semantic] the left side must be a place expression: identifier,
-   pointer dereference, or array index. *)
-assignment     = expression "=" expression ";" ;
+(* [semantic] the left side must be a mutable place expression: identifier,
+   pointer dereference, array/slice index, or struct field. *)
+assignment     = expression [ compound_op ] expression ";" ;
+compound_op    = "+=" | "-=" | "*=" | "/=" | "%="
+               | "&=" | "|=" | "^=" | "<<=" | ">>=" ;
 
 expression_stmt = expression ";" ;
 
@@ -78,18 +92,29 @@ unary          = "-" unary
                | "*" unary
                | postfix ;
 
-postfix        = primary { call_suffix | index_suffix } ;
+postfix        = primary { call_suffix | index_suffix | range_suffix | field_suffix } ;
 call_suffix    = "(" [ arg_list ] ")" ;
 index_suffix   = "[" expression "]" ;
+range_suffix   = "[" [ expression ] ".." [ expression ] "]" ;
+field_suffix   = "." IDENT ;
 arg_list       = expression { "," expression } ;
 
 primary        = INTEGER
+               | FLOAT
                | STRING
+               | CHAR
                | "true"
                | "false"
-               | IDENT
+               | IDENT [ "::" IDENT ]
+               | struct_literal
                | "(" expression ")"
                | "[" array_literal "]" ;
+
+(* `IDENT "{" IDENT ":"` is a struct literal; this lookahead keeps block
+   statements such as `if flag { ... }` unambiguous. An empty literal is not
+   accepted. *)
+struct_literal = IDENT "{" IDENT ":" expression
+                 { "," IDENT ":" expression } [ "," ] "}" ;
 
 array_literal  = expression [ "," [ expression { "," expression } [ "," ] ] ]
                | expression ";" INTEGER ;
@@ -102,16 +127,21 @@ hex_lit        = "0x" HEXDIGIT { HEXDIGIT | "_" } ;
 bin_lit        = "0b" BINDIGIT { BINDIGIT | "_" } ;
 oct_lit        = "0o" OCTDIGIT { OCTDIGIT | "_" } ;
 
+FLOAT          = dec_lit ( "." DIGIT { DIGIT | "_" } [ exponent ]
+                         | exponent ) ;
+exponent       = ( "e" | "E" ) [ "+" | "-" ] DIGIT { DIGIT | "_" } ;
+
 STRING         = '"' { string_char | escape } '"' ;
+CHAR           = "'" ( string_char | escape ) "'" ;
 escape         = "\" ( "n" | "t" | "r" | "0" | "\" | '"' | "'" | "\x" HEXDIGIT HEXDIGIT ) ;
 
 IDENT          = ( "_" | ALPHA ) { "_" | ALPHA | DIGIT } ;
 
-ALPHA          = "a"…”z" | "A"…”Z" ;
-DIGIT          = "0"…”9" ;
-HEXDIGIT       = DIGIT | "a"…”f" | "A"…”F" ;
+ALPHA          = "a"…"z" | "A"…"Z" ;
+DIGIT          = "0"…"9" ;
+HEXDIGIT       = DIGIT | "a"…"f" | "A"…"F" ;
 BINDIGIT       = "0" | "1" ;
-OCTDIGIT       = "0"…”7" ;
+OCTDIGIT       = "0"…"7" ;
 
 (* Comments and whitespace are trivia:
    line comment   = "//" { any byte except newline } ;
@@ -120,9 +150,10 @@ OCTDIGIT       = "0"…”7" ;
 
 (* ----- reserved words (cannot be identifiers) -----
 
-   fn let mut if else while loop break continue return unsafe as true false
-   i8 i16 i32 i64 u8 u16 u32 u64 usize isize bool
+   fn static enum struct let mut if else while loop break continue return
+   unsafe as true false
+   i8 i16 i32 i64 u8 u16 u32 u64 usize isize bool char f32 f64 str
 
    Builtin function names, reserved everywhere (functions, bindings, parameters):
-   syscall alloc free print
+   syscall alloc free print len
 *)

@@ -1,0 +1,60 @@
+// A tour of the extended CoreX surface. The expected output is asserted by
+// compiler/tests/features.rs.
+
+enum Color { Red, Green = 5, Blue }
+
+struct Point { x: i32, y: i32 }
+
+static mut COUNTER: i32 = 0;
+static LABEL: str = "point";
+
+fn make(x: i32, y: i32) -> Point {
+    return Point { x: x, y: y };
+}
+
+fn sum(s: [i32]) -> i32 {
+    let mut i: usize = 0;
+    let mut total = 0;
+    while i < len(s) {
+        total += s[i];
+        i += 1;
+    }
+    return total;
+}
+
+fn main() -> i32 {
+    let mut p = make(3, 4);
+    p.x += 10;
+    print(p.x);
+    print(p.y);
+
+    let copy = p;
+    p.y = 99;
+    print(copy.y);
+
+    print(Color::Blue as i32);
+    print(Color::Green == Color::Green);
+
+    let mut ratio: f64 = 1.5;
+    ratio *= 2.0;
+    print(ratio);
+    print(('A' as i32) + 1);
+
+    let values: [i32; 4] = [1, 2, 3, 4];
+    let all: [i32] = &values;
+    print(len(all));
+    print(sum(all));
+    print(LabelSlice(LABEL));
+
+    let text = "CoreX";
+    print(text[1..4]);
+    print(len(text));
+
+    COUNTER = 7;
+    print(COUNTER);
+    return 0;
+}
+
+fn LabelSlice(s: str) -> str {
+    return s[0..2];
+}

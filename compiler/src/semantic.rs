@@ -17,13 +17,14 @@
 //! Not guaranteed (programmer responsibility): pointer validity, allocation
 //! lifetime, aliasing, alignment of hand-built pointers, and integer overflow.
 
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 use crate::diagnostics::{Diagnostic, Span};
 
 /// Names that are always in scope and cannot be redefined.
-pub const BUILTINS: [&str; 4] = ["syscall", "alloc", "free", "print"];
+pub const BUILTINS: [&str; 5] = ["syscall", "alloc", "free", "print", "len"];
 
 /// Maximum size of a stack-allocated value. Keeps `alloca` within a sane
 /// fraction of the default 8 MiB process stack and prevents overflow in size
@@ -37,6 +38,7 @@ pub enum Callee {
     Alloc,
     Free,
     Print,
+    Len,
 }
 
 #[derive(Clone, Debug)]
@@ -57,12 +59,27 @@ pub struct FnLayout {
     pub slot_types: Vec<Type>,
 }
 
+#[derive(Clone, Debug)]
+pub struct GlobalDef {
+    pub name: String,
+    pub ty: Type,
+    pub mutable: bool,
+    pub value: ConstValue,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct EnumInfo {
+    /// Variants in declaration order with their i32 discriminants.
+    pub variants: Vec<(String, i32)>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct BuiltinUsage {
     pub syscall: bool,
     pub alloc: bool,
     pub free: bool,
     pub print: bool,
+    pub len: bool,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -74,6 +91,11 @@ pub struct Analysis {
     pub calls: HashMap<NodeId, Callee>,
     pub fn_sigs: HashMap<String, FnSig>,
     pub layouts: HashMap<String, FnLayout>,
+    pub globals: Vec<GlobalDef>,
+    pub enums: HashMap<String, EnumInfo>,
+    pub cast_types: HashMap<NodeId, Type>,
+    /// `&array` expression id -> array length when coerced to a slice.
+    pub slice_from_array: HashMap<NodeId, u64>,
     pub builtins: BuiltinUsage,
     /// Functions whose body provably never falls through.
     pub diverging: std::collections::HashSet<String>,
@@ -89,6 +111,14 @@ pub fn analyze(program: &Program) -> Result<Analysis, Vec<Diagnostic>> {
         let_slots: HashMap::new(),
         calls: HashMap::new(),
         layouts: HashMap::new(),
+        globals: HashMap::new(),
+        global_order: Vec::new(),
+        global_inits: HashMap::new(),
+        enum_defs: HashMap::new(),
+        struct_defs: HashMap::new(),
+        struct_state: HashMap::new(),
+        cast_types: HashMap::new(),
+        slice_from_array: HashMap::new(),
         builtins: BuiltinUsage::default(),
         diverging: std::collections::HashSet::new(),
         diags: Vec::new(),
@@ -101,8 +131,12 @@ pub fn analyze(program: &Program) -> Result<Analysis, Vec<Diagnostic>> {
         current_fn: String::new(),
     };
 
+    a.collect_enums(program);
+    a.collect_structs(program);
     a.collect_fns(program);
+    a.collect_globals(program);
     let entry = a.check_entry(program);
+    a.check_global_inits(program);
 
     for f in &program.fns {
         a.check_fn(f);
@@ -116,6 +150,25 @@ pub fn analyze(program: &Program) -> Result<Analysis, Vec<Diagnostic>> {
             calls: a.calls,
             fn_sigs: a.sigs,
             layouts: a.layouts,
+            globals: a
+                .global_order
+                .iter()
+                .filter_map(|name| {
+                    a.globals.get(name).map(|(ty, mutable)| GlobalDef {
+                        name: name.clone(),
+                        ty: ty.clone(),
+                        mutable: *mutable,
+                        value: a
+                            .global_inits
+                            .get(name)
+                            .cloned()
+                            .unwrap_or(ConstValue::Int(0)),
+                    })
+                })
+                .collect(),
+            enums: a.enum_defs.clone(),
+            cast_types: a.cast_types,
+            slice_from_array: a.slice_from_array,
             builtins: a.builtins,
             diverging: a.diverging,
             entry: entry.unwrap_or_default(),
@@ -132,6 +185,14 @@ struct Analyzer {
     let_slots: HashMap<NodeId, usize>,
     calls: HashMap<NodeId, Callee>,
     layouts: HashMap<String, FnLayout>,
+    globals: HashMap<String, (Type, bool)>,
+    global_order: Vec<String>,
+    global_inits: HashMap<String, ConstValue>,
+    enum_defs: HashMap<String, EnumInfo>,
+    struct_defs: HashMap<String, std::rc::Rc<StructInfo>>,
+    struct_state: HashMap<String, u8>,
+    cast_types: HashMap<NodeId, Type>,
+    slice_from_array: HashMap<NodeId, u64>,
     builtins: BuiltinUsage,
     diverging: std::collections::HashSet<String>,
     diags: Vec<Diagnostic>,
@@ -167,6 +228,371 @@ impl Analyzer {
 
     // ----- top level ---------------------------------------------------
 
+    fn collect_enums(&mut self, program: &Program) {
+        for ed in &program.enums {
+            if self.enum_defs.contains_key(&ed.name) {
+                self.error("E0228", ed.name_span, format!("duplicate type `{}`", ed.name));
+            }
+            let mut seen = HashSet::new();
+            let mut next: i64 = 0;
+            let mut variants = Vec::new();
+            for v in &ed.variants {
+                if !seen.insert(v.name.clone()) {
+                    self.error(
+                        "E0228",
+                        v.span,
+                        format!("duplicate variant `{}` in enum `{}`", v.name, ed.name),
+                    );
+                }
+                let value = match &v.value {
+                    Some(expr) => match eval_int_const(expr) {
+                        Some(n) => n,
+                        None => {
+                            self.error(
+                                "E0221",
+                                expr.span,
+                                "enum discriminants must be integer constant expressions",
+                            );
+                            0
+                        }
+                    },
+                    None => next,
+                };
+                if value < i32::MIN as i64 || value > i32::MAX as i64 {
+                    self.error(
+                        "E0215",
+                        v.span,
+                        format!("enum discriminant `{value}` does not fit in `i32`"),
+                    );
+                }
+                next = value.saturating_add(1);
+                variants.push((v.name.clone(), value as i32));
+            }
+            self.enum_defs.insert(
+                ed.name.clone(),
+                EnumInfo {
+                    variants,
+                },
+            );
+        }
+    }
+
+    fn resolve_type(&mut self, ty: &Type, span: Span) -> Type {
+        match ty {
+            Type::Named(name) => {
+                if self.enum_defs.contains_key(name) {
+                    Type::Enum(name.clone())
+                } else if let Some(info) = self.struct_defs.get(name) {
+                    Type::Struct(info.clone())
+                } else {
+                    self.error("E0201", span, format!("undefined type `{name}`"));
+                    Type::Unit
+                }
+            }
+            Type::Ptr { mutable, pointee } => {
+                let pointee = self.resolve_type(pointee, span);
+                Type::ptr_to(pointee, *mutable)
+            }
+            Type::Array { elem, len } => {
+                let elem = self.resolve_type(elem, span);
+                Type::array_of(elem, *len)
+            }
+            Type::Slice(elem) => Type::Slice(Box::new(self.resolve_type(elem, span))),
+            other => other.clone(),
+        }
+    }
+
+    fn collect_structs(&mut self, program: &Program) {
+        for st in &program.structs {
+            if self.enum_defs.contains_key(&st.name) || self.struct_defs.contains_key(&st.name) {
+                self.error("E0228", st.name_span, format!("duplicate type `{}`", st.name));
+            }
+            if st.fields.is_empty() {
+                self.error("E0228", st.name_span, "structs must have at least one field");
+            }
+            let info = std::rc::Rc::new(StructInfo {
+                name: st.name.clone(),
+                fields: RefCell::new(Vec::new()),
+                size: Cell::new(0),
+                align: Cell::new(1),
+                resolved: Cell::new(false),
+            });
+            self.struct_defs.entry(st.name.clone()).or_insert(info);
+        }
+
+        for st in &program.structs {
+            let Some(info) = self.struct_defs.get(&st.name).cloned() else {
+                continue;
+            };
+            let mut seen = HashSet::new();
+            let mut resolved_fields = Vec::new();
+            for f in &st.fields {
+                if !seen.insert(f.name.clone()) {
+                    self.error(
+                        "E0228",
+                        f.span,
+                        format!("duplicate field `{}` in struct `{}`", f.name, st.name),
+                    );
+                }
+                let ty = self.resolve_type(&f.ty, f.span);
+                resolved_fields.push(StructField {
+                    name: f.name.clone(),
+                    ty,
+                    offset: 0,
+                });
+            }
+            *info.fields.borrow_mut() = resolved_fields;
+        }
+
+        for st in &program.structs {
+            self.finalize_struct(&st.name, st.name_span);
+        }
+    }
+
+    fn finalize_struct(&mut self, name: &str, span: Span) -> Option<(u64, u64)> {
+        match self.struct_state.get(name).copied() {
+            Some(2) => {
+                let info = self.struct_defs.get(name)?;
+                return Some((info.size.get(), info.align.get().max(1)));
+            }
+            Some(1) => {
+                self.error(
+                    "E0224",
+                    span,
+                    format!("struct `{name}` contains itself by value; use a pointer"),
+                );
+                return None;
+            }
+            _ => {}
+        }
+        self.struct_state.insert(name.to_string(), 1);
+        let info = self.struct_defs.get(name)?.clone();
+
+        let mut fields = info.fields.borrow().clone();
+        for field in fields.iter_mut() {
+            self.ensure_layout(&field.ty, span);
+        }
+
+        let mut offset: u64 = 0;
+        let mut align: u64 = 1;
+        for field in fields.iter_mut() {
+            let fa = field.ty.align_bytes().max(1);
+            offset = align_to(offset, fa);
+            field.offset = offset;
+            offset = offset.checked_add(field.ty.size_bytes())?;
+            align = align.max(fa);
+        }
+        let size = align_to(offset, align);
+        if size > MAX_VALUE_BYTES {
+            self.error(
+                "E0223",
+                span,
+                format!("struct `{name}` is {size} bytes; the stack allocation limit is {MAX_VALUE_BYTES} bytes"),
+            );
+        }
+        *info.fields.borrow_mut() = fields;
+        info.size.set(size);
+        info.align.set(align);
+        info.resolved.set(true);
+        self.struct_state.insert(name.to_string(), 2);
+        Some((size, align))
+    }
+
+    fn ensure_layout(&mut self, ty: &Type, span: Span) {
+        match ty {
+            Type::Struct(info) => {
+                if !info.resolved.get() {
+                    self.finalize_struct(&info.name, span);
+                }
+            }
+            Type::Array { elem, .. } => self.ensure_layout(elem, span),
+            _ => {}
+        }
+    }
+
+    fn collect_globals(&mut self, program: &Program) {
+        for g in &program.globals {
+            if BUILTINS.contains(&g.name.as_str()) {
+                self.error(
+                    "E0202",
+                    g.name_span,
+                    format!("`{}` is a reserved builtin name", g.name),
+                );
+            }
+            if self.sigs.contains_key(&g.name) {
+                self.error(
+                    "E0202",
+                    g.name_span,
+                    format!("duplicate global `{}`: a function has the same name", g.name),
+                );
+            }
+            if self.globals.contains_key(&g.name) {
+                self.error(
+                    "E0202",
+                    g.name_span,
+                    format!("duplicate global `{}`", g.name),
+                );
+                continue;
+            }
+            let ty = self.resolve_type(&g.ty, g.name_span);
+            if ty == Type::Unit {
+                self.error("E0216", g.name_span, "globals cannot have type `void`");
+            }
+            self.check_value_size(&ty, g.name_span);
+            self.globals.insert(g.name.clone(), (ty, g.mutable));
+            self.global_order.push(g.name.clone());
+        }
+    }
+
+    fn check_global_inits(&mut self, program: &Program) {
+        for g in &program.globals {
+            if !self.globals.contains_key(&g.name) {
+                continue;
+            }
+            let Some((ty, _)) = self.globals.get(&g.name).cloned() else {
+                continue;
+            };
+            let Ok(found) = self.check_expr(&g.init, Some(&ty)) else {
+                continue;
+            };
+            if !self.compatible(&ty, &found) {
+                self.type_mismatch(g.init.span, &ty, &found, " in global initializer");
+                continue;
+            }
+            if let Some(value) = self.const_value(&g.init, &ty) {
+                self.global_inits.insert(g.name.clone(), value);
+            }
+        }
+    }
+
+    fn const_value(&mut self, e: &Expr, ty: &Type) -> Option<ConstValue> {
+        let value = match &e.kind {
+            ExprKind::Int(v) => ConstValue::Int(*v),
+            ExprKind::Float(v) => ConstValue::Float(*v),
+            ExprKind::Bool(b) => ConstValue::Bool(*b),
+            ExprKind::Char(c) => ConstValue::Char(*c),
+            ExprKind::Str(bytes) => ConstValue::Str(bytes.clone()),
+            ExprKind::Ident(name) => {
+                let (_, mutable) = self
+                    .globals
+                    .get(name)
+                    .cloned()
+                    .unwrap_or((Type::Int(IntTy::I32), true));
+                if mutable {
+                    self.error(
+                        "E0226",
+                        e.span,
+                        "a constant initializer cannot read a mutable global",
+                    );
+                    return None;
+                }
+                match self.global_inits.get(name) {
+                    Some(value) => value.clone(),
+                    None => {
+                        self.error(
+                            "E0226",
+                            e.span,
+                            format!(
+                                "global `{name}` is not a previously initialized constant"
+                            ),
+                        );
+                        return None;
+                    }
+                }
+            }
+            ExprKind::EnumVariant { enum_name, variant } => {
+                let v = self
+                    .enum_defs
+                    .get(enum_name)
+                    .and_then(|info| info.variants.iter().find(|(n, _)| n == variant))
+                    .map(|(_, v)| *v as i64 as u64)?;
+                ConstValue::Int(v)
+            }
+            ExprKind::Unary {
+                op: UnOp::AddrOf | UnOp::AddrOfMut,
+                expr,
+            } => {
+                if ty.is_slice() {
+                    self.error(
+                        "E0226",
+                        e.span,
+                        "slice/str globals must be initialized from a string literal",
+                    );
+                    return None;
+                }
+                if let ExprKind::Ident(name) = &expr.kind {
+                    if self.globals.contains_key(name) {
+                        ConstValue::GlobalAddr(name.clone())
+                    } else {
+                        self.error(
+                            "E0226",
+                            e.span,
+                            "address-of in a global initializer must name a global",
+                        );
+                        return None;
+                    }
+                } else {
+                    self.error(
+                        "E0226",
+                        e.span,
+                        "address-of in a global initializer must name a global",
+                    );
+                    return None;
+                }
+            }
+            ExprKind::Unary { op, expr } => {
+                let inner = self.const_value(expr, ty)?;
+                match (op, inner) {
+                    (UnOp::Neg, ConstValue::Int(v)) => {
+                        ConstValue::Int(mask_width((v as i64).wrapping_neg() as u64, ty))
+                    }
+                    (UnOp::Neg, ConstValue::Float(v)) => ConstValue::Float(-v),
+                    (UnOp::Not, ConstValue::Bool(b)) => ConstValue::Bool(!b),
+                    (UnOp::Not, ConstValue::Int(v)) => ConstValue::Int(mask_width(!v, ty)),
+                    _ => {
+                        self.error("E0226", e.span, "unsupported constant expression");
+                        return None;
+                    }
+                }
+            }
+            ExprKind::Binary { op, lhs, rhs } => {
+                let l = self.const_value(lhs, ty)?;
+                let r = self.const_value(rhs, ty)?;
+                let operand_ty = self
+                    .expr_types
+                    .get(&lhs.id)
+                    .cloned()
+                    .unwrap_or_else(|| ty.clone());
+                const_binary(*op, l, r, &operand_ty).or_else(|| {
+                    self.error(
+                        "E0226",
+                        e.span,
+                        "unsupported constant expression (division by zero or invalid operands)",
+                    );
+                    None
+                })?
+            }
+            ExprKind::Cast { expr, ty: to } => {
+                let inner = self.const_value(expr, to)?;
+                let from = self
+                    .expr_types
+                    .get(&expr.id)
+                    .cloned()
+                    .unwrap_or(Type::Int(IntTy::I32));
+                convert_const(inner, &from, to)?
+            }
+            _ => {
+                self.error(
+                    "E0226",
+                    e.span,
+                    "global initializers must be constant expressions (literals, arithmetic, or `&global`)",
+                );
+                return None;
+            }
+        };
+        Some(value)
+    }
+
     fn collect_fns(&mut self, program: &Program) {
         for f in &program.fns {
             if BUILTINS.contains(&f.name.as_str()) {
@@ -183,32 +609,36 @@ impl Analyzer {
                     format!("duplicate function `{}`", f.name),
                 );
             }
-            if f.ret.is_aggregate() {
+            let ret = self.resolve_type(&f.ret, f.ret_span);
+            if matches!(ret, Type::Array { .. }) {
                 self.error(
                     "E0216",
                     f.ret_span,
                     "arrays cannot be returned by value; return a pointer instead",
                 );
             }
-            self.check_value_size(&f.ret, f.ret_span);
+            self.check_value_size(&ret, f.ret_span);
+            let mut param_types = Vec::new();
             for p in &f.params {
-                if p.ty.is_aggregate() {
+                let ty = self.resolve_type(&p.ty, p.span);
+                if matches!(ty, Type::Array { .. }) {
                     self.error(
                         "E0216",
                         p.span,
                         "arrays cannot be passed by value; pass a pointer instead",
                     );
                 }
-                if p.ty == Type::Unit {
+                if ty == Type::Unit {
                     self.error("E0216", p.span, "parameters cannot have type `void`");
                 }
-                self.check_value_size(&p.ty, p.span);
+                self.check_value_size(&ty, p.span);
+                param_types.push(ty);
             }
             self.sigs.insert(
                 f.name.clone(),
                 FnSig {
-                    params: f.params.iter().map(|p| p.ty.clone()).collect(),
-                    ret: f.ret.clone(),
+                    params: param_types,
+                    ret,
                 },
             );
         }
@@ -248,14 +678,22 @@ impl Analyzer {
         self.scopes = vec![HashMap::new()];
         self.slot_types = Vec::new();
         self.slot_mut = HashMap::new();
-        self.ret_ty = f.ret.clone();
+        let sig = self
+            .sigs
+            .get(&f.name)
+            .cloned()
+            .unwrap_or(FnSig {
+                params: Vec::new(),
+                ret: self.resolve_type(&f.ret, f.ret_span),
+            });
+        self.ret_ty = sig.ret.clone();
         self.loop_depth = 0;
         self.unsafe_depth = 0;
 
         // Parameters are immutable: the specification requires copying into a
-        // `let mut` binding before mutating (E0205).
-        for p in &f.params {
-            self.declare(&p.name, p.span, p.ty.clone(), false);
+        // `mut` binding before mutating (E0205).
+        for (p, ty) in f.params.iter().zip(sig.params.into_iter()) {
+            self.declare(&p.name, p.span, ty, false);
         }
 
         self.check_block(&f.body);
@@ -358,13 +796,39 @@ impl Analyzer {
                 init,
                 ..
             } => {
-                self.check_value_size(ty, *name_span);
-                if let Ok(found) = self.check_expr(init, Some(ty)) {
-                    if !self.compatible(ty, &found) {
-                        self.type_mismatch(init.span, ty, &found, " in `let` initializer");
+                let binding_ty = match ty {
+                    Some(declared) => {
+                        let declared = self.resolve_type(declared, *name_span);
+                        self.check_value_size(&declared, *name_span);
+                        if let Ok(found) = self.check_expr(init, Some(&declared)) {
+                            if !self.compatible(&declared, &found) {
+                                self.type_mismatch(
+                                    init.span,
+                                    &declared,
+                                    &found,
+                                    " in `let` initializer",
+                                );
+                            }
+                        }
+                        declared
                     }
-                }
-                let local = self.declare(name, *name_span, ty.clone(), *mutable);
+                    None => match self.check_expr(init, None) {
+                        Ok(Type::Unit) => {
+                            self.error(
+                                "E0225",
+                                init.span,
+                                "cannot infer a binding type from a value of type `void`",
+                            );
+                            Type::Int(IntTy::I32)
+                        }
+                        Ok(found) => {
+                            self.check_value_size(&found, *name_span);
+                            found
+                        }
+                        Err(()) => Type::Int(IntTy::I32),
+                    },
+                };
+                let local = self.declare(name, *name_span, binding_ty, *mutable);
                 self.let_slots.insert(init.id, local.slot);
             }
             Stmt::Assign {
@@ -387,6 +851,49 @@ impl Analyzer {
                         "cannot assign to an immutable place",
                     );
                 }
+            }
+            Stmt::CompoundAssign {
+                target,
+                op,
+                value,
+                span,
+            } => {
+                let Ok((ty, mutable)) = self.check_place(target) else {
+                    return;
+                };
+                if !mutable {
+                    self.error("E0205", *span, "cannot assign to an immutable place");
+                }
+                if ty.is_float() {
+                    if !matches!(
+                        op,
+                        BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
+                    ) {
+                        self.error(
+                            "E0210",
+                            *span,
+                            format!(
+                                "`{}` is not defined for floating-point compound assignment",
+                                op.describe()
+                            ),
+                        );
+                    }
+                } else if !ty.is_integer() {
+                    self.error(
+                        "E0210",
+                        *span,
+                        format!(
+                            "compound assignment requires an integer or float place, found `{}`",
+                            ty.display()
+                        ),
+                    );
+                }
+                if let Ok(found) = self.check_expr(value, Some(&ty)) {
+                    if !self.compatible(&ty, &found) {
+                        self.type_mismatch(value.span, &ty, &found, " in compound assignment");
+                    }
+                }
+                let _ = op;
             }
             Stmt::Expr(e) => {
                 let _ = self.check_expr(e, None);
@@ -482,6 +989,7 @@ impl Analyzer {
     /// `[u64; 2^61]`). Overflow must be caught here: wrapping the multiplication
     /// could otherwise produce a small size and let an impossible array through.
     fn check_value_size(&mut self, ty: &Type, span: Span) {
+        self.validate_type(ty, span);
         match checked_size(ty) {
             None => {
                 self.error(
@@ -507,16 +1015,49 @@ impl Analyzer {
         }
     }
 
+    fn validate_type(&mut self, ty: &Type, span: Span) {
+        match ty {
+            Type::Enum(name) => {
+                if !self.enum_defs.contains_key(name) {
+                    self.error("E0201", span, format!("undefined type `{name}`"));
+                }
+            }
+            Type::Ptr { pointee, .. } => self.validate_type(pointee, span),
+            Type::Array { elem, .. } => self.validate_type(elem, span),
+            Type::Slice(elem) => self.validate_type(elem, span),
+            Type::Named(name) => {
+                self.error("E0201", span, format!("undefined type `{name}`"));
+            }
+            Type::Struct(info) => {
+                if !info.resolved.get() {
+                    self.error(
+                        "E0224",
+                        span,
+                        format!("struct `{}` has an incomplete layout", info.name),
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn compatible(&self, expected: &Type, found: &Type) -> bool {
         if expected == found {
             return true;
         }
+        let u8_ty = Type::Int(IntTy::U8);
         matches!(
             (expected, found),
             (
                 Type::Ptr { mutable: false, pointee: ep },
                 Type::Ptr { mutable: true, pointee: fp }
             ) if ep == fp
+        ) || matches!(
+            (expected, found),
+            (Type::Str, Type::Slice(elem)) if **elem == u8_ty
+        ) || matches!(
+            (expected, found),
+            (Type::Slice(elem), Type::Str) if **elem == u8_ty
         )
     }
 
@@ -543,8 +1084,115 @@ impl Analyzer {
                 }
                 Type::Int(t)
             }
-            ExprKind::Str(bytes) => Type::array_of(Type::Int(IntTy::U8), bytes.len() as u64),
+            ExprKind::Float(v) => {
+                let t = match expected {
+                    Some(Type::Float(t)) => *t,
+                    _ => FloatTy::F64,
+                };
+                let _ = v;
+                Type::Float(t)
+            }
+            ExprKind::Str(bytes) => {
+                let n = bytes.len() as u64;
+                let u8_ty = Type::Int(IntTy::U8);
+                match expected {
+                    Some(Type::Array { elem, len }) if **elem == u8_ty && *len == n => {
+                        Type::array_of(u8_ty, n)
+                    }
+                    _ => Type::Str,
+                }
+            }
+            ExprKind::Char(_) => Type::Char,
             ExprKind::Bool(_) => Type::Bool,
+            ExprKind::EnumVariant { enum_name, variant } => {
+                let Some(info) = self.enum_defs.get(enum_name) else {
+                    self.error("E0201", e.span, format!("undefined enum `{enum_name}`"));
+                    return Err(());
+                };
+                if !info.variants.iter().any(|(n, _)| n == variant) {
+                    self.error(
+                        "E0222",
+                        e.span,
+                        format!("enum `{enum_name}` has no variant `{variant}`"),
+                    );
+                    return Err(());
+                }
+                Type::Enum(enum_name.clone())
+            }
+            ExprKind::StructLit { name, fields } => {
+                let Some(info) = self.struct_defs.get(name).cloned() else {
+                    self.error("E0201", e.span, format!("undefined struct `{name}`"));
+                    return Err(());
+                };
+                if let Some(Type::Struct(expected)) = expected {
+                    if expected.name != *name {
+                        self.error(
+                            "E0203",
+                            e.span,
+                            format!(
+                                "type mismatch: expected struct `{}`, found `{name}`",
+                                expected.name
+                            ),
+                        );
+                    }
+                }
+                let layout = info.fields.borrow().clone();
+                let mut seen = HashSet::new();
+                for (fname, value) in fields {
+                    let Some(field) = layout.iter().find(|f| f.name == *fname) else {
+                        self.error(
+                            "E0227",
+                            value.span,
+                            format!("struct `{name}` has no field `{fname}`"),
+                        );
+                        continue;
+                    };
+                    if !seen.insert(fname.clone()) {
+                        self.error(
+                            "E0228",
+                            value.span,
+                            format!("field `{fname}` is initialized twice"),
+                        );
+                    }
+                    if let Ok(found) = self.check_expr(value, Some(&field.ty)) {
+                        if !self.compatible(&field.ty, &found) {
+                            self.type_mismatch(
+                                value.span,
+                                &field.ty,
+                                &found,
+                                " in struct field",
+                            );
+                        }
+                    }
+                }
+                for field in &layout {
+                    if !seen.contains(&field.name) {
+                        self.error(
+                            "E0229",
+                            e.span,
+                            format!("missing field `{}` in struct literal", field.name),
+                        );
+                    }
+                }
+                Type::Struct(info)
+            }
+            ExprKind::Field { base, name } => {
+                let base_is_place = matches!(
+                    base.kind,
+                    ExprKind::Ident(_)
+                        | ExprKind::Field { .. }
+                        | ExprKind::Index { .. }
+                        | ExprKind::Unary { op: UnOp::Deref, .. }
+                );
+                let base_ty = if base_is_place {
+                    self.check_place(base)?.0
+                } else {
+                    self.check_expr(base, None)?
+                };
+                let ty = self.field_type(&base_ty, name, e.span)?;
+                self.expr_types.insert(e.id, ty.clone());
+                ty
+            }
             ExprKind::Ident(name) => {
                 if let Some(local) = self.lookup(name) {
                     self.idents.insert(
@@ -555,6 +1203,10 @@ impl Analyzer {
                         },
                     );
                     local.ty
+                } else if let Some((ty, _)) = self.globals.get(name) {
+                    let ty = ty.clone();
+                    self.expr_types.insert(e.id, ty.clone());
+                    ty
                 } else if self.sigs.contains_key(name) || BUILTINS.contains(&name.as_str()) {
                     self.error(
                         "E0218",
@@ -594,7 +1246,7 @@ impl Analyzer {
                         }
                     } else {
                         let t = self.check_expr(expr, expected)?;
-                        if !t.is_integer() {
+                        if !t.is_integer() && !t.is_float() {
                             self.error(
                                 "E0210",
                                 e.span,
@@ -621,6 +1273,16 @@ impl Analyzer {
                 }
                 UnOp::AddrOf => {
                     let (t, _) = self.check_place(expr)?;
+                    if let (Some(Type::Slice(elem)), Type::Array { elem: ae, len }) =
+                        (expected, &t)
+                    {
+                        if elem == ae {
+                            self.slice_from_array.insert(e.id, *len);
+                            let ty = Type::Slice(elem.clone());
+                            self.expr_types.insert(e.id, ty.clone());
+                            return Ok(ty);
+                        }
+                    }
                     Type::ptr_to(t, false)
                 }
                 UnOp::AddrOfMut => {
@@ -631,6 +1293,16 @@ impl Analyzer {
                             e.span,
                             "`&mut` requires a mutable place",
                         );
+                    }
+                    if let (Some(Type::Slice(elem)), Type::Array { elem: ae, len }) =
+                        (expected, &t)
+                    {
+                        if elem == ae {
+                            self.slice_from_array.insert(e.id, *len);
+                            let ty = Type::Slice(elem.clone());
+                            self.expr_types.insert(e.id, ty.clone());
+                            return Ok(ty);
+                        }
                     }
                     Type::ptr_to(t, true)
                 }
@@ -665,10 +1337,95 @@ impl Analyzer {
                 let (t, _) = self.check_place(e)?;
                 t
             }
+            ExprKind::SliceRange { base, start, end } => {
+                let base_ty = self.check_expr(base, None)?;
+                let (_, result) = match &base_ty {
+                    Type::Array { elem, .. } => {
+                        ((**elem).clone(), Type::Slice(elem.clone()))
+                    }
+                    Type::Slice(elem) => ((**elem).clone(), base_ty.clone()),
+                    Type::Str => (Type::Int(IntTy::U8), Type::Str),
+                    other => {
+                        self.error(
+                            "E0213",
+                            base.span,
+                            format!("cannot slice a value of type `{}`", other.display()),
+                        );
+                        return Err(());
+                    }
+                };
+                let usize_ty = Type::Int(IntTy::Usize);
+                for bound in [start, end].into_iter().flatten() {
+                    if let Ok(t) = self.check_expr(bound, Some(&usize_ty)) {
+                        if t != usize_ty {
+                            self.error(
+                                "E0213",
+                                bound.span,
+                                format!("slice bound must be `usize`, found `{}`", t.display()),
+                            );
+                        }
+                    }
+                }
+                let literal_len = match &base.kind {
+                    ExprKind::Str(bytes) => Some(bytes.len() as u64),
+                    _ => None,
+                };
+                let bound_len = match &base_ty {
+                    Type::Array { len, .. } => Some(*len),
+                    Type::Str => literal_len,
+                    _ => None,
+                };
+                let start_lit = start
+                    .as_ref()
+                    .and_then(|e| match e.kind { ExprKind::Int(v) => Some(v), _ => None })
+                    .unwrap_or(0);
+                let end_lit = end.as_ref().and_then(|e| match e.kind {
+                    ExprKind::Int(v) => Some(v),
+                    _ => None,
+                });
+                if let Some(end_v) = end_lit {
+                    if start_lit > end_v {
+                        self.error(
+                            "E0222",
+                            e.span,
+                            format!("slice start {start_lit} is greater than end {end_v}"),
+                        );
+                    }
+                }
+                if let Some(len) = bound_len {
+                    if start_lit > len {
+                        self.error(
+                            "E0222",
+                            start.as_ref().map(|e| e.span).unwrap_or(e.span),
+                            format!("slice start {start_lit} exceeds length {len}"),
+                        );
+                    }
+                    if let Some(end_v) = end_lit {
+                        if end_v > len {
+                            self.error(
+                                "E0222",
+                                end.as_ref().unwrap().span,
+                                format!("slice end {end_v} exceeds length {len}"),
+                            );
+                        }
+                    }
+                }
+                result
+            }
             ExprKind::Cast { expr, ty } => {
                 let src = self.check_expr(expr, None)?;
-                match (&src, ty) {
-                    (Type::Int(_), Type::Int(_)) | (Type::Ptr { .. }, Type::Ptr { .. }) => {}
+                let to = self.resolve_type(ty, e.span);
+                self.cast_types.insert(e.id, to.clone());
+                match (&src, &to) {
+                    (Type::Int(_), Type::Int(_))
+                    | (Type::Ptr { .. }, Type::Ptr { .. })
+                    | (Type::Char, Type::Char)
+                    | (Type::Char, Type::Int(_))
+                    | (Type::Int(_), Type::Char)
+                    | (Type::Enum(_), Type::Int(_))
+                    | (Type::Int(_), Type::Float(_))
+                    | (Type::Float(_), Type::Int(_))
+                    | (Type::Float(_), Type::Float(_)) => {}
                     (Type::Int(_), Type::Ptr { .. }) | (Type::Ptr { .. }, Type::Int(_)) => {
                         if self.unsafe_depth == 0 {
                             self.error(
@@ -685,13 +1442,13 @@ impl Analyzer {
                             format!(
                                 "invalid cast from `{}` to `{}`",
                                 src.display(),
-                                ty.display()
+                                to.display()
                             ),
                         );
                         return Err(());
                     }
                 }
-                ty.clone()
+                to
             }
             ExprKind::Array(elems) => {
                 if elems.is_empty() {
@@ -846,7 +1603,7 @@ impl Analyzer {
 
         if op.is_comparison() {
             match &decided {
-                Type::Int(_) => {}
+                Type::Int(_) | Type::Char | Type::Enum(_) | Type::Float(_) => {}
                 Type::Ptr { .. } if matches!(op, BinOp::Eq | BinOp::Ne) => {}
                 Type::Ptr { .. } => {
                     self.error(
@@ -872,12 +1629,29 @@ impl Analyzer {
             return Ok(Type::Bool);
         }
 
+        if decided.is_float() {
+            if !matches!(
+                op,
+                BinOp::Add | BinOp::Sub | BinOp::Mul | BinOp::Div | BinOp::Rem
+            ) {
+                self.error(
+                    "E0210",
+                    e.span,
+                    format!(
+                        "`{}` is not defined for floating-point operands",
+                        op.describe()
+                    ),
+                );
+                return Err(());
+            }
+            return Ok(decided);
+        }
         if !decided.is_integer() {
             self.error(
                 "E0210",
                 e.span,
                 format!(
-                    "`{}` requires integer operands, found `{}`",
+                    "`{}` requires integer or float operands, found `{}`",
                     op.describe(),
                     decided.display()
                 ),
@@ -930,6 +1704,32 @@ impl Analyzer {
             return Err(());
         };
 
+        if name == "len" {
+            self.builtins.len = true;
+            if args.len() != 1 {
+                self.error(
+                    "E0204",
+                    e.span,
+                    format!("`len` takes 1 argument, found {}", args.len()),
+                );
+                return Err(());
+            }
+            let arg_ty = self.check_expr(&args[0], None)?;
+            if !matches!(arg_ty, Type::Array { .. } | Type::Slice(_) | Type::Str) {
+                self.error(
+                    "E0210",
+                    args[0].span,
+                    format!(
+                        "`len` requires an array, slice, or `str`, found `{}`",
+                        arg_ty.display()
+                    ),
+                );
+                return Err(());
+            }
+            self.calls.insert(e.id, Callee::Len);
+            return Ok(Type::Int(IntTy::Usize));
+        }
+
         // `print` is polymorphic over integers and `bool`, so it is checked
         // before the uniform argument loop below.
         if name == "print" {
@@ -943,7 +1743,14 @@ impl Analyzer {
                 return Err(());
             }
             let arg_ty = self.check_expr(&args[0], None)?;
-            if !arg_ty.is_integer() && arg_ty != Type::Bool {
+            if !arg_ty.is_integer()
+                && arg_ty != Type::Bool
+                && arg_ty != Type::Char
+                && !arg_ty.is_enum()
+                && !arg_ty.is_float()
+                && !matches!(&arg_ty, Type::Str)
+                && !matches!(&arg_ty, Type::Slice(elem) if **elem == Type::Int(IntTy::U8))
+            {
                 self.diags.push(
                     Diagnostic::error(
                         "E0203",
@@ -1067,10 +1874,37 @@ impl Analyzer {
     }
 
     /// Type and mutability of a place expression, and checks it.
+    fn field_type(&mut self, base: &Type, name: &str, span: Span) -> Result<Type, ()> {
+        let Type::Struct(info) = base else {
+            self.error(
+                "E0227",
+                span,
+                format!("cannot access field `{name}` on type `{}`", base.display()),
+            );
+            return Err(());
+        };
+        let fields = info.fields.borrow();
+        match fields.iter().find(|f| f.name == name) {
+            Some(field) => Ok(field.ty.clone()),
+            None => {
+                self.error(
+                    "E0227",
+                    span,
+                    format!("struct `{}` has no field `{name}`", info.name),
+                );
+                Err(())
+            }
+        }
+    }
+
     fn check_place(&mut self, e: &Expr) -> Result<(Type, bool), ()> {
         match &e.kind {
             ExprKind::Ident(name) => {
                 let Some(local) = self.lookup(name) else {
+                    if let Some((ty, mutable)) = self.globals.get(name).cloned() {
+                        self.expr_types.insert(e.id, ty.clone());
+                        return Ok((ty, mutable));
+                    }
                     if self.sigs.contains_key(name) || BUILTINS.contains(&name.as_str()) {
                         self.error(
                             "E0218",
@@ -1092,6 +1926,12 @@ impl Analyzer {
                 let mutable = *self.slot_mut.get(&local.slot).unwrap_or(&false);
                 self.expr_types.insert(e.id, local.ty.clone());
                 Ok((local.ty, mutable))
+            }
+            ExprKind::Field { base, name } => {
+                let (base_ty, mutable) = self.check_place(base)?;
+                let ty = self.field_type(&base_ty, name, e.span)?;
+                self.expr_types.insert(e.id, ty.clone());
+                Ok((ty, mutable))
             }
             ExprKind::Unary { op: UnOp::Deref, expr } => {
                 if self.unsafe_depth == 0 {
@@ -1116,7 +1956,9 @@ impl Analyzer {
             ExprKind::Index { base, index } => {
                 let base_ty = self.check_expr(base, None)?;
                 let (elem, len) = match &base_ty {
-                    Type::Array { elem, len } => ((**elem).clone(), *len),
+                    Type::Array { elem, len } => ((**elem).clone(), Some(*len)),
+                    Type::Slice(elem) => ((**elem).clone(), None),
+                    Type::Str => (Type::Int(IntTy::U8), None),
                     Type::Ptr { .. } => {
                         self.error(
                             "E0213",
@@ -1147,8 +1989,8 @@ impl Analyzer {
                         );
                     }
                 }
-                if let ExprKind::Int(v) = index.kind {
-                    if v >= len {
+                if let (ExprKind::Int(v), Some(len)) = (&index.kind, len) {
+                    if *v >= len {
                         self.error(
                             "E0222",
                             index.span,
@@ -1179,6 +2021,7 @@ impl Analyzer {
             ExprKind::Ident(name) => self
                 .lookup(name)
                 .map(|l| *self.slot_mut.get(&l.slot).unwrap_or(&false))
+                .or_else(|| self.globals.get(name).map(|(_, mutable)| *mutable))
                 .unwrap_or(false),
             ExprKind::Unary { op: UnOp::Deref, expr } => self
                 .expr_types
@@ -1186,6 +2029,7 @@ impl Analyzer {
                 .map(|t| t.is_mutable_pointer())
                 .unwrap_or(false),
             ExprKind::Index { base, .. } => self.place_mutability(base),
+            ExprKind::Field { base, .. } => self.place_mutability(base),
             _ => false,
         }
     }
@@ -1195,10 +2039,21 @@ impl Analyzer {
 fn checked_size(ty: &Type) -> Option<u64> {
     match ty {
         Type::Unit => Some(0),
-        Type::Bool => Some(1),
+        Type::Bool | Type::Char => Some(1),
+        Type::Float(t) => Some((t.bits() / 8) as u64),
         Type::Int(t) => Some((t.bits() / 8) as u64),
         Type::Ptr { .. } => Some(8),
         Type::Array { elem, len } => checked_size(elem)?.checked_mul(*len),
+        Type::Enum(_) => Some(4),
+        Type::Slice(_) | Type::Str => Some(16),
+        Type::Struct(info) => {
+            if info.resolved.get() {
+                Some(info.size.get())
+            } else {
+                None
+            }
+        }
+        Type::Named(_) => None,
     }
 }
 
@@ -1286,6 +2141,235 @@ fn stmt_contains_break(stmt: &Stmt) -> bool {
         Stmt::Block(body) => block_contains_break(body),
         Stmt::While { .. } | Stmt::Loop { .. } => false,
         _ => false,
+    }
+}
+
+
+fn align_to(value: u64, align: u64) -> u64 {
+    let a = align.max(1);
+    (value + a - 1) & !(a - 1)
+}
+
+/// Bit width of a scalar constant type.
+fn const_bits(ty: &Type) -> u32 {
+    match ty {
+        Type::Char => 8,
+        Type::Enum(_) => 32,
+        Type::Int(t) => t.bits(),
+        _ => 64,
+    }
+}
+
+fn mask_width(v: u64, ty: &Type) -> u64 {
+    let bits = const_bits(ty);
+    if bits < 64 {
+        v & ((1u64 << bits) - 1)
+    } else {
+        v
+    }
+}
+
+fn signed_width(v: u64, ty: &Type) -> i64 {
+    let bits = const_bits(ty);
+    let masked = mask_width(v, ty);
+    if bits >= 64 {
+        masked as i64
+    } else if masked & (1u64 << (bits - 1)) != 0 {
+        (masked as i128 - (1i128 << bits)) as i64
+    } else {
+        masked as i64
+    }
+}
+
+fn eval_int_const(e: &Expr) -> Option<i64> {
+    match &e.kind {
+        ExprKind::Int(v) if *v <= i64::MAX as u64 => Some(*v as i64),
+        ExprKind::Unary {
+            op: UnOp::Neg,
+            expr,
+        } => eval_int_const(expr).map(|v| v.wrapping_neg()),
+        ExprKind::Cast { expr, ty } if ty.is_integer() => eval_int_const(expr),
+        ExprKind::Binary { op, lhs, rhs } => {
+            let l = eval_int_const(lhs)?;
+            let r = eval_int_const(rhs)?;
+            let v = match op {
+                BinOp::Add => l.wrapping_add(r),
+                BinOp::Sub => l.wrapping_sub(r),
+                BinOp::Mul => l.wrapping_mul(r),
+                BinOp::Div => l.checked_div(r)?,
+                BinOp::Rem => l.checked_rem(r)?,
+                BinOp::Shl => l.wrapping_shl((r as u32) & 63),
+                BinOp::Shr => l.wrapping_shr((r as u32) & 63),
+                BinOp::BitAnd => l & r,
+                BinOp::BitOr => l | r,
+                BinOp::BitXor => l ^ r,
+                _ => return None,
+            };
+            Some(v)
+        }
+        _ => None,
+    }
+}
+
+fn const_binary(op: BinOp, l: ConstValue, r: ConstValue, ty: &Type) -> Option<ConstValue> {
+    if ty.is_float() {
+        let (ConstValue::Float(a), ConstValue::Float(b)) = (l, r) else {
+            return None;
+        };
+        let result = match op {
+            BinOp::Add => a + b,
+            BinOp::Sub => a - b,
+            BinOp::Mul => a * b,
+            BinOp::Div => a / b,
+            BinOp::Rem => a % b,
+            BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+                let ord = a.partial_cmp(&b);
+                let result = match op {
+                    BinOp::Eq => ord == Some(std::cmp::Ordering::Equal),
+                    BinOp::Ne => ord != Some(std::cmp::Ordering::Equal),
+                    BinOp::Lt => ord == Some(std::cmp::Ordering::Less),
+                    BinOp::Le => matches!(ord, Some(std::cmp::Ordering::Less | std::cmp::Ordering::Equal)),
+                    BinOp::Gt => ord == Some(std::cmp::Ordering::Greater),
+                    BinOp::Ge => matches!(ord, Some(std::cmp::Ordering::Greater | std::cmp::Ordering::Equal)),
+                    _ => unreachable!(),
+                };
+                return Some(ConstValue::Bool(result));
+            }
+            _ => return None,
+        };
+        return Some(ConstValue::Float(result));
+    }
+    let signed = ty.is_integer() && ty.int_ty().map(|t| t.signed()).unwrap_or(false)
+        || ty.is_enum();
+    if matches!(op, BinOp::LogicalAnd | BinOp::LogicalOr) {
+        if let (ConstValue::Bool(a), ConstValue::Bool(b)) = (&l, &r) {
+            return Some(ConstValue::Bool(if op == BinOp::LogicalAnd {
+                *a && *b
+            } else {
+                *a || *b
+            }));
+        }
+        return None;
+    }
+    if ty == &Type::Bool {
+        if let (ConstValue::Bool(a), ConstValue::Bool(b)) = (&l, &r) {
+            return match op {
+                BinOp::Eq => Some(ConstValue::Bool(a == b)),
+                BinOp::Ne => Some(ConstValue::Bool(a != b)),
+                _ => None,
+            };
+        }
+        return None;
+    }
+    let (ConstValue::Int(a), ConstValue::Int(b)) = (l, r) else {
+        return None;
+    };
+    let value = match op {
+        BinOp::Add => a.wrapping_add(b),
+        BinOp::Sub => a.wrapping_sub(b),
+        BinOp::Mul => a.wrapping_mul(b),
+        BinOp::BitAnd => a & b,
+        BinOp::BitOr => a | b,
+        BinOp::BitXor => a ^ b,
+        BinOp::Div | BinOp::Rem => {
+            if b == 0 {
+                return None;
+            }
+            if signed {
+                let sa = signed_width(a, ty);
+                let sb = signed_width(b, ty);
+                if op == BinOp::Div {
+                    sa.checked_div(sb)? as u64
+                } else {
+                    sa.checked_rem(sb)? as u64
+                }
+            } else if op == BinOp::Div {
+                mask_width(a, ty) / mask_width(b, ty)
+            } else {
+                mask_width(a, ty) % mask_width(b, ty)
+            }
+        }
+        BinOp::Shl | BinOp::Shr => {
+            let bits = const_bits(ty);
+            let shift = (b as u32) & (bits - 1);
+            if op == BinOp::Shl {
+                mask_width(a, ty) << shift
+            } else if signed {
+                (signed_width(a, ty) >> shift) as u64
+            } else {
+                mask_width(a, ty) >> shift
+            }
+        }
+        BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge => {
+            let ord = if signed {
+                signed_width(a, ty).cmp(&signed_width(b, ty))
+            } else {
+                mask_width(a, ty).cmp(&mask_width(b, ty))
+            };
+            let result = match op {
+                BinOp::Eq => ord.is_eq(),
+                BinOp::Ne => ord.is_ne(),
+                BinOp::Lt => ord.is_lt(),
+                BinOp::Le => ord.is_le(),
+                BinOp::Gt => ord.is_gt(),
+                BinOp::Ge => ord.is_ge(),
+                _ => unreachable!(),
+            };
+            return Some(ConstValue::Bool(result));
+        }
+        BinOp::LogicalAnd | BinOp::LogicalOr => unreachable!(),
+    };
+    Some(ConstValue::Int(mask_width(value, ty)))
+}
+
+fn convert_const(value: ConstValue, from: &Type, to: &Type) -> Option<ConstValue> {
+    match value {
+        ConstValue::Str(bytes) => Some(ConstValue::Str(bytes)),
+        ConstValue::GlobalAddr(name) => Some(ConstValue::GlobalAddr(name)),
+        ConstValue::Bool(b) => Some(ConstValue::Bool(b)),
+        ConstValue::Float(v) => match to {
+            Type::Float(FloatTy::F32) => Some(ConstValue::Float(v as f32 as f64)),
+            Type::Float(FloatTy::F64) => Some(ConstValue::Float(v)),
+            Type::Int(t) => {
+                let raw = if t.signed() {
+                    v as i64 as u64
+                } else {
+                    v as u64
+                };
+                Some(ConstValue::Int(mask_width(raw, &Type::Int(*t))))
+            }
+            _ => None,
+        },
+        ConstValue::Char(c) => match to {
+            Type::Char => Some(ConstValue::Char(c)),
+            Type::Int(_) => Some(ConstValue::Int(c as u64)),
+            _ => None,
+        },
+        ConstValue::Int(v) => match to {
+            Type::Char => Some(ConstValue::Char((v & 0xFF) as u8)),
+            Type::Int(_) | Type::Enum(_) => Some(ConstValue::Int(mask_width(v, to))),
+            Type::Float(FloatTy::F32) => {
+                let f = if from.is_integer() && from.int_ty().map(|t| t.signed()).unwrap_or(false)
+                    || from.is_enum()
+                {
+                    signed_width(v, from) as f64
+                } else {
+                    mask_width(v, from) as f64
+                };
+                Some(ConstValue::Float(f as f32 as f64))
+            }
+            Type::Float(FloatTy::F64) => {
+                let f = if from.is_integer() && from.int_ty().map(|t| t.signed()).unwrap_or(false)
+                    || from.is_enum()
+                {
+                    signed_width(v, from) as f64
+                } else {
+                    mask_width(v, from) as f64
+                };
+                Some(ConstValue::Float(f))
+            }
+            _ => None,
+        },
     }
 }
 

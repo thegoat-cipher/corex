@@ -5,7 +5,9 @@
 //! construct and lets code generation consume a single tree plus analysis
 //! results.
 
+use std::cell::{Cell, RefCell};
 use std::fmt;
+use std::rc::Rc;
 
 use crate::diagnostics::Span;
 
@@ -71,13 +73,75 @@ impl IntTy {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum FloatTy {
+    F32,
+    F64,
+}
+
+impl FloatTy {
+    pub fn bits(self) -> u32 {
+        match self {
+            FloatTy::F32 => 32,
+            FloatTy::F64 => 64,
+        }
+    }
+
+    pub fn name(self) -> &'static str {
+        match self {
+            FloatTy::F32 => "f32",
+            FloatTy::F64 => "f64",
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct StructField {
+    pub name: String,
+    pub ty: Type,
+    /// Byte offset within the struct, filled in by semantic analysis.
+    pub offset: u64,
+}
+
+/// Struct layout shared by every `Type::Struct` value. Interior mutability lets
+/// recursive pointer fields (`next: *Node`) reference the struct while its
+/// fields are still being resolved.
+#[derive(Debug)]
+pub struct StructInfo {
+    pub name: String,
+    pub fields: RefCell<Vec<StructField>>,
+    pub size: Cell<u64>,
+    pub align: Cell<u64>,
+    pub resolved: Cell<bool>,
+}
+
+impl PartialEq for StructInfo {
+    fn eq(&self, other: &Self) -> bool {
+        self.name == other.name
+    }
+}
+impl Eq for StructInfo {}
+impl std::hash::Hash for StructInfo {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.name.hash(state);
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Type {
     Unit,
     Bool,
+    Char,
+    Float(FloatTy),
     Int(IntTy),
     Ptr { mutable: bool, pointee: Box<Type> },
     Array { elem: Box<Type>, len: u64 },
+    Enum(String),
+    Slice(Box<Type>),
+    Str,
+    Struct(Rc<StructInfo>),
+    /// Unresolved named type produced by the parser (`Color`, `Point`).
+    Named(String),
 }
 
 impl Type {
@@ -99,6 +163,48 @@ impl Type {
         matches!(self, Type::Int(_))
     }
 
+    pub fn is_char(&self) -> bool {
+        matches!(self, Type::Char)
+    }
+
+    pub fn is_enum(&self) -> bool {
+        matches!(self, Type::Enum(_))
+    }
+
+    pub fn is_struct(&self) -> bool {
+        matches!(self, Type::Struct(_))
+    }
+
+    pub fn is_slice(&self) -> bool {
+        matches!(self, Type::Slice(_) | Type::Str)
+    }
+
+    pub fn slice_elem(&self) -> Option<Type> {
+        match self {
+            Type::Slice(elem) => Some((**elem).clone()),
+            Type::Str => Some(Type::Int(IntTy::U8)),
+            _ => None,
+        }
+    }
+
+    pub fn struct_info(&self) -> Option<&Rc<StructInfo>> {
+        match self {
+            Type::Struct(info) => Some(info),
+            _ => None,
+        }
+    }
+
+    pub fn is_float(&self) -> bool {
+        matches!(self, Type::Float(_))
+    }
+
+    pub fn float_ty(&self) -> Option<FloatTy> {
+        match self {
+            Type::Float(t) => Some(*t),
+            _ => None,
+        }
+    }
+
     pub fn int_ty(&self) -> Option<IntTy> {
         match self {
             Type::Int(t) => Some(*t),
@@ -111,7 +217,10 @@ impl Type {
     }
 
     pub fn is_aggregate(&self) -> bool {
-        matches!(self, Type::Array { .. })
+        matches!(
+            self,
+            Type::Array { .. } | Type::Struct(_) | Type::Slice(_) | Type::Str
+        )
     }
 
     pub fn pointee(&self) -> Option<&Type> {
@@ -130,9 +239,15 @@ impl Type {
         match self {
             Type::Unit => 0,
             Type::Bool => 1,
+            Type::Char => 1,
+            Type::Float(t) => (t.bits() / 8) as u64,
             Type::Int(t) => (t.bits() / 8) as u64,
             Type::Ptr { .. } => 8,
             Type::Array { elem, len } => elem.size_bytes() * len,
+            Type::Enum(_) => 4,
+            Type::Struct(info) => info.size.get(),
+            Type::Slice(_) | Type::Str => 16,
+            Type::Named(_) => 0,
         }
     }
 
@@ -140,6 +255,10 @@ impl Type {
         match self {
             Type::Unit => 1,
             Type::Array { elem, .. } => elem.align_bytes(),
+            Type::Enum(_) => 4,
+            Type::Struct(info) => info.align.get().max(1),
+            Type::Slice(_) | Type::Str => 8,
+            Type::Named(_) => 1,
             other => other.size_bytes().max(1),
         }
     }
@@ -149,9 +268,21 @@ impl Type {
         match self {
             Type::Unit => "void".to_string(),
             Type::Bool => "i8".to_string(),
+            Type::Char => "i8".to_string(),
+            Type::Float(FloatTy::F32) => "float".to_string(),
+            Type::Float(FloatTy::F64) => "double".to_string(),
             Type::Int(t) => format!("i{}", t.bits()),
             Type::Ptr { .. } => "ptr".to_string(),
             Type::Array { elem, len } => format!("[{} x {}]", len, elem.llvm()),
+            Type::Enum(_) => "i32".to_string(),
+            Type::Struct(info) => {
+                let fields = info.fields.borrow();
+                let body: Vec<String> = fields.iter().map(|f| f.ty.llvm()).collect();
+                format!("{{ {} }}", body.join(", "))
+            }
+            Type::Slice(elem) => format!("{{ ptr, i64 }} /* [{}] */", elem.display()),
+            Type::Str => "{ ptr, i64 }".to_string(),
+            Type::Named(name) => format!("<unresolved {name}>"),
         }
     }
 
@@ -159,6 +290,8 @@ impl Type {
         match self {
             Type::Unit => "void".to_string(),
             Type::Bool => "bool".to_string(),
+            Type::Char => "char".to_string(),
+            Type::Float(t) => t.name().to_string(),
             Type::Int(t) => t.name().to_string(),
             Type::Ptr { mutable, pointee } => {
                 if *mutable {
@@ -168,6 +301,11 @@ impl Type {
                 }
             }
             Type::Array { elem, len } => format!("[{}; {}]", elem.display(), len),
+            Type::Enum(name) => name.clone(),
+            Type::Struct(info) => info.name.clone(),
+            Type::Slice(elem) => format!("[{}]", elem.display()),
+            Type::Str => "str".to_string(),
+            Type::Named(name) => name.clone(),
         }
     }
 }
@@ -181,6 +319,60 @@ impl fmt::Display for Type {
 #[derive(Clone, Debug)]
 pub struct Program {
     pub fns: Vec<FnDecl>,
+    pub globals: Vec<GlobalDecl>,
+    pub enums: Vec<EnumDecl>,
+    pub structs: Vec<StructDecl>,
+}
+
+#[derive(Clone, Debug)]
+pub struct StructDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub fields: Vec<StructFieldDecl>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct StructFieldDecl {
+    pub name: String,
+    pub span: Span,
+    pub ty: Type,
+}
+
+#[derive(Clone, Debug)]
+pub struct GlobalDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub ty: Type,
+    pub mutable: bool,
+    pub init: Expr,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct EnumDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub variants: Vec<EnumVariant>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct EnumVariant {
+    pub name: String,
+    pub span: Span,
+    pub value: Option<Expr>,
+}
+
+/// Compile-time constant value of a global initializer.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConstValue {
+    Int(u64),
+    Float(f64),
+    Bool(bool),
+    Char(u8),
+    Str(Vec<u8>),
+    GlobalAddr(String),
 }
 
 #[derive(Clone, Debug)]
@@ -212,13 +404,19 @@ pub enum Stmt {
     Let {
         name: String,
         name_span: Span,
-        ty: Type,
+        ty: Option<Type>,
         mutable: bool,
         init: Expr,
         span: Span,
     },
     Assign {
         target: Expr,
+        value: Expr,
+        span: Span,
+    },
+    CompoundAssign {
+        target: Expr,
+        op: BinOp,
         value: Expr,
         span: Span,
     },
@@ -258,6 +456,7 @@ impl Stmt {
         match self {
             Stmt::Let { span, .. }
             | Stmt::Assign { span, .. }
+            | Stmt::CompoundAssign { span, .. }
             | Stmt::If { span, .. }
             | Stmt::While { span, .. }
             | Stmt::Loop { span, .. }
@@ -282,9 +481,23 @@ pub struct Expr {
 #[derive(Clone, Debug)]
 pub enum ExprKind {
     Int(u64),
+    Float(f64),
     Str(Vec<u8>),
+    Char(u8),
     Bool(bool),
     Ident(String),
+    EnumVariant {
+        enum_name: String,
+        variant: String,
+    },
+    StructLit {
+        name: String,
+        fields: Vec<(String, Expr)>,
+    },
+    Field {
+        base: Box<Expr>,
+        name: String,
+    },
     Unary {
         op: UnOp,
         expr: Box<Expr>,
@@ -301,6 +514,12 @@ pub enum ExprKind {
     Index {
         base: Box<Expr>,
         index: Box<Expr>,
+    },
+    /// `base[start..end]`; omitted bounds default to 0 and `len(base)`.
+    SliceRange {
+        base: Box<Expr>,
+        start: Option<Box<Expr>>,
+        end: Option<Box<Expr>>,
     },
     Cast {
         expr: Box<Expr>,

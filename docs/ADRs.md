@@ -715,3 +715,58 @@ These are recorded so they are not lost. None is decided.
    syscall sequences and allocator builtins.
 5. **Debug information.** Requires source maps through the AST into IR metadata;
    significant work, high debugging value.
+
+## ADR-0023 — Extended values: named types, aggregates, and slice representation
+
+**Date:** 2026-10-21
+**Status:** Accepted
+**Context:** The language grew from scalar integers/booleans/pointers/arrays to
+include characters, floats, globals, enums, structs, slices, and `str`. These
+features share three compiler-wide problems: resolving names that the parser
+cannot classify, choosing one runtime representation for aggregates, and keeping
+the already-working value/place code path intact.
+
+**Decision:**
+
+1. **Named types are resolved in semantic analysis.** The parser emits
+   `Type::Named` for every identifier in type position. Semantic analysis resolves
+   it against the enum and struct tables, producing `Type::Enum` or
+   `Type::Struct`. Analysis side tables (`expr_types`, `fn_sigs`, `cast_types`,
+   `globals`) hold only resolved types, so codegen never interprets a name.
+2. **Structs share a layout object.** Each struct is one
+   `Rc<StructInfo>` containing its fields, size, alignment, and resolved flag.
+   Pointer fields may reference the same object while fields are being resolved;
+   a direct by-value cycle is detected during layout and rejected with `E0224`.
+   Layout is natural (field alignment, final size rounded to struct alignment),
+   matching LLVM's literal struct layout.
+3. **All aggregates are pointers to storage while being generated.** Arrays,
+   structs, slices, and `str` are represented by an SSA pointer to an entry-block
+   allocation. Binding, assignment, and element/field stores perform an explicit
+   aggregate `load` + `store`; scalar reads load from the place. This keeps one
+   `gen_place` / `gen_expr` model for existing arrays and new types.
+4. **Aggregate ABI is compiler-internal.** Aggregate parameters are passed as
+   `ptr` and copied into the callee's slot in the entry block, preserving value
+   semantics. Aggregate returns use a hidden `ptr %sret` first parameter and
+   `ret void`; callers allocate the result slot. Scalars keep the System V
+   register ABI. No C interoperability is promised for aggregates.
+5. **Slices and `str` are two-word values.** `[T]` and `str` are laid out as
+   `{ ptr, i64 }` (length in elements; bytes for `str`), copied shallowly.
+   String literals are private byte constants plus a stack-built view. `&array`
+   in a slice context records the array length; range expressions reuse the same
+   view and check `start <= end <= len`.
+6. **String literals are `str` by default, arrays on demand.** Context expecting
+   `[u8; N]` of the same length makes the literal an array value; otherwise it is
+   `str`. This preserves the existing array-literal programs while enabling
+   `len`, indexing, slicing, printing, and slice parameters.
+7. **Constant evaluation is semantic and explicit.** Globals store typed
+   `ConstValue`s computed by a recursive evaluator restricted to literals,
+   operators, casts, enum variants, string/array literals, and `&global`.
+   Mutable or forward global reads are rejected with `E0226`; codegen only
+   formats already-computed constants.
+
+**Consequences:** New aggregate types reuse the established copy-on-bind code
+path and can be nested without special cases. The cost is an extra alloca/copy
+for aggregates and a non-C ABI. `Rc<StructInfo>` uses interior mutability, but
+only semantic analysis mutates it; after analysis the layout is immutable in
+practice. Forward references between constants are not supported, which is
+documented rather than hidden.

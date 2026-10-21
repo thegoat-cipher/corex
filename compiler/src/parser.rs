@@ -21,18 +21,54 @@ pub fn parse(tokens: &[Token]) -> Result<Program, Vec<Diagnostic>> {
         depth: 0,
     };
     let mut fns = Vec::new();
+    let mut globals = Vec::new();
+    let mut enums = Vec::new();
+    let mut structs = Vec::new();
     while !p.at(&TokenKind::Eof) && p.diags.len() < 100 {
         let before = p.pos;
-        if let Ok(f) = p.parse_fn() {
-            fns.push(f);
+        match p.peek() {
+            TokenKind::Fn => {
+                if let Ok(f) = p.parse_fn() {
+                    fns.push(f);
+                }
+            }
+            TokenKind::Static => {
+                if let Ok(g) = p.parse_global() {
+                    globals.push(g);
+                }
+            }
+            TokenKind::Enum => {
+                if let Ok(en) = p.parse_enum() {
+                    enums.push(en);
+                }
+            }
+            TokenKind::Struct => {
+                if let Ok(st) = p.parse_struct() {
+                    structs.push(st);
+                }
+            }
+            _ => {
+                let span = p.peek_span();
+                let found = p.peek().describe();
+                p.diags.push(Diagnostic::error(
+                    "E0100",
+                    span,
+                    format!("expected `fn`, `static`, or `enum`, found {found}"),
+                ));
+            }
         }
         if p.pos == before {
             p.advance();
         }
-        p.recover_to_fn();
+        p.recover_to_item();
     }
     if p.diags.is_empty() {
-        Ok(Program { fns })
+        Ok(Program {
+            fns,
+            globals,
+            enums,
+            structs,
+        })
     } else {
         Err(p.diags)
     }
@@ -103,8 +139,15 @@ impl<'a> Parser<'a> {
         }
     }
 
-    fn recover_to_fn(&mut self) {
-        while !matches!(self.peek(), TokenKind::Fn | TokenKind::Eof) {
+    fn recover_to_item(&mut self) {
+        while !matches!(
+            self.peek(),
+            TokenKind::Fn
+                | TokenKind::Static
+                | TokenKind::Enum
+                | TokenKind::Struct
+                | TokenKind::Eof
+        ) {
             self.advance();
         }
     }
@@ -208,6 +251,10 @@ impl<'a> Parser<'a> {
             TokenKind::Usize => Type::Int(IntTy::Usize),
             TokenKind::Isize => Type::Int(IntTy::Isize),
             TokenKind::Bool => Type::Bool,
+            TokenKind::Char => Type::Char,
+            TokenKind::F32 => Type::Float(FloatTy::F32),
+            TokenKind::F64 => Type::Float(FloatTy::F64),
+            TokenKind::StrType => Type::Str,
             TokenKind::Star => {
                 self.advance();
                 let mutable = if self.at(&TokenKind::Mut) {
@@ -219,9 +266,17 @@ impl<'a> Parser<'a> {
                 let pointee = self.parse_type()?;
                 Type::ptr_to(pointee, mutable)
             }
+            TokenKind::Ident(ref name) => {
+                self.advance();
+                Type::Named(name.clone())
+            }
             TokenKind::LBracket => {
                 self.advance();
                 let elem = self.parse_type()?;
+                if self.at(&TokenKind::RBracket) {
+                    self.advance();
+                    return Ok(Type::Slice(Box::new(elem)));
+                }
                 self.expect(&TokenKind::Semi, "inside array type")?;
                 let len_tok = self.peek().clone();
                 let len = match len_tok {
@@ -274,6 +329,10 @@ impl<'a> Parser<'a> {
                 | TokenKind::Usize
                 | TokenKind::Isize
                 | TokenKind::Bool
+                | TokenKind::Char
+                | TokenKind::F32
+                | TokenKind::F64
+                | TokenKind::StrType
         ) {
             self.advance();
         }
@@ -367,7 +426,31 @@ impl<'a> Parser<'a> {
             TokenKind::LBrace => Ok(Stmt::Block(self.parse_block()?)),
             _ => {
                 let target = self.parse_expr()?;
-                if self.at(&TokenKind::Assign) {
+                let compound = match self.peek() {
+                    TokenKind::PlusEq => Some(BinOp::Add),
+                    TokenKind::MinusEq => Some(BinOp::Sub),
+                    TokenKind::StarEq => Some(BinOp::Mul),
+                    TokenKind::SlashEq => Some(BinOp::Div),
+                    TokenKind::PercentEq => Some(BinOp::Rem),
+                    TokenKind::AmpEq => Some(BinOp::BitAnd),
+                    TokenKind::PipeEq => Some(BinOp::BitOr),
+                    TokenKind::CaretEq => Some(BinOp::BitXor),
+                    TokenKind::ShlEq => Some(BinOp::Shl),
+                    TokenKind::ShrEq => Some(BinOp::Shr),
+                    _ => None,
+                };
+                if let Some(op) = compound {
+                    self.advance();
+                    let value = self.parse_expr()?;
+                    let semi = self.expect(&TokenKind::Semi, "after compound assignment")?;
+                    let span = target.span.merge(semi.span);
+                    Ok(Stmt::CompoundAssign {
+                        target,
+                        op,
+                        value,
+                        span,
+                    })
+                } else if self.at(&TokenKind::Assign) {
                     self.advance();
                     let value = self.parse_expr()?;
                     let semi = self.expect(&TokenKind::Semi, "after assignment")?;
@@ -395,8 +478,12 @@ impl<'a> Parser<'a> {
             false
         };
         let (name, name_span) = self.expect_ident("binding name")?;
-        self.expect(&TokenKind::Colon, "after binding name (type annotation is required)")?;
-        let ty = self.parse_type()?;
+        let ty = if self.at(&TokenKind::Colon) {
+            self.advance();
+            Some(self.parse_type()?)
+        } else {
+            None
+        };
         self.expect(&TokenKind::Assign, "before binding initializer")?;
         let init = self.parse_expr()?;
         let semi = self.expect(&TokenKind::Semi, "after binding initializer")?;
@@ -444,6 +531,107 @@ impl<'a> Parser<'a> {
     }
 
     // ----- expressions -------------------------------------------------
+
+    fn parse_global(&mut self) -> Result<GlobalDecl, ()> {
+        let kw = self.expect(&TokenKind::Static, "start of global")?;
+        let mutable = if self.at(&TokenKind::Mut) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+        let (name, name_span) = self.expect_ident("global name")?;
+        self.expect(&TokenKind::Colon, "after global name")?;
+        let ty = self.parse_type()?;
+        self.expect(&TokenKind::Assign, "before global initializer")?;
+        let init = self.parse_expr()?;
+        let semi = self.expect(&TokenKind::Semi, "after global initializer")?;
+        Ok(GlobalDecl {
+            name,
+            name_span,
+            ty,
+            mutable,
+            init,
+            span: kw.span.merge(semi.span),
+        })
+    }
+
+    fn parse_enum(&mut self) -> Result<EnumDecl, ()> {
+        let kw = self.expect(&TokenKind::Enum, "start of enum")?;
+        let (name, name_span) = self.expect_ident("enum name")?;
+        self.expect(&TokenKind::LBrace, "after enum name")?;
+        let mut variants = Vec::new();
+        while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+            let (vname, vspan) = self.expect_ident("variant name")?;
+            let value = if self.at(&TokenKind::Assign) {
+                self.advance();
+                Some(self.parse_expr()?)
+            } else {
+                None
+            };
+            variants.push(EnumVariant {
+                name: vname,
+                span: vspan,
+                value,
+            });
+            if self.at(&TokenKind::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        let close = self.expect(&TokenKind::RBrace, "after enum variants")?;
+        Ok(EnumDecl {
+            name,
+            name_span,
+            variants,
+            span: kw.span.merge(close.span),
+        })
+    }
+
+    fn parse_struct(&mut self) -> Result<StructDecl, ()> {
+        let kw = self.expect(&TokenKind::Struct, "start of struct")?;
+        let (name, name_span) = self.expect_ident("struct name")?;
+        self.expect(&TokenKind::LBrace, "after struct name")?;
+        let mut fields = Vec::new();
+        while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+            let (fname, fspan) = self.expect_ident("field name")?;
+            self.expect(&TokenKind::Colon, "after field name")?;
+            let ty = self.parse_type()?;
+            fields.push(StructFieldDecl {
+                name: fname,
+                span: fspan,
+                ty,
+            });
+            if self.at(&TokenKind::Comma) {
+                self.advance();
+            } else {
+                break;
+            }
+        }
+        let close = self.expect(&TokenKind::RBrace, "after struct fields")?;
+        Ok(StructDecl {
+            name,
+            name_span,
+            fields,
+            span: kw.span.merge(close.span),
+        })
+    }
+
+    fn looks_like_struct_literal(&self) -> bool {
+        // `Name { field: ... }`. Requiring at least one `field:` keeps block
+        // statements (`if flag { ... }`) unambiguous.
+        matches!(
+            self.tokens.get(self.pos).map(|t| &t.kind),
+            Some(TokenKind::LBrace)
+        ) && matches!(
+            self.tokens.get(self.pos + 1).map(|t| &t.kind),
+            Some(TokenKind::Ident(_))
+        ) && matches!(
+            self.tokens.get(self.pos + 2).map(|t| &t.kind),
+            Some(TokenKind::Colon)
+        )
+    }
 
     fn parse_expr(&mut self) -> Result<Expr, ()> {
         if self.depth >= MAX_NESTING {
@@ -584,18 +772,54 @@ impl<'a> Parser<'a> {
                         span,
                     );
                 }
-                TokenKind::LBracket => {
+                TokenKind::Dot => {
                     self.advance();
-                    let index = self.parse_expr()?;
-                    let close = self.expect(&TokenKind::RBracket, "after index expression")?;
-                    let span = expr.span.merge(close.span);
+                    let (field, fspan) = self.expect_ident("field name")?;
+                    let span = expr.span.merge(fspan);
                     expr = self.mk_expr(
-                        ExprKind::Index {
+                        ExprKind::Field {
                             base: Box::new(expr),
-                            index: Box::new(index),
+                            name: field,
                         },
                         span,
                     );
+                }
+                TokenKind::LBracket => {
+                    self.advance();
+                    let start = if self.at(&TokenKind::DotDot) {
+                        None
+                    } else {
+                        Some(Box::new(self.parse_expr()?))
+                    };
+                    if self.at(&TokenKind::DotDot) {
+                        self.advance();
+                        let end = if self.at(&TokenKind::RBracket) {
+                            None
+                        } else {
+                            Some(Box::new(self.parse_expr()?))
+                        };
+                        let close = self.expect(&TokenKind::RBracket, "after slice range")?;
+                        let span = expr.span.merge(close.span);
+                        expr = self.mk_expr(
+                            ExprKind::SliceRange {
+                                base: Box::new(expr),
+                                start,
+                                end,
+                            },
+                            span,
+                        );
+                    } else {
+                        let Some(index) = start else { unreachable!() };
+                        let close = self.expect(&TokenKind::RBracket, "after index expression")?;
+                        let span = expr.span.merge(close.span);
+                        expr = self.mk_expr(
+                            ExprKind::Index {
+                                base: Box::new(expr),
+                                index,
+                            },
+                            span,
+                        );
+                    }
                 }
                 _ => break,
             }
@@ -615,12 +839,50 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(self.mk_expr(ExprKind::Str(bytes), span))
             }
+            TokenKind::Float(bits) => {
+                self.advance();
+                Ok(self.mk_expr(ExprKind::Float(f64::from_bits(bits)), span))
+            }
+            TokenKind::CharLit(value) => {
+                self.advance();
+                Ok(self.mk_expr(ExprKind::Char(value), span))
+            }
             TokenKind::True | TokenKind::False => {
                 self.advance();
                 Ok(self.mk_expr(ExprKind::Bool(matches!(kind, TokenKind::True)), span))
             }
             TokenKind::Ident(name) => {
                 self.advance();
+                if self.at(&TokenKind::ColonColon) {
+                    self.advance();
+                    let (variant, vspan) = self.expect_ident("enum variant")?;
+                    let span = span.merge(vspan);
+                    return Ok(self.mk_expr(
+                        ExprKind::EnumVariant {
+                            enum_name: name,
+                            variant,
+                        },
+                        span,
+                    ));
+                }
+                if self.looks_like_struct_literal() {
+                    self.advance();
+                    let mut fields = Vec::new();
+                    while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+                        let (fname, _fspan) = self.expect_ident("field name")?;
+                        self.expect(&TokenKind::Colon, "after field name")?;
+                        let value = self.parse_expr()?;
+                        fields.push((fname, value));
+                        if self.at(&TokenKind::Comma) {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    let close = self.expect(&TokenKind::RBrace, "after struct literal")?;
+                    let span = span.merge(close.span);
+                    return Ok(self.mk_expr(ExprKind::StructLit { name, fields }, span));
+                }
                 Ok(self.mk_expr(ExprKind::Ident(name), span))
             }
             TokenKind::LParen => {

@@ -1,4 +1,4 @@
-# CoreX Memory Model — v0.1
+# CoreX Memory Model — v0.2
 
 Status: **normative**. This document states exactly what the compiler enforces,
 what the runtime checks, and what the programmer must get right. CoreX does not
@@ -18,14 +18,15 @@ Related: [`language-spec.md`](language-spec.md), [`ADRs.md`](ADRs.md) (ADR-0003)
   Nothing frees memory implicitly. A function return destroys its stack frame;
   heap regions live until `free` (or process exit).
 - **No hidden allocation.** Assigning, returning, passing, and indexing values
-  never allocates. Arrays are copied inline. A string literal is a read-only
-  `[u8; N]` in the object file.
+  never allocates. Arrays and structs are copied inline. A string literal is
+  read-only bytes in the object file plus a two-word `str` view (`{ptr, len}`)
+  built on the stack; slices copy only those two words, never the elements.
 - **Type and mutability are checked; lifetime and validity are not.**
   - Compile time: every place has one type; writes require a mutable place; raw
     pointer dereference, pointer arithmetic, integer/pointer casts, `alloc`,
     `free`, and `syscall` require `unsafe`.
-  - Runtime: dynamic array indices are bounds-checked; division by zero and
-    failed allocation abort with exit 101.
+  - Runtime: dynamic array/slice indices and slice ranges are bounds-checked;
+    integer division by zero and failed allocation abort with exit 101.
   - Programmer: pointer validity, allocation lifetime, alignment, aliasing
     discipline, and matching `alloc`/`free` sizes.
 
@@ -40,20 +41,32 @@ rejected for v0.1.
 
 ### 2.1 Static (read-only)
 
-String literals and runtime error messages are emitted as `private unnamed_addr
-constant` globals. They are mapped read-only by the kernel (`.rodata`). Writing
-through a pointer derived from a string literal via `as *mut u8` is undefined and
-typically faults.
+String literals, runtime error messages, and other private constants are emitted
+as `private unnamed_addr constant` globals in `.rodata`. `static` globals are
+emitted as LLVM `constant` or `global` definitions: immutable globals are
+read-only, `static mut` globals live in writable data. Writing through a pointer
+derived from a string literal via `as *mut u8` is undefined and typically faults.
+
+A `str`/`[T]` value itself is a 16-byte `{data, len}` pair and can live on the
+stack, in a struct, in an array, or in a global; the pair is copied, the
+referenced elements are not. A slice may point into read-only memory, so writing
+through a slice derived from a string literal is undefined even if the local
+slice binding is mutable.
 
 ### 2.2 Stack
 
-- Every local binding and array temporary gets one `alloca` in the function's
-  entry block. Allocation therefore costs nothing at runtime inside loops.
+- Every local binding, array temporary, struct temporary, and slice view gets
+  one `alloca` in the function's entry block. Allocation therefore costs nothing
+  at runtime inside loops.
 - Lifetime: the enclosing function activation. A pointer to a local becomes
   dangling when the function returns.
-- Size: fixed at compile time. No variable-length arrays. A single value larger
+- Size: fixed at compile time. No variable-length arrays. Structs use natural
+  alignment and padding; slices/`str` are always 16 bytes. A single value larger
   than 1 MiB is rejected (`E0223`); the kernel's default 8 MiB stack applies, and
   exhausting it raises `SIGSEGV`.
+- Copies: binding, assignment, argument passing, and return copy arrays and
+  structs byte-for-byte. Slices/`str` copy the pointer and length; the elements
+  remain shared. There is no copy-on-write.
 - Initialization: every binding requires an initializer, and every array element
   is written before the value is used, so stack reads are always of initialized
   memory. There is no `uninit` construct.
@@ -85,8 +98,10 @@ free(pointer: *mut u8, bytes: usize) // munmap(pointer, bytes)
 ### 2.4 Printing (`print`)
 
 `print` is a compiler-provided runtime helper, not a library call. It formats
-into a 20-byte `alloca` in the helper's entry block and issues two `write`
-syscalls: the digits, then a newline. It allocates nothing on the heap, requires no `unsafe`, and
+integers into a 20-byte `alloca` in the helper's entry block, commands into a
+small buffer for `char`, and floats into integer/fraction parts; it then issues
+`write` syscalls for the bytes and a newline. Strings and `[u8]` slices are
+written directly from their data pointer and length. It allocates nothing on the heap, requires no `unsafe`, and
 cannot fail visibly: a failed `write` (for example a closed stdout) is ignored,
 exactly like any other unchecked syscall result.
 
@@ -111,7 +126,9 @@ outside `unsafe` is `E0209`.
 | Integer to pointer | `n as *mut T` (**unsafe**) | `n` is an integer | address is mapped and aligned | segfault |
 | Pointer to integer | `p as usize` (**unsafe**) | `p` is a pointer | none (address is exposed) | — |
 | Index an array | `a[i]` | `a: [T; N]`, `i: usize` | none | compile error `E0222` (literal index) or abort 101 (computed index) |
-| Copy an array | `let b: [T; N] = a;` | identical types | none (inline copy) | none |
+| Copy an array/struct | `let b: [T; N] = a;` | identical types | none (inline copy) | none |
+| Copy a slice/`str` | `let t: [T] = s;` | identical slice type | none (two-word copy; elements shared) | none |
+| Index/slice bounds | `a[i]`, `s[a..b]` | `usize` bounds | abort 101 if out of bounds | — |
 | Heap allocation | `alloc(n)` (**unsafe**) | `n: usize` | choose a size your code will respect | abort 101 |
 | Heap release | `free(p, n)` (**unsafe**) | `p: *mut u8`, `n: usize` | `p`/`n` came from one `alloc` | silent leak/partial unmap |
 | Raw syscall | `syscall(nr, ...)` (**unsafe**) | 1–7 integer arguments | syscall-specific pointer validity | kernel error in return value |
@@ -190,6 +207,7 @@ errors, and dynamic bounds/division checks still run.
 | Allocation freed exactly once with the right size | — | — | yes |
 | No use after free | — | — | yes |
 | Dynamic indices in bounds | — | abort 101 | — |
+| Slice ranges in bounds | — | abort 101 | — |
 | Division by zero | — | abort 101 | — |
 | Allocation failure | — | abort 101 | — |
 | Integer overflow | defined (wraps) | — | — |

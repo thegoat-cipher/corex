@@ -244,3 +244,67 @@ fn diagnostics_report_file_line_and_column() {
     assert!(rendered.contains("span.cx:1:27"), "rendered:\n{rendered}");
     assert!(rendered.contains("^^^^"), "rendered:\n{rendered}");
 }
+
+#[test]
+fn rejects_recursive_structs_and_bad_fields() {
+    assert_rejected(
+        "struct Bad { b: Bad } fn main() -> i32 { return 0; }",
+        "E0224",
+    );
+    assert_rejected(
+        "struct P { x: i32 } fn main() -> i32 { let p = P { y: 1 }; return 0; }",
+        "E0227",
+    );
+    assert_rejected(
+        "struct P { x: i32, y: i32 } fn main() -> i32 { let p = P { x: 1 }; return 0; }",
+        "E0229",
+    );
+    assert_rejected(
+        "struct P { x: i32 } fn main() -> i32 { let p: i32 = 1; print(p.x); return 0; }",
+        "E0227",
+    );
+}
+
+#[test]
+fn rejects_non_constant_global_initializers() {
+    assert_rejected(
+        "static mut M: i32 = 1; static C: i32 = M; fn main() -> i32 { return 0; }",
+        "E0226",
+    );
+    assert_rejected(
+        "fn f() -> i32 { return 1; } static C: i32 = f(); fn main() -> i32 { return 0; }",
+        "E0226",
+    );
+}
+
+#[test]
+fn rejects_enum_and_character_type_errors() {
+    assert_rejected(
+        "enum E { A, A } fn main() -> i32 { return 0; }",
+        "E0228",
+    );
+    assert_rejected(
+        "enum E { A } fn main() -> i32 { let x: E = E::A; let y: i32 = x; return 0; }",
+        "E0203",
+    );
+    assert_rejected(
+        "fn main() -> i32 { let c: char = 'a'; return c + 1; }",
+        "E0203",
+    );
+}
+
+#[test]
+fn rejects_invalid_slice_ranges_and_printables() {
+    assert_rejected(
+        "fn main() -> i32 { let s: str = \"abc\"; print(s[2..1]); return 0; }",
+        "E0222",
+    );
+    assert_rejected(
+        "fn main() -> i32 { print(\"abc\"[4..]); return 0; }",
+        "E0222",
+    );
+    assert_rejected(
+        "fn main() -> i32 { let a: [i32; 2] = [1, 2]; let s: [i32] = &a; print(s); return 0; }",
+        "E0203",
+    );
+}

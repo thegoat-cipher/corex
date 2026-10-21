@@ -4,7 +4,7 @@ Status values: NOT STARTED, IN PROGRESS, BLOCKED, COMPLETED. Validated status
 changed only after the acceptance criteria passed. Evidence names the command or
 test that proves completion; counts are from the run on 2026-10-21.
 
-Test totals: `cargo test` → **122 passed, 0 failed** (53 unit, 69 integration).
+Test totals: `cargo test` → **133 passed, 0 failed** (53 unit, 80 integration).
 
 | ID | Description | Workstream | Priority | Depends on | Status | Acceptance criteria | Validation evidence |
 |---|---|---|---|---|---|---|---|
@@ -36,14 +36,17 @@ Test totals: `cargo test` → **122 passed, 0 failed** (53 unit, 69 integration)
 | T-026 | Optimization-level semantic regression suite (`--opt 0..3`) | Testing and Quality (isolated workstream) | P0 | T-017, T-018 | COMPLETED | Wrapping, shifts, division/bounds aborts, aliasing and print behave identically at O0–O3; emitter emits no `nsw`/`nuw`; harness proven by mutation | `tests/opt_levels.rs` → 5 passed; 14 fixed cases × 4 levels, 4 examples × 4, 4 generated programs × 69 values × 4 = 1,104 assertions; shift-mask and `nsw` mutations both fail; ADR-0019 |
 | T-027 | Fact-check pass: reconcile docs with behavior, fix spec gaps | Documentation (isolated workstream) | P0 | T-019…T-026 | COMPLETED | Every quoted count, line number, diagnostic code and behavior claim verified against fresh output; contradictions fixed in code or docs | Local pass plus independent audit triage: 122 tests pass; all 71 audit findings dispositioned (fixed, already fixed, or documented unverifiable); module table matches `wc -l`; ADR-0021; R-0015; `docs/audit-2026-10-21.md` |
 | T-028 | Open-source licensing: MIT OR Apache-2.0, third-party notices, contribution terms | Maintainer (Legal/docs) | P0 | T-019 | COMPLETED | Permissive, OSI-approved license; forks and commercial use allowed; build tools not redistributed; compiled output unencumbered | `LICENSE-MIT`, `LICENSE-APACHE`, `compiler/Cargo.toml` license field, README License section, `THIRD_PARTY.md`, ADR-0022, R-0016; GitHub license detection verified |
+| T-041 | Compound assignment, type inference, characters | Maintainer (Language) | P0 | T-028 | COMPLETED | `+=` family through mutable places; `let` inference; `char` literals/escapes, comparisons, casts, printing | `tests/features.rs::compound_assignment_inference_and_characters`; `tests/diagnostics.rs` char/type cases; `tests/lexer`/parser unit tests |
+| T-042 | Globals, enums, and constant evaluation | Maintainer (Language) | P0 | T-041 | COMPLETED | `static`/`static mut` with const initializers and address-of; enums with i32 discriminants, comparisons, casts, printing | `tests/features.rs::globals_enums_and_constant_addresses`; `tests/diagnostics.rs::rejects_non_constant_global_initializers`, `rejects_enum_and_character_type_errors` |
+| T-043 | Floats and float printing | Maintainer (Language + Backend) | P1 | T-042 | COMPLETED | `f32`/`f64` literals, arithmetic, ordered comparisons, casts, compound assignment, globals, fixed-six print with nan/inf | `tests/features.rs::floats_arithmetic_casts_and_printing`; IR verifies via `llvm-as` |
+| T-044 | Structs: layout, literals, fields, by-value ABI | Maintainer (Language + Backend) | P0 | T-042 | COMPLETED | Natural layout, nested/array structs, copy semantics, by-value params/returns, field assignment | `tests/features.rs::struct_values_fields_params_returns_and_arrays`; `tests/diagnostics.rs::rejects_recursive_structs_and_bad_fields` |
+| T-045 | Slices, `str`, `len`, and ranges | Maintainer (Language + Backend) | P0 | T-044 | COMPLETED | `[T]`/`str` two-word values, array-to-slice coercion, indexing, `len`, `a..b` sub-slices, checked bounds | `tests/features.rs::slices_strings_len_and_ranges`, `runtime_slice_bounds_abort`; `tests/diagnostics.rs::rejects_invalid_slice_ranges_and_printables` |
+| T-046 | Documentation, grammar, and example for extended features | Documentation (isolated workstream) | P0 | T-041…T-045 | COMPLETED | Spec/grammar/README/memory/architecture/PRD/task tracker match implemented behavior; checked-in example | `examples/features.cx`; `tests/features.rs::features_example_runs`; docs updated 2026-10-21 |
 
 ## Backlog (NOT STARTED)
 
 | ID | Description | Priority | Blocked by |
 |---|---|---|---|
-| T-030 | Structs and field access | P1 | design decision (layout/ABI) |
-| T-031 | Floats (`f32`, `f64`) and conversions | P2 | type system extension |
-| T-032 | Global variables and `static` items | P1 | visibility/linkage policy |
 | T-033 | Module system and multi-object linking | P2 | name mangling policy |
 | T-034 | `extern` declarations and C FFI | P1 | ABI policy, header story |
 | T-035 | Debug information (DWARF) | P1 | source map through AST → IR metadata |
@@ -55,6 +58,6 @@ Test totals: `cargo test` → **122 passed, 0 failed** (53 unit, 69 integration)
 
 ## Status summary
 
-- COMPLETED: T-001 … T-028 (28 tasks).
+- COMPLETED: T-001 … T-028 and T-041 … T-046 (34 tasks).
 - IN PROGRESS: none.
 - BLOCKED: none.

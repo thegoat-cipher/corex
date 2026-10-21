@@ -19,7 +19,7 @@ fn main() -> i32 {
 }
 ```
 
-Status: **MVP implemented and tested** — 122 automated tests pass, including
+Status: **MVP implemented and tested** — 133 automated tests pass, including
 integration tests that compile programs to native binaries and assert their
 output and exit codes at every optimization level.
 Language surface is deliberately small; see [Limitations](#limitations).
@@ -112,22 +112,27 @@ Environment: `COREX_LLVM_BIN` (LLVM tool directory), `COREX_CC` (linker driver),
 
 ## Language in one screen
 
-- **Types:** `i8 i16 i32 i64`, `u8 u16 u32 u64`, `usize isize`, `bool`,
-  `*T`, `*mut T`, `[T; N]`. No floats, structs, or pointers-to-function.
-- **Bindings:** `let x: i32 = 1;` (immutable), `let mut y: u8 = 2;` (mutable).
-  The type and the initializer are both mandatory.
-- **Functions:** `fn name(a: T, b: U) -> R { ... }`; recursion allowed; arrays
-  cannot be passed or returned by value.
+- **Types:** `i8 i16 i32 i64`, `u8 u16 u32 u64`, `usize isize`, `bool`, `char`,
+  `f32 f64`, `*T`, `*mut T`, `[T; N]`, slices `[T]`, `str`, `enum`, and
+  `struct` values. Arrays cannot be passed or returned by value; structs,
+  slices, and `str` can.
+- **Bindings:** `let x: i32 = 1;` (immutable) or `let x = 1;` (inferred);
+  `let mut` makes the binding mutable. The initializer is mandatory.
+- **Items:** functions, `static`/`static mut` globals with constant
+  initializers, enums with explicit `i32` discriminants, and structs.
+- **Functions:** `fn name(a: T, b: U) -> R { ... }`; recursion allowed.
 - **Control flow:** `if/else`, `while`, `loop`, `break`, `continue`, `return`,
   `unsafe { ... }`. Blocks are statements, not expressions.
-- **Operators:** `+ - * / %`, comparisons, `&& || !`, `& | ^ << >>`, unary `-`,
-  `as`, indexing. C-like precedence.
+- **Operators:** `+ - * / %`, comparisons, `&& || !`, `& | ^ << >>`, compound
+  assignment (`+=`, `<<=`, …), unary `-`, `as`, indexing, field access,
+  slicing, and `len(x)`.
 - **Semantics that matter:**
   - integer overflow wraps (`(255 as u8) + 1 == 0`);
   - shift counts are masked (`(1 as u8) << 8 == 1`);
-  - division by zero, `MIN / -1`, and dynamic out-of-bounds indices abort with
-    message on stderr and exit 101;
-  - literal out-of-bounds indices are compile errors;
+  - integer division by zero, `MIN / -1`, dynamic out-of-bounds indices, and
+    slice-range violations abort with a message on stderr and exit 101;
+  - literal out-of-bounds indices/ranges are compile errors;
+  - floats are IEEE 754 and never abort on division by zero;
   - no implicit numeric conversions — use `as`.
 - **Memory:** `alloc(bytes)` → `*mut u8` via `mmap`, `free(ptr, bytes)` via
   `munmap`; raw pointer dereference, pointer arithmetic, integer/pointer casts,
@@ -135,8 +140,9 @@ Environment: `COREX_LLVM_BIN` (LLVM tool directory), `COREX_CC` (linker driver),
   claim memory safety for pointer code.
 - **Syscalls:** `syscall(nr, a1, ..., a6)` with 1–7 arguments (missing arguments
   are passed as 0), returning `isize` in `rax`.
-- **Printing:** `print(value)` writes an integer (signed or unsigned) or `bool`
-  as decimal text plus a newline to stdout; no `unsafe`, no heap allocation.
+- **Printing:** `print(value)` writes an integer, `bool`, `char`, float (fixed
+  six decimals), enum discriminant, or string/`[u8]` slice plus a newline to
+  stdout; no `unsafe`, no heap allocation.
 - **Entry:** `fn _start()` for full control, or `fn main() -> i32` (the compiler
   synthesizes `_start`, exits with the low 8 bits of the return value).
 
@@ -153,6 +159,7 @@ Full normative details: [`docs/language-spec.md`](docs/language-spec.md) and
 | [`examples/factorial.cx`](examples/factorial.cx) | recursion, `while`/`loop`/`break`, arrays, decimal formatting | prints `3628800`, exit 0 |
 | [`examples/pointers.cx`](examples/pointers.cx) | `alloc`, `*mut u64`, casts, `free` | prints `123456789`, exit 0 |
 | [`examples/loop_sum.cx`](examples/loop_sum.cx) | `while`, `continue`, `usize` arithmetic | exit status 51 |
+| [`examples/features.cx`](examples/features.cx) | enums, structs, globals, floats, chars, inference, compound assignment, slices, strings, `len` | deterministic tour output, exit 0 |
 
 ---
 
@@ -160,12 +167,13 @@ Full normative details: [`docs/language-spec.md`](docs/language-spec.md) and
 
 ```bash
 cd compiler
-cargo test                 # 122 tests: 53 unit + 69 integration
+cargo test                 # 133 tests: 53 unit + 80 integration
 cargo test --lib           # stage unit tests only
 cargo test --test native   # compile → link → execute, asserts stdout/exit codes
 cargo test --test cli      # stdin, exec, REPL, flags and exit codes
 cargo test --test ir       # every example is assembled and verified by llvm-as
 cargo test --test diagnostics  # invalid programs rejected with specific codes
+cargo test --test features     # globals, enums, floats, structs, slices, strings
 cargo test --test opt_levels   # identical semantics at --opt 0 through 3
                                # (wrapping, shifts, aborts, aliasing, print)
                                # plus 1,104 generated value assertions
@@ -208,8 +216,9 @@ compiler/
     native.rs           executed binaries
     cli.rs              stdin, exec, and REPL behavior
     opt_levels.rs       same semantics at --opt 0..3 (wrapping, shifts, aborts)
+    features.rs         globals/enums/floats/structs/slices/strings end to end
     robustness.rs       malformed/adversarial input never panics
-examples/               hello, factorial, pointers, loop_sum, playground
+examples/               hello, factorial, pointers, loop_sum, features, playground
 bench/                  two kernels with C references
 scripts/bench.sh        benchmark harness
 scripts/try.sh          compile-and-run one file (check / ir / build modes)
@@ -223,10 +232,10 @@ master.md               current status, milestones, next actions
 
 ## Limitations
 
-Explicitly not implemented: structs, enums, unions, tuples, floats, characters,
-slices, generics, traits, closures, function pointers, modules, imports, `extern`
-/ C FFI, globals, compound assignment, labeled break, `match`, macros, threads,
-debug information, cross-compilation, and any CoreX-level optimizer.
+Explicitly not implemented: unions, tuples, generics, traits, closures, function
+pointers, modules, imports, `extern` / C FFI, labeled break, `match`, macros,
+threads, debug information, cross-compilation, and any CoreX-level optimizer.
+Slices and strings have no concatenation, formatting, or comparison operators.
 
 Safety: pointer validity, allocation lifetime, alignment, double free, and
 use-after-free are the programmer's responsibility. The compiler guarantees types,

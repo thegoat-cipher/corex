@@ -6,7 +6,7 @@ were read from the code, not proposed.
 - Rust 1.99.1, edition 2021, **zero external crates**.
 - LLVM 20.1.8 tools invoked as processes (`llvm-as`, `llc`).
 - Target: `x86_64-unknown-linux-gnu`, statically linked, freestanding ELF.
-- Test suite: 122 tests (53 unit, 69 integration), all passing.
+- Test suite: 133 tests (53 unit, 80 integration), all passing.
 
 ---
 
@@ -44,13 +44,13 @@ text except the diagnostics renderer, which needs it to print carets.
 | Module | Lines | Responsibility | Depends on |
 |---|---|---|---|
 | `lib.rs` | 19 | Module declarations for the pipeline stages | — |
-| `token.rs` | 164 | Token kinds, symbol/description text for diagnostics | `diagnostics` |
+| `token.rs` | 210 | Token kinds, symbol/description text for diagnostics | `diagnostics` |
 | `diagnostics.rs` | 222 | `Span`, `Diagnostic`, `SourceFile` (line/column mapping, rendering) | — |
-| `lexer.rs` | 520 | Byte-oriented lexer, keywords, numbers, strings, comments; structured errors | `token`, `diagnostics` |
-| `ast.rs` | 394 | Untyped AST, `NodeId`, `Type`, `IntTy`, size/alignment/LLVM spelling | `diagnostics` |
-| `parser.rs` | 853 | Recursive descent + precedence climbing; recovers per statement and per function | `ast`, `token`, `diagnostics` |
-| `semantic.rs` | 1515 | Scopes, name resolution, type checking, mutability, `unsafe` gating, return-flow analysis, builtin signatures | `ast`, `diagnostics` |
-| `codegen.rs` | 1249 | LLVM 20 textual IR emission, runtime helpers, entry-point synthesis | `ast`, `semantic` |
+| `lexer.rs` | 747 | Byte-oriented lexer, keywords, integers/floats/chars/strings, comments; structured errors | `token`, `diagnostics` |
+| `ast.rs` | 613 | Untyped AST, `NodeId`, `Type`, `IntTy`, `FloatTy`, struct layouts, size/alignment/LLVM spelling | `diagnostics` |
+| `parser.rs` | 1115 | Recursive descent + precedence climbing; items, globals, enums, structs, ranges; recovers per item/statement | `ast`, `token`, `diagnostics` |
+| `semantic.rs` | 2599 | Scopes, globals, layouts, name resolution, type checking, const evaluation, mutability, `unsafe`, return flow, builtins | `ast`, `diagnostics` |
+| `codegen.rs` | 2009 | LLVM 20 textual IR emission, aggregate ABI, globals, helpers, entry synthesis | `ast`, `semantic` |
 | `driver.rs` | 294 | Tool discovery, temp directories, `llvm-as` verification, `opt`, `llc`, linking, execution | all of the above |
 | `repl.rs` | 472 | Interactive session: per-function source accumulation, candidate selection (items / printed expression / statements), completeness heuristic, `:` commands | `driver`, `parser`, `semantic`, `lineedit` |
 | `lineedit.rs` | 273 | TTY line editing and history via `stty` raw mode; plain line reads when stdin is not a terminal | — |
@@ -66,16 +66,21 @@ Line counts include inline `#[cfg(test)]` modules.
 
 `Token { kind: TokenKind, span: Span }`. `Span` is a half-open byte range;
 line/column is computed only when a diagnostic is rendered. Multi-character
-operators are lexed greedily; `&&` and `->` are single tokens, while `<<=` is
-`<<` followed by `=` (compound assignment does not exist, so it fails to parse).
+operators are lexed greedily: `<<=`, `>>=`, `..`, `::`, and `->` are single
+tokens. A `.` starts a float only when a digit follows, so `1..3` lexes as
+`1`, `..`, `3`.
 
 ### 3.2 AST
 
-- `Program { fns: Vec<FnDecl> }`. Functions are the only items.
+- `Program { fns, globals, enums, structs }`. Top-level items are functions,
+  `static` globals, enums, and structs.
 - Every `Expr` carries a unique `NodeId`. Semantic analysis stores types and
   resolutions in maps keyed by `NodeId`, so the tree is never rewritten.
-- Statements are a flat enum (`Let`, `Assign`, `If`, `While`, `Loop`, `Break`,
-  `Continue`, `Return`, `Unsafe`, `Block`, `Empty`).
+- Statements are a flat enum (`Let`, `Assign`, `CompoundAssign`, `If`, `While`,
+  `Loop`, `Break`, `Continue`, `Return`, `Unsafe`, `Block`, `Empty`).
+- `Type::Named` is produced by the parser for enum/struct type names and resolved
+  by semantic analysis into `Type::Enum` or `Type::Struct`; struct sizes,
+  alignments, and field offsets live in a shared `StructInfo`.
 - Blocks are statement lists; there are no block expressions.
 
 ### 3.3 Analysis side tables
@@ -149,9 +154,12 @@ target triple = "x86_64-unknown-linux-gnu"
 
 ### 4.2 Values and places
 
-- Scalars (integers, `bool`, pointers) are SSA values.
-- Aggregates (`[T; N]`) are represented by a **pointer to storage**; copying is
-  an explicit `load`/`store` of the aggregate.
+- Scalars (integers, `bool`, `char`, floats, enums, pointers) are SSA values.
+- Aggregates (`[T; N]`, structs, slices, `str`) are represented by a **pointer to
+  storage**; copying is an explicit `load`/`store` of the aggregate.
+- Struct fields use natural LLVM struct literals and `getelementptr`; slices are
+  `{ ptr, i64 }`. Struct/slice parameters are passed as `ptr` and copied into the
+  callee slot; aggregate returns use a hidden `ptr %sret` first parameter.
 - `gen_place` maps an expression to `(pointer, type)` for identifiers,
   dereferences, and indices; `gen_expr` loads from a place when a scalar value is
   needed.
@@ -194,7 +202,8 @@ A function whose body can fall through gets a final `ret void`, `ret <value>`
 | `alloc` | `__corex_alloc` helper | negative `mmap` result → abort |
 | `free` | `__corex_free` helper | — |
 | `syscall` | `__corex_syscall` helper (inline asm) | — |
-| `print` | `__corex_print_i64` / `__corex_print_u64` / `__corex_print_bool` | decimal formatting into a 20-byte stack buffer, then `write` + newline |
+| `print` | `__corex_print_i64` / `__corex_print_u64` / `__corex_print_bool` / `__corex_print_char` / `__corex_print_f64` | decimal/fixed formatting, raw bytes for strings/`[u8]`, then `write` + newline |
+| `len` | constant for arrays; `load i64` of the length word for slices/`str` | — |
 
 ### 4.5 Runtime helpers
 
@@ -216,6 +225,8 @@ entry:
 - `__corex_free` performs `munmap` (syscall 11) and ignores the result.
 - `__corex_fatal(ptr msg, i64 len)` writes to fd 2 (syscall 1) and exits 101
   (syscall 60).
+- `__corex_print_f64` handles sign, NaN/infinity, integer digits, and six
+  zero-padded fractional digits; magnitudes ≥ 1e18 go through `__corex_fatal`.
 - The `main` entry is wrapped by a synthesized `_start` that calls `main`,
   sign-extends the `i32` result, and exits with it.
 
@@ -304,12 +315,13 @@ still produce errors.
 | Test file | Kind | Count | What it proves |
 |---|---|---|---|
 | inline `#[cfg(test)]` in `lexer`, `parser`, `semantic`, `diagnostics` | unit | 53 | token streams, precedence, recovery, scope/type rules, layout tables, span rendering |
-| `tests/diagnostics.rs` | integration | 24 | every documented rejection path, by code |
+| `tests/diagnostics.rs` | integration | 28 | every documented rejection path, by code |
 | `tests/ir.rs` | integration | 6 | all examples emit IR accepted by `llvm-as`; no libc symbols; no `undef`; regression for the invalid constant-expression bug; structural checks |
 | `tests/opt_levels.rs` | integration | 5 | identical observable behavior at `--opt 0..3`; no `nsw`/`nuw` in emitted IR; generated differential arithmetic (1,104 assertions) |
 | `tests/robustness.rs` | integration | 2 | malformed and adversarial input produces diagnostics, never a panic |
 | `tests/native.rs` | integration | 18 | compile → link → execute: stdout, exit codes, wrapping, masked shifts, aborts (101), heap round-trip, pointer arithmetic, `_start` fallthrough |
 | `tests/cli.rs` | integration | 14 | stdin source, inline `exec`, exit-status forwarding, REPL accumulation/redefinition/statement mode, pasted programs with blank lines |
+| `tests/features.rs` | integration | 7 | compound assignment, inference, chars, globals, enums, floats, structs, slices, strings, ranges, `len`, bounds aborts, checked-in feature example |
 
 `tests/native.rs` builds through the same `driver` API the CLI uses and executes
 the produced binaries; `tests/ir.rs` assembles through `driver::emit_ir` and the
@@ -364,8 +376,9 @@ cargo test --test robustness  # malformed input never panics
 12. Parser nesting is capped at 256 recursion levels (`E0111`) to bound
     recursion; deeply nested generated code is rejected rather than overflowing
     the stack.
-13. The language has no structs, enums, floats, or function pointers, so pointer
-    code must be expressed in terms of byte and integer types.
+13. There are no function pointers, unions, tuples, generics, traits, or modules.
+14. Struct and slice ABI lowering is compiler-specific (pointer parameters and a
+    hidden `sret` result), not a stable C ABI.
 
 ---
 
