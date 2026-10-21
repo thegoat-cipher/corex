@@ -1,0 +1,20 @@
+// CoreX example: Hello World with no libc and no runtime.
+//
+// Compiles to a freestanding x86-64 ELF that talks to the Linux kernel
+// directly through the `syscall` builtin (RAX = syscall number, then RDI, RSI,
+// RDX, R10, R8, R9 for arguments). `_start` is the process entry point, so this
+// program returns to nobody: it must terminate with the `exit` syscall.
+//
+//   write(1, "Hello, World!\n", 14)   syscall 1
+//   exit(0)                          syscall 60
+//
+// Expected output: `Hello, World!` followed by a newline.
+
+fn _start() {
+    let message: [u8; 14] = "Hello, World!\n";
+
+    unsafe {
+        syscall(1, 1, &message as usize, 14);
+        syscall(60, 0, 0, 0, 0, 0, 0);
+    }
+}

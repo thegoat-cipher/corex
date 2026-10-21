@@ -1,0 +1,128 @@
+(*
+ * CoreX v0.1 grammar (EBNF).
+ *
+ * This grammar is normative and matches compiler/src/parser.rs. Where the
+ * parser is intentionally more permissive than the grammar (for error recovery),
+ * semantic analysis still enforces the rule; those cases are marked [semantic].
+ *
+ * Terminals are quoted literals or UPPERCASE classes. "{ x }" is repetition,
+ * "[ x ]" is optional, "|" is alternation.
+ *)
+
+program        = { function } EOF ;
+
+function       = "fn" IDENT "(" [ param_list ] ")" [ "->" type ] block ;
+param_list     = param { "," param } ;
+param          = IDENT ":" type ;
+
+type           = primitive
+               | "*" [ "mut" ] type
+               | "[" type ";" INTEGER "]" ;
+
+primitive      = "i8"  | "i16" | "i32" | "i64"
+               | "u8"  | "u16" | "u32" | "u64"
+               | "usize" | "isize" | "bool" ;
+
+block          = "{" { statement } "}" ;
+
+statement      = let_stmt
+               | if_stmt
+               | while_stmt
+               | loop_stmt
+               | break_stmt
+               | continue_stmt
+               | return_stmt
+               | unsafe_stmt
+               | block
+               | assignment
+               | expression_stmt
+               | empty_stmt ;
+
+let_stmt       = "let" [ "mut" ] IDENT ":" type "=" expression ";" ;
+if_stmt        = "if" expression block [ "else" ( if_stmt | block ) ] ;
+while_stmt     = "while" expression block ;
+loop_stmt      = "loop" block ;
+break_stmt     = "break" ";"
+continue_stmt  = "continue" ";"
+return_stmt    = "return" [ expression ] ";" ;
+unsafe_stmt    = "unsafe" block ;
+empty_stmt     = ";" ;
+
+(* [semantic] the left side must be a place expression: identifier,
+   pointer dereference, or array index. *)
+assignment     = expression "=" expression ";" ;
+
+expression_stmt = expression ";" ;
+
+(* ----- expressions: lowest to highest precedence ----- *)
+
+expression     = or_expr ;
+
+or_expr        = and_expr { "||" and_expr } ;
+and_expr       = bitor_expr { "&&" bitor_expr } ;
+bitor_expr     = bitxor_expr { "|" bitxor_expr } ;
+bitxor_expr    = bitand_expr { "^" bitand_expr } ;
+bitand_expr    = equality { "&" equality } ;
+equality       = relational { ( "==" | "!=" ) relational } ;
+relational     = shift { ( "<" | "<=" | ">" | ">=" ) shift } ;
+shift          = additive { ( "<<" | ">>" ) additive } ;
+additive       = multiplicative { ( "+" | "-" ) multiplicative } ;
+multiplicative = cast { ( "*" | "/" | "%" ) cast } ;
+
+cast           = unary { "as" type } ;
+
+unary          = "-" unary
+               | "!" unary
+               | "&" unary
+               | "&" "mut" unary
+               | "*" unary
+               | postfix ;
+
+postfix        = primary { call_suffix | index_suffix } ;
+call_suffix    = "(" [ arg_list ] ")" ;
+index_suffix   = "[" expression "]" ;
+arg_list       = expression { "," expression } ;
+
+primary        = INTEGER
+               | STRING
+               | "true"
+               | "false"
+               | IDENT
+               | "(" expression ")"
+               | "[" array_literal "]" ;
+
+array_literal  = expression [ "," [ expression { "," expression } [ "," ] ] ]
+               | expression ";" INTEGER ;
+
+(* ----- lexical classes ----- *)
+
+INTEGER        = dec_lit | hex_lit | bin_lit | oct_lit ;
+dec_lit        = DIGIT { DIGIT | "_" } ;
+hex_lit        = "0x" HEXDIGIT { HEXDIGIT | "_" } ;
+bin_lit        = "0b" BINDIGIT { BINDIGIT | "_" } ;
+oct_lit        = "0o" OCTDIGIT { OCTDIGIT | "_" } ;
+
+STRING         = '"' { string_char | escape } '"' ;
+escape         = "\" ( "n" | "t" | "r" | "0" | "\" | '"' | "'" | "\x" HEXDIGIT HEXDIGIT ) ;
+
+IDENT          = ( "_" | ALPHA ) { "_" | ALPHA | DIGIT } ;
+
+ALPHA          = "a"…”z" | "A"…”Z" ;
+DIGIT          = "0"…”9" ;
+HEXDIGIT       = DIGIT | "a"…”f" | "A"…”F" ;
+BINDIGIT       = "0" | "1" ;
+OCTDIGIT       = "0"…”7" ;
+
+(* Comments and whitespace are trivia:
+   line comment   = "//" { any byte except newline } ;
+   block comment  = "/*" { any byte } "*/" ;  (not nested)
+*)
+
+(* ----- reserved words (cannot be identifiers) -----
+
+   fn let mut if else while loop break continue return unsafe as true false
+   i8 i16 i32 i64 u8 u16 u32 u64 usize isize bool
+
+   Builtin function names, reserved everywhere (functions, bindings, parameters):
+   syscall alloc free print
+*)

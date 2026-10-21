@@ -1,0 +1,7 @@
+compiler/target/
+build/
+*.o
+*.ll
+.env
+.env.*
+!.env.example

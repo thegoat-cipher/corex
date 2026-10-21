@@ -1,0 +1,47 @@
+// CoreX example: recursive factorial with explicit integer types.
+//
+//   fact(0) = 1
+//   fact(n) = n * fact(n - 1)   for n > 0
+//
+// Multiplication wraps modulo 2^64 (two's complement), so `fact(21)` overflows
+// deterministically instead of invoking undefined behavior.
+//
+// Expected output: 3628800
+
+fn fact(n: u64) -> u64 {
+    if n <= 1 {
+        return 1;
+    }
+    return n * fact(n - 1);
+}
+
+fn print_u64(value: u64) {
+    let mut digits: [u8; 20] = [0; 20];
+    let mut index: usize = 20;
+    let mut rest: u64 = value;
+
+    loop {
+        index = index - 1;
+        digits[index] = 48 + (rest % 10) as u8;
+        rest = rest / 10;
+        if rest == 0 {
+            break;
+        }
+    }
+
+    unsafe {
+        syscall(1, 1, &digits[index] as usize, 20 - index);
+    }
+}
+
+fn main() -> i32 {
+    let n: u64 = 10;
+    let result: u64 = fact(n);
+
+    print_u64(result);
+    unsafe {
+        syscall(1, 1, &"\n" as usize, 1);
+    }
+
+    return 0;
+}

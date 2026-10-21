@@ -1,0 +1,36 @@
+// CoreX benchmark: data-dependent integer mixing loop.
+// N is read from stdin so the loop count is not known at compile time, and the
+// state recurrence is non-affine so it cannot be closed-formed by the optimizer.
+// Must match bench/mix.c.
+
+fn read_n() -> u64 {
+    let mut text: [u8; 12] = [0; 12];
+    unsafe {
+        syscall(0, 0, &mut text[0] as usize, 12);
+    }
+    let mut n: u64 = 0;
+    let mut k: usize = 0;
+    while k < 12 {
+        let digit: u8 = text[k];
+        if digit < 48 { break; }
+        if digit > 57 { break; }
+        n = n * 10 + (digit - 48) as u64;
+        k = k + 1;
+    }
+    return n;
+}
+
+fn main() -> i32 {
+    let n: u64 = read_n();
+    let mut state: u64 = 0x2545F4914F6CDD1D;
+    let mut i: u64 = 0;
+
+    while i < n {
+        state = state * 6364136223846793005 + 1442695040888963407;
+        state = state ^ (state >> 17);
+        state = state + i;
+        i = i + 1;
+    }
+
+    return (state % 256) as i32;
+}

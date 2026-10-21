@@ -1,0 +1,41 @@
+// Scratch playground: edit this file and run it.
+//
+//   ./scripts/try.sh examples/playground.cx          # run
+//   ./scripts/try.sh examples/playground.cx --check   # syntax + type errors only
+//   ./scripts/try.sh examples/playground.cx --ir      # look at the LLVM IR
+//
+// It exercises bindings, mutation, arrays, while/if/continue, function calls,
+// casts, and a raw syscall. Expected output: "A" then a newline.
+
+fn classify(n: u32) -> u8 {
+    if n == 0 {
+        return 0;
+    }
+    if n < 10 {
+        return 1;
+    }
+    return 2;
+}
+
+fn main() -> i32 {
+    let mut total: u64 = 0;
+    let mut i: u32 = 0;
+
+    while i < 20 {
+        i = i + 1;
+        if i % 3 == 0 {
+            continue;
+        }
+        total = total + i as u64;
+    }
+
+    let mut stamp: [u8; 2] = [0; 2];
+    stamp[0] = 65 + classify((total % 3) as u32) as u8; // 65 is 'A'
+    stamp[1] = 10; // newline
+
+    unsafe {
+        syscall(1, 1, &stamp[0] as usize, 2);
+    }
+
+    return (total % 256) as i32;
+}

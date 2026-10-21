@@ -1,0 +1,13 @@
+// CoreX benchmark: recursive Fibonacci (call-heavy, not foldable).
+// Must match bench/fib.c.
+
+fn fib(n: u32) -> u32 {
+    if n < 2 {
+        return n;
+    }
+    return fib(n - 1) + fib(n - 2);
+}
+
+fn main() -> i32 {
+    return (fib(35) % 256) as i32;
+}

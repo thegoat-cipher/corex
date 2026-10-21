@@ -1,0 +1,44 @@
+// CoreX example: heap allocation, raw pointers, and pointer arithmetic.
+//
+// `alloc` maps anonymous read/write memory through the `mmap` syscall and
+// returns `*mut u8`; `free` unmaps with `munmap`. Both require `unsafe`, as do
+// pointer dereference and pointer arithmetic. Nothing here is bounds checked or
+// lifetime checked: freeing twice or reading after `free` is the programmer's
+// responsibility.
+//
+// Expected output: 123456789
+
+fn print_u64(value: u64) {
+    let mut digits: [u8; 20] = [0; 20];
+    let mut index: usize = 20;
+    let mut rest: u64 = value;
+    loop {
+        index = index - 1;
+        digits[index] = 48 + (rest % 10) as u8;
+        rest = rest / 10;
+        if rest == 0 {
+            break;
+        }
+    }
+    unsafe {
+        syscall(1, 1, &digits[index] as usize, 20 - index);
+    }
+}
+
+fn main() -> i32 {
+    unsafe {
+        let raw: *mut u8 = alloc(8);
+        let slot: *mut u64 = raw as *mut u64;
+
+        *slot = 123456789;
+
+        let read_only: *u64 = slot as *u64;
+        let value: u64 = *read_only;
+
+        free(raw, 8);
+
+        print_u64(value);
+        syscall(1, 1, &"\n" as usize, 1);
+    }
+    return 0;
+}
