@@ -235,12 +235,33 @@ master.md               current status, milestones, next actions
 Explicitly not implemented: unions, tuples, generics, traits, closures, function
 pointers, modules, imports, `extern` / C FFI, labeled break, `match`, macros,
 threads, debug information, cross-compilation, and any CoreX-level optimizer.
-Slices and strings have no concatenation, formatting, or comparison operators.
+
+Feature boundaries:
+
+- **Globals.** Constant initializers support integers, `bool`, `char`, floats,
+  enums, string literals, and `&global`. Array and struct aggregate constants are
+  not supported; constant initializers may only read previously declared
+  immutable globals (forward references are rejected with `E0226`).
+- **Slices and strings.** `[T]` and `str` are shallow two-word copies and have no
+  equality, concatenation, or formatting operators. A slice has no implicit
+  conversion to an array; create one with a string literal, `&array` in a slice
+  context, or `s[a..b]`. Writing through a slice that points at read-only data
+  (for example a string literal) is undefined behavior even when the slice
+  binding is mutable.
+- **Structs.** Field access through a pointer is explicit: use `(*p).x`, not
+  `p.x`. Structs cannot be empty and have no built-in equality or printing;
+  compare fields or write a function.
+- **Floats.** `print` uses six fractional digits. Non-finite values print as
+  `nan`/`inf`/`-inf`; magnitudes ≥ 1e18 abort with exit 101. There is no decimal
+  type and no implicit integer/float conversion.
+- **Strings.** A string literal is `str` by default; assigning it to `[u8; N]`
+  requires exactly `N` bytes. There is no UTF-8 validation, NUL terminator, or
+  string interpolation.
 
 Safety: pointer validity, allocation lifetime, alignment, double free, and
 use-after-free are the programmer's responsibility. The compiler guarantees types,
-mutable-place writes, `unsafe` marking, return paths, constant bounds, and runtime
-aborts for dynamic bounds and division by zero. See
+mutable-place writes, `unsafe` marking, return paths, constant index/range bounds,
+and runtime aborts for dynamic bounds and division by zero. See
 [`docs/memory-model.md`](docs/memory-model.md) §6–§7.
 
 ---
