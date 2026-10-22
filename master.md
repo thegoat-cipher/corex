@@ -44,7 +44,7 @@ and tested; P2 remains optional and not started.
 | P1: inline asm, macros, cfg, shared libraries, dlopen | COMPLETED | `tests/concurrency.rs`, `tests/modules.rs` |
 | P1: benchmarks | COMPLETED | `scripts/bench.sh`, `docs/benchmarks.md` |
 
-Test totals: `cargo test` → **174 passed, 0 failed** (61 unit, 113 integration).
+Test totals: `cargo test` → **175 passed, 0 failed** (61 unit, 114 integration).
 
 ---
 
