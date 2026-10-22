@@ -19,7 +19,7 @@ fn main() -> i32 {
 }
 ```
 
-Status: **C-class systems language implemented and tested** — 205 automated
+Status: **CoreX 0.3.0 — C-class systems language implemented and tested** — 205 automated
 tests pass (68 unit, 137 integration), including native compile/run tests at
 every optimization level, C ABI tests in both directions, separate-compilation
 and manifest builds, DWARF inspection, LSP sessions, and sanitizer aborts.
@@ -382,6 +382,7 @@ and runtime aborts for dynamic bounds and division by zero. See
 | Document | Contents |
 |---|---|
 | [`docs/installation.md`](docs/installation.md) | Toolchain setup, build, verification, environment variables, troubleshooting |
+| [`CHANGELOG.md`](CHANGELOG.md) | Release notes and version history |
 | [`docs/resources.md`](docs/resources.md) | Curated project docs, examples, tests, source map, and external references |
 | [`docs/language-spec.md`](docs/language-spec.md) | Normative syntax and semantics, diagnostics catalog |
 | [`docs/grammar.ebnf`](docs/grammar.ebnf) | Formal grammar matching the parser |
