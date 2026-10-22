@@ -835,31 +835,8 @@ ok:
                 ));
                 continue;
             }
-            if let ConstValue::Str(bytes) = &g.value {
-                if matches!(g.ty, Type::Str | Type::Slice(_)) {
-                    let data = self.add_string(bytes);
-                    let linkage = if g.mutable { "global" } else { "constant" };
-                    self.globals.push(format!(
-                        "@{} = {} {{ ptr, i64 }} {{ ptr {data}, i64 {} }}, align 8",
-                        g.name,
-                        linkage,
-                        bytes.len()
-                    ));
-                    continue;
-                }
-            }
             let llvm_ty = g.ty.llvm();
-            let value = match &g.value {
-                ConstValue::Str(bytes) => {
-                    format!("c\"{}\"", escape_string(bytes))
-                }
-                ConstValue::Bool(b) => if *b { "1" } else { "0" }.to_string(),
-                ConstValue::Char(c) => (*c as u64).to_string(),
-                ConstValue::GlobalAddr(target) => format!("@{target}"),
-                ConstValue::Int(v) if *v == 0 && g.ty.is_pointer_like() => "null".to_string(),
-                ConstValue::Int(v) => int_const(&g.ty, *v),
-                ConstValue::Float(v) => float_const(&g.ty, *v),
-            };
+            let value = self.llvm_const(&g.ty, &g.value);
             let linkage = if g.mutable { "global" } else { "constant" };
             self.globals.push(format!(
                 "@{} = {} {} {}, align {}",
@@ -869,6 +846,67 @@ ok:
                 value,
                 g.ty.align_bytes()
             ));
+        }
+    }
+
+    /// Render a constant of `ty` as an LLVM constant expression. Aggregate
+    /// initializers are emitted structurally (arrays as `[T v, ...]`, plain C
+    /// structs as `{ T v, ... }`), string elements as the `str` pair, and
+    /// function/global addresses as `@name`. No runtime initializer runs.
+    fn llvm_const(&mut self, ty: &Type, value: &ConstValue) -> String {
+        if let ConstValue::Str(bytes) = value {
+            if let Type::Array { elem, len } = ty {
+                if **elem == Type::Int(IntTy::U8) && *len == bytes.len() as u64 {
+                    return format!("c\"{}\"", escape_string(bytes));
+                }
+            }
+            let data = self.add_string(bytes);
+            return format!("{{ ptr {data}, i64 {} }}", bytes.len());
+        }
+        match value {
+            ConstValue::Array(items) => {
+                let elem = match ty {
+                    Type::Array { elem, .. } => (**elem).clone(),
+                    _ => Type::Int(IntTy::I8),
+                };
+                let parts: Vec<String> = items
+                    .iter()
+                    .map(|v| format!("{} {}", elem.llvm(), self.llvm_const(&elem, v)))
+                    .collect();
+                format!("[{}]", parts.join(", "))
+            }
+            ConstValue::Struct(fields) => {
+                let Type::Struct(info) = ty else {
+                    return "zeroinitializer".to_string();
+                };
+                if !info.is_plain_c() {
+                    return "zeroinitializer".to_string();
+                }
+                let layout = info.fields.borrow().clone();
+                let mut parts = Vec::with_capacity(layout.len());
+                for field in &layout {
+                    let value = fields
+                        .iter()
+                        .find(|(name, _)| name == &field.name)
+                        .map(|(_, v)| v);
+                    match value {
+                        Some(v) => parts.push(format!(
+                            "{} {}",
+                            field.ty.llvm(),
+                            self.llvm_const(&field.ty, v)
+                        )),
+                        None => parts.push(format!("{} zeroinitializer", field.ty.llvm())),
+                    }
+                }
+                format!("{{ {} }}", parts.join(", "))
+            }
+            ConstValue::FnAddr(name) | ConstValue::GlobalAddr(name) => format!("@{name}"),
+            ConstValue::Bool(b) => if *b { "1" } else { "0" }.to_string(),
+            ConstValue::Char(c) => (*c as u64).to_string(),
+            ConstValue::Int(v) if *v == 0 && ty.is_pointer_like() => "null".to_string(),
+            ConstValue::Int(v) => int_const(ty, *v),
+            ConstValue::Float(v) => float_const(ty, *v),
+            ConstValue::Str(_) => "zeroinitializer".to_string(),
         }
     }
 
@@ -3801,6 +3839,16 @@ impl<'a> CodeGen<'a> {
             },
             ConstValue::GlobalAddr(name) => Val {
                 ssa: format!("@{name}"),
+                ty: ty.clone(),
+            },
+            ConstValue::FnAddr(name) => Val {
+                ssa: format!("@{name}"),
+                ty: ty.clone(),
+            },
+            // Aggregate constants are rejected for `const` declarations, so
+            // these cannot reach expression codegen.
+            ConstValue::Array(_) | ConstValue::Struct(_) => Val {
+                ssa: "zeroinitializer".to_string(),
                 ty: ty.clone(),
             },
             ConstValue::Str(bytes) => {

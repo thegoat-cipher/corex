@@ -19,6 +19,26 @@ pub fn parse(tokens: &[Token]) -> Result<Program, Vec<Diagnostic>> {
 /// Parse with a set of enabled `#[cfg]` keys, e.g. `feature=fast` or
 /// `target_os=linux`.
 pub fn parse_with_cfg(tokens: &[Token], cfg: &[String]) -> Result<Program, Vec<Diagnostic>> {
+    parse_inner(tokens, cfg, false)
+}
+
+/// Parse for module-dependency discovery. The driver parses each unit in
+/// isolation before any generated interfaces exist, so an array length that
+/// names a `const` from another module cannot be resolved yet. These ASTs are
+/// discarded after `mod`/`module` extraction; the real compile re-parses with
+/// the interfaces prepended and reports unresolved lengths there.
+pub fn parse_for_discovery(
+    tokens: &[Token],
+    cfg: &[String],
+) -> Result<Program, Vec<Diagnostic>> {
+    parse_inner(tokens, cfg, true)
+}
+
+fn parse_inner(
+    tokens: &[Token],
+    cfg: &[String],
+    lenient_array_lengths: bool,
+) -> Result<Program, Vec<Diagnostic>> {
     let mut p = Parser {
         tokens,
         pos: 0,
@@ -28,6 +48,10 @@ pub fn parse_with_cfg(tokens: &[Token], cfg: &[String]) -> Result<Program, Vec<D
         cfg: cfg.to_vec(),
         macros: std::collections::HashMap::new(),
         macro_depth: 0,
+        const_ints: std::collections::HashMap::new(),
+        vec_depth: 0,
+        pending_gt: 0,
+        lenient_array_lengths,
     };
     let mut program = Program {
         module_name: None,
@@ -67,6 +91,16 @@ struct Parser<'a> {
     cfg: Vec<String>,
     macros: std::collections::HashMap<String, MacroDecl>,
     macro_depth: usize,
+    /// Integer `const` values seen so far, used for array lengths. Only
+    /// previously declared constants are visible, matching the forward-reference
+    /// rule for constant expressions.
+    const_ints: std::collections::HashMap<String, u64>,
+    /// Nesting depth of `vec<...>` types, used to split `>>` into two closers.
+    vec_depth: usize,
+    /// Extra `>` closers produced by splitting a `>>` token in type position.
+    pending_gt: u32,
+    /// Accept unresolved array lengths without a diagnostic (discovery parse).
+    lenient_array_lengths: bool,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -471,6 +505,37 @@ impl<'a> Parser<'a> {
         }
     }
 
+    /// Consume one `>` closing a `vec<...>` type. A `>>` token closes two
+    /// nested `vec`s (`vec<vec<u8>>`); the second `>` is remembered until the
+    /// enclosing `vec` asks for it. The lexer is untouched, so `>>` and `>>=`
+    /// stay shift operators in expressions.
+    fn expect_vec_gt(&mut self, context: &str) -> Result<(), ()> {
+        if self.pending_gt > 0 {
+            self.pending_gt -= 1;
+            return Ok(());
+        }
+        match self.peek() {
+            TokenKind::Gt => {
+                self.advance();
+                Ok(())
+            }
+            TokenKind::Shr if self.vec_depth > 1 => {
+                self.advance();
+                self.pending_gt += 1;
+                Ok(())
+            }
+            other => {
+                let span = self.peek_span();
+                let found = other.describe();
+                self.error(
+                    "E0100",
+                    span,
+                    format!("expected `>`, found {found} ({context})"),
+                )
+            }
+        }
+    }
+
     fn recover_to_item(&mut self) {
         while !matches!(
             self.peek(),
@@ -663,8 +728,16 @@ impl<'a> Parser<'a> {
             TokenKind::VecType => {
                 self.advance();
                 self.expect(&TokenKind::Lt, "after `vec`")?;
-                let elem = self.parse_type()?;
-                self.expect(&TokenKind::Gt, "after `vec` element type")?;
+                self.vec_depth += 1;
+                let elem = match self.parse_type() {
+                    Ok(t) => t,
+                    Err(e) => {
+                        self.vec_depth -= 1;
+                        return Err(e);
+                    }
+                };
+                self.expect_vec_gt("after `vec` element type")?;
+                self.vec_depth -= 1;
                 Type::Vec(Box::new(elem))
             }
             TokenKind::Star => {
@@ -697,18 +770,15 @@ impl<'a> Parser<'a> {
                     return Ok(Type::Slice(Box::new(elem)));
                 }
                 self.expect(&TokenKind::Semi, "inside array type")?;
-                let len_tok = self.peek().clone();
-                let len = match len_tok {
-                    TokenKind::Int(v) => {
-                        self.advance();
-                        v
-                    }
-                    other => {
-                        let span = self.peek_span();
+                let len_expr = self.parse_expr()?;
+                let len = match const_int_expr(&len_expr, &self.const_ints) {
+                    Some(len) => len,
+                    None if self.lenient_array_lengths => 0,
+                    None => {
                         return self.error(
                             "E0100",
-                            span,
-                            format!("expected array length, found {}", other.describe()),
+                            len_expr.span,
+                            "array length must be a constant integer expression (literal or previously declared `const`)",
                         );
                     }
                 };
@@ -1204,6 +1274,11 @@ impl<'a> Parser<'a> {
         self.expect(&TokenKind::Assign, "before constant value")?;
         let value = self.parse_expr()?;
         let semi = self.expect(&TokenKind::Semi, "after constant value")?;
+        if matches!(ty, Type::Int(_)) {
+            if let Some(v) = const_int_expr(&value, &self.const_ints) {
+                self.const_ints.insert(name.clone(), v);
+            }
+        }
         Ok(ConstDecl {
             name,
             name_span,
@@ -1943,6 +2018,55 @@ impl<'a> Parser<'a> {
     }
 }
 
+/// Evaluate an integer constant expression over literals and previously
+/// declared integer `const` names. This is the subset array lengths accept;
+/// anything else returns `None` and the caller reports `E0100`.
+fn const_int_expr(e: &Expr, env: &std::collections::HashMap<String, u64>) -> Option<u64> {
+    match &e.kind {
+        ExprKind::Int(v) => Some(*v),
+        ExprKind::Ident(name) => env.get(name).copied(),
+        ExprKind::Path(segments) => env.get(&segments.join("$")).copied(),
+        ExprKind::Unary { op, expr } => {
+            let v = const_int_expr(expr, env)?;
+            match op {
+                UnOp::Neg => Some(v.wrapping_neg()),
+                UnOp::Not => Some(!v),
+                UnOp::AddrOf | UnOp::AddrOfMut | UnOp::Deref => None,
+            }
+        }
+        ExprKind::Binary { op, lhs, rhs } => {
+            let a = const_int_expr(lhs, env)?;
+            let b = const_int_expr(rhs, env)?;
+            match op {
+                BinOp::Add => Some(a.wrapping_add(b)),
+                BinOp::Sub => Some(a.wrapping_sub(b)),
+                BinOp::Mul => Some(a.wrapping_mul(b)),
+                BinOp::Div => {
+                    if b == 0 { None } else { Some(a / b) }
+                }
+                BinOp::Rem => {
+                    if b == 0 { None } else { Some(a % b) }
+                }
+                BinOp::Shl => Some(a.wrapping_shl((b & 63) as u32)),
+                BinOp::Shr => Some(a.wrapping_shr((b & 63) as u32)),
+                BinOp::BitAnd => Some(a & b),
+                BinOp::BitOr => Some(a | b),
+                BinOp::BitXor => Some(a ^ b),
+                BinOp::Eq
+                | BinOp::Ne
+                | BinOp::Lt
+                | BinOp::Le
+                | BinOp::Gt
+                | BinOp::Ge
+                | BinOp::LogicalAnd
+                | BinOp::LogicalOr => None,
+            }
+        }
+        ExprKind::Cast { expr, ty } if ty.is_integer() => const_int_expr(expr, env),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2102,5 +2226,76 @@ mod tests {
     fn rejects_empty_array_literal() {
         let errs = parse_src("fn f() { let a: [u8; 1] = []; }").unwrap_err();
         assert_eq!(errs[0].code, "E0110");
+    }
+
+    #[test]
+    fn parses_nested_vec_types_without_whitespace() {
+        let program = parse_src(
+            "fn f(a: vec<vec<u8>>, b: vec<vec<vec<i32>>>) { }
+             fn main() -> i32 { let mut v: vec<vec<u8>> = vec_new(1); vec_free(&mut v); return 0; }",
+        )
+        .expect("parse ok");
+        let f = &program.fns[0];
+        assert_eq!(
+            f.params[0].ty,
+            Type::Vec(Box::new(Type::Vec(Box::new(Type::Int(IntTy::U8)))))
+        );
+        assert_eq!(
+            f.params[1].ty,
+            Type::Vec(Box::new(Type::Vec(Box::new(Type::Vec(Box::new(
+                Type::Int(IntTy::I32)
+            ))))))
+        );
+        let main = &program.fns[1];
+        let Stmt::Let { ty: Some(ty), .. } = &main.body.as_ref().unwrap().stmts[0] else {
+            panic!("expected let");
+        };
+        assert_eq!(
+            *ty,
+            Type::Vec(Box::new(Type::Vec(Box::new(Type::Int(IntTy::U8)))))
+        );
+    }
+
+    #[test]
+    fn shift_operators_stay_expressions() {
+        let f = one_fn(
+            "fn f(a: i32) -> i32 { let b: i32 = a >> 2; let mut c: i32 = b << 1; c >>= 1; return c; }",
+        );
+        let stmts = &f.body.as_ref().unwrap().stmts;
+        let Stmt::Let { init, .. } = &stmts[0] else {
+            panic!("expected let");
+        };
+        assert!(
+            matches!(init.kind, ExprKind::Binary { op: BinOp::Shr, .. }),
+            "{init:?}"
+        );
+        let Stmt::CompoundAssign { op, .. } = &stmts[2] else {
+            panic!("expected compound assignment");
+        };
+        assert_eq!(*op, BinOp::Shr);
+    }
+
+    #[test]
+    fn const_integer_names_and_expressions_are_array_lengths() {
+        let program = parse_src(
+            "const N: usize = 4;
+             fn f(a: [u8; N]) { }
+             fn g() { let b: [i32; N * 2] = [0; 8]; }",
+        )
+        .expect("parse ok");
+        assert_eq!(
+            program.fns[0].params[0].ty,
+            Type::array_of(Type::Int(IntTy::U8), 4)
+        );
+        let Stmt::Let { ty: Some(ty), .. } = &program.fns[1].body.as_ref().unwrap().stmts[0] else {
+            panic!("expected let");
+        };
+        assert_eq!(*ty, Type::array_of(Type::Int(IntTy::I32), 8));
+    }
+
+    #[test]
+    fn rejects_non_constant_array_lengths() {
+        let errs = parse_src("fn f(a: [u8; Q]) { }").unwrap_err();
+        assert!(errs.iter().any(|d| d.code == "E0100"), "{errs:?}");
     }
 }

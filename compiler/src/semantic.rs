@@ -933,6 +933,77 @@ impl Analyzer {
                     .map(|(_, v)| *v as i64 as u64)?;
                 ConstValue::Int(v)
             }
+            ExprKind::Array(elems) => {
+                let elem_ty = match ty {
+                    Type::Array { elem, .. } => (**elem).clone(),
+                    _ => {
+                        self.error(
+                            "E0226",
+                            e.span,
+                            "array constant initializer requires an array type",
+                        );
+                        return None;
+                    }
+                };
+                let mut values = Vec::with_capacity(elems.len());
+                for el in elems {
+                    values.push(self.const_value(el, &elem_ty)?);
+                }
+                ConstValue::Array(values)
+            }
+            ExprKind::ArrayRepeat { value, count } => {
+                let elem_ty = match ty {
+                    Type::Array { elem, .. } => (**elem).clone(),
+                    _ => {
+                        self.error(
+                            "E0226",
+                            e.span,
+                            "array constant initializer requires an array type",
+                        );
+                        return None;
+                    }
+                };
+                let v = self.const_value(value, &elem_ty)?;
+                ConstValue::Array(vec![v; *count as usize])
+            }
+            ExprKind::StructLit { name, fields } => {
+                let Some(info) = self.struct_defs.get(name).cloned() else {
+                    self.error(
+                        "E0226",
+                        e.span,
+                        format!("`{name}` is not a constant struct type"),
+                    );
+                    return None;
+                };
+                if !info.is_plain_c() {
+                    self.error(
+                        "E0226",
+                        e.span,
+                        format!(
+                            "static initializer for `{name}` requires a plain C layout (no union, bitfields, packed/align, or flexible array member)"
+                        ),
+                    );
+                    return None;
+                }
+                let layout = info.fields.borrow().clone();
+                let mut values = Vec::with_capacity(layout.len());
+                for field in &layout {
+                    let Some((_, fexpr)) = fields.iter().find(|(n, _)| n == &field.name) else {
+                        self.error(
+                            "E0226",
+                            e.span,
+                            format!(
+                                "missing field `{}` in `{name}` constant initializer",
+                                field.name
+                            ),
+                        );
+                        return None;
+                    };
+                    let v = self.const_value(fexpr, &field.ty)?;
+                    values.push((field.name.clone(), v));
+                }
+                ConstValue::Struct(values)
+            }
             ExprKind::Unary {
                 op: UnOp::AddrOf | UnOp::AddrOfMut,
                 expr,
@@ -948,11 +1019,13 @@ impl Analyzer {
                 if let ExprKind::Ident(name) = &expr.kind {
                     if self.globals.contains_key(name) {
                         ConstValue::GlobalAddr(name.clone())
+                    } else if self.sigs.contains_key(name) {
+                        ConstValue::FnAddr(name.clone())
                     } else {
                         self.error(
                             "E0226",
                             e.span,
-                            "address-of in a global initializer must name a global",
+                            "address-of in a global initializer must name a global or a function",
                         );
                         return None;
                     }
@@ -960,7 +1033,7 @@ impl Analyzer {
                     self.error(
                         "E0226",
                         e.span,
-                        "address-of in a global initializer must name a global",
+                        "address-of in a global initializer must name a global or a function",
                     );
                     return None;
                 }
@@ -1189,6 +1262,7 @@ impl Analyzer {
                 )
                 .with_note(
                     "every path must end in `return`, a `loop` without `break`, a `while true` without `break`, \
+                     a `switch` with `default` whose arms all diverge, \
                      or an `exit`/`exit_group` syscall (60 or 231); use `fn _start()` for programs that only \
                      terminate through the kernel",
                 ),
@@ -3701,6 +3775,21 @@ fn stmt_diverges(stmt: &Stmt) -> bool {
         }
         Stmt::Unsafe { body, .. } => block_diverges(body),
         Stmt::Block(body) => block_diverges(body),
+        // A `switch` diverges only with a `default` and when every arm body
+        // diverges. Any `break` (which exits the switch) or an arm that can
+        // fall through means control can reach the end of the statement.
+        Stmt::Switch { arms, .. } => {
+            let mut has_default = false;
+            for arm in arms {
+                if arm.value.is_none() {
+                    has_default = true;
+                }
+                if block_contains_break(&arm.body) || !block_diverges(&arm.body) {
+                    return false;
+                }
+            }
+            has_default
+        }
         // `exit` (60) and `exit_group` (231) never return to the caller.
         Stmt::Expr(e) => is_process_exit(e),
         _ => false,
@@ -3943,6 +4032,8 @@ fn convert_const(value: ConstValue, from: &Type, to: &Type) -> Option<ConstValue
     match value {
         ConstValue::Str(bytes) => Some(ConstValue::Str(bytes)),
         ConstValue::GlobalAddr(name) => Some(ConstValue::GlobalAddr(name)),
+        ConstValue::FnAddr(name) => Some(ConstValue::FnAddr(name)),
+        ConstValue::Array(_) | ConstValue::Struct(_) => None,
         ConstValue::Bool(b) => Some(ConstValue::Bool(b)),
         ConstValue::Float(v) => match to {
             Type::Float(FloatTy::F32) => Some(ConstValue::Float(v as f32 as f64)),
@@ -4114,6 +4205,29 @@ mod tests {
     #[test]
     fn rejects_non_exit_syscall_fallthrough() {
         let e = errs("fn main() -> i32 { unsafe { syscall(1, 1, 0 as usize, 1); } }");
+        assert!(e.iter().any(|d| d.code == "E0206"), "{e:?}");
+    }
+
+    #[test]
+    fn accepts_switch_with_default_where_all_arms_diverge() {
+        ok("enum K { A, B } fn f(k: K) -> i32 { switch k { case K::A: { return 1; } default: { return 2; } } } fn main() -> i32 { return 0; }");
+        // Nested `if` arms and a diverging block arm are fine.
+        ok("enum K { A, B } fn f(k: K) -> i32 { switch k { case K::A: { if true { return 1; } return 2; } default: { { return 3; } } } } fn main() -> i32 { return 0; }");
+    }
+
+    #[test]
+    fn rejects_switch_without_default_in_return_position() {
+        let e = errs("enum K { A, B } fn f(k: K) -> i32 { switch k { case K::A: { return 1; } } } fn main() -> i32 { return 0; }");
+        assert!(e.iter().any(|d| d.code == "E0206"), "{e:?}");
+    }
+
+    #[test]
+    fn rejects_switch_with_break_or_fallthrough_in_return_position() {
+        // A `break` exits the switch even when the body also returns.
+        let e = errs("enum K { A, B } fn f(k: K) -> i32 { switch k { case K::A: { if true { break; } return 1; } default: { return 2; } } } fn main() -> i32 { return 0; }");
+        assert!(e.iter().any(|d| d.code == "E0206"), "{e:?}");
+        // An arm that can fall through into the default is not diverging.
+        let e = errs("enum K { A, B } fn f(k: K) -> i32 { switch k { case K::A: { let x: i32 = 1; } default: { return 2; } } } fn main() -> i32 { return 0; }");
         assert!(e.iter().any(|d| d.code == "E0206"), "{e:?}");
     }
 
