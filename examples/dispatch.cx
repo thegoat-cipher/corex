@@ -1,0 +1,47 @@
+// Function pointers in a compiler-style dispatch table.
+//
+// A tiny stack machine: each opcode names a handler through a function-pointer
+// table, the same shape a parser or bytecode interpreter uses.
+
+struct Op {
+    code: i32,
+    operand: i64,
+}
+
+fn op_add(a: i64, b: i64) -> i64 { return a + b; }
+fn op_sub(a: i64, b: i64) -> i64 { return a - b; }
+fn op_mul(a: i64, b: i64) -> i64 { return a * b; }
+fn op_div(a: i64, b: i64) -> i64 { return a / b; }
+
+fn dispatch(code: i32, a: i64, b: i64, table: *fn(i64, i64) -> i64) -> i64 {
+    unsafe {
+        let handler: fn(i64, i64) -> i64 = *(table + code as usize);
+        return handler(a, b);
+    }
+}
+
+fn run(program: [Op]) -> i64 {
+    let table: [fn(i64, i64) -> i64; 4] = [&op_add, &op_sub, &op_mul, &op_div];
+    let mut acc: i64 = 0;
+    let mut i: usize = 0;
+    while i < len(program) {
+        let op: Op = program[i];
+        acc = dispatch(op.code, acc, op.operand, &table as *fn(i64, i64) -> i64);
+        i += 1;
+    }
+    return acc;
+}
+
+fn main() -> i32 {
+    let program: [Op; 5] = [
+        Op { code: 0, operand: 10 },
+        Op { code: 2, operand: 5 },
+        Op { code: 1, operand: 4 },
+        Op { code: 3, operand: 2 },
+        Op { code: 0, operand: 7 },
+    ];
+    print(run(&program));
+    let null_handler: fn(i64, i64) -> i64 = null;
+    print(null_handler == null);
+    return 0;
+}
