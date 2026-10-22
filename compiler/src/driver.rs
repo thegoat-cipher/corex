@@ -201,6 +201,41 @@ fn tool_error(tool: &str, stderr: &str) -> Diagnostic {
     Diagnostic::error("E0300", Span::new(0, 0), format!("`{tool}` failed")).with_note(note)
 }
 
+/// Extra inputs and linkage options for the link step.
+#[derive(Clone, Debug, Default)]
+pub struct LinkInputs {
+    /// Object files and static archives to link alongside the module.
+    pub objects: Vec<PathBuf>,
+    /// Libraries passed as `-l<name>`.
+    pub libs: Vec<String>,
+    /// Directories passed as `-L<path>`.
+    pub lib_paths: Vec<PathBuf>,
+    /// Link against the hosted C runtime instead of `-nostdlib -static`.
+    pub hosted: bool,
+    /// Produce a shared object instead of an executable.
+    pub shared: bool,
+}
+
+impl LinkInputs {
+    fn link_args(&self, output: &Path) -> Vec<String> {
+        let mut args: Vec<String> = Vec::new();
+        if self.shared {
+            args.push("-shared".to_string());
+        } else if self.hosted {
+            args.push("-no-pie".to_string());
+        } else {
+            args.extend([
+                "-nostdlib".to_string(),
+                "-static".to_string(),
+                "-no-pie".to_string(),
+            ]);
+        }
+        args.push("-o".to_string());
+        args.push(output.display().to_string());
+        args
+    }
+}
+
 /// Verify IR with `llvm-as` and lower it to an object with `llc`, then link a
 /// freestanding static ELF executable.
 pub fn build(
@@ -208,6 +243,16 @@ pub fn build(
     output: &Path,
     opt_level: u8,
     keep_ir: bool,
+) -> Result<Artifacts, Vec<Diagnostic>> {
+    build_with(file, output, opt_level, keep_ir, &LinkInputs::default())
+}
+
+pub fn build_with(
+    file: &SourceFile,
+    output: &Path,
+    opt_level: u8,
+    keep_ir: bool,
+    inputs: &LinkInputs,
 ) -> Result<Artifacts, Vec<Diagnostic>> {
     let ir = emit_ir(file)?;
 
@@ -316,13 +361,19 @@ pub fn build(
             })?;
         }
     }
-    let out = Command::new(&cc)
-        .arg("-nostdlib")
-        .arg("-static")
-        .arg("-no-pie")
-        .arg("-o")
-        .arg(output)
-        .arg(&obj_path)
+    let mut command = Command::new(&cc);
+    command.args(inputs.link_args(output));
+    command.arg(&obj_path);
+    for object in &inputs.objects {
+        command.arg(object);
+    }
+    for path in &inputs.lib_paths {
+        command.arg(format!("-L{}", path.display()));
+    }
+    for lib in &inputs.libs {
+        command.arg(format!("-l{lib}"));
+    }
+    let out = command
         .output()
         .map_err(|e| {
             vec![Diagnostic::error(

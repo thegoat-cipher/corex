@@ -24,7 +24,11 @@ use crate::ast::*;
 use crate::diagnostics::{Diagnostic, Span};
 
 /// Names that are always in scope and cannot be redefined.
-pub const BUILTINS: [&str; 13] = ["syscall", "alloc", "free", "print", "len", "vec_new", "vec_push", "vec_free", "vec_slice", "read_file", "write_file", "panic", "assert"];
+pub const BUILTINS: [&str; 16] = [
+    "syscall", "alloc", "free", "print", "len", "vec_new", "vec_push", "vec_free",
+    "vec_slice", "read_file", "write_file", "panic", "assert",
+    "cstr_len", "cstr_to_str", "str_to_cstr",
+];
 
 /// Maximum size of a stack-allocated value. Keeps `alloca` within a sane
 /// fraction of the default 8 MiB process stack and prevents overflow in size
@@ -34,6 +38,8 @@ pub const MAX_VALUE_BYTES: u64 = 1 << 20;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Callee {
     User(String),
+    /// Call through a function pointer value.
+    Indirect,
     Syscall,
     Alloc,
     Free,
@@ -47,12 +53,21 @@ pub enum Callee {
     WriteFile,
     Panic,
     Assert,
+    CStrLen,
+    CStrToStr,
+    StrToCStr,
 }
 
 #[derive(Clone, Debug)]
 pub struct FnSig {
     pub params: Vec<Type>,
     pub ret: Type,
+    /// C variadic function (`extern "C" fn f(x: i32, ...)`).
+    pub variadic: bool,
+    /// System V AMD64 C ABI (aggregates by value, unmangled symbol).
+    pub c_abi: bool,
+    /// Declared with `extern` and no body.
+    pub external: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -110,6 +125,17 @@ pub struct Analysis {
     pub diverging: std::collections::HashSet<String>,
     /// Name of the user program entry point, either `_start` or `main`.
     pub entry: String,
+    /// Number of parameters declared by `main` (0 or 3).
+    pub entry_params: usize,
+    /// Resolved type operands of `sizeof`, `alignof`, `offsetof`, and compound
+    /// literals, keyed by expression id.
+    pub type_operands: HashMap<NodeId, Type>,
+    /// Constant results for `sizeof`, `alignof`, and `offsetof`.
+    pub const_sizes: HashMap<NodeId, u64>,
+    /// Functions declared `extern` without a body.
+    pub external_fns: HashSet<String>,
+    /// Globals declared `extern` without an initializer.
+    pub external_globals: HashSet<String>,
 }
 
 pub fn analyze(program: &Program) -> Result<Analysis, Vec<Diagnostic>> {
@@ -131,6 +157,16 @@ pub fn analyze(program: &Program) -> Result<Analysis, Vec<Diagnostic>> {
         slice_from_array: HashMap::new(),
         builtins: BuiltinUsage::default(),
         diverging: std::collections::HashSet::new(),
+        typedef_defs: HashMap::new(),
+        typedef_cache: HashMap::new(),
+        typedef_resolving: HashSet::new(),
+        type_operands: HashMap::new(),
+        const_sizes: HashMap::new(),
+        external_fns: HashSet::new(),
+        external_globals: HashSet::new(),
+        break_depth: 0,
+        switch_depth: 0,
+        labels: HashMap::new(),
         diags: Vec::new(),
         scopes: Vec::new(),
         slot_types: Vec::new(),
@@ -139,8 +175,10 @@ pub fn analyze(program: &Program) -> Result<Analysis, Vec<Diagnostic>> {
         loop_depth: 0,
         unsafe_depth: 0,
         current_fn: String::new(),
+        entry_params: 0,
     };
 
+    a.collect_typedefs(program);
     a.collect_enums(program);
     a.collect_structs(program);
     a.collect_fns(program);
@@ -183,7 +221,12 @@ pub fn analyze(program: &Program) -> Result<Analysis, Vec<Diagnostic>> {
             slice_from_array: a.slice_from_array,
             builtins: a.builtins,
             diverging: a.diverging,
+            entry_params: a.entry_params,
             entry: entry.unwrap_or_default(),
+            type_operands: a.type_operands,
+            const_sizes: a.const_sizes,
+            external_fns: a.external_fns,
+            external_globals: a.external_globals,
         })
     } else {
         Err(a.diags)
@@ -208,6 +251,16 @@ struct Analyzer {
     slice_from_array: HashMap<NodeId, u64>,
     builtins: BuiltinUsage,
     diverging: std::collections::HashSet<String>,
+    typedef_defs: HashMap<String, Type>,
+    typedef_cache: HashMap<String, Type>,
+    typedef_resolving: HashSet<String>,
+    type_operands: HashMap<NodeId, Type>,
+    const_sizes: HashMap<NodeId, u64>,
+    external_fns: HashSet<String>,
+    external_globals: HashSet<String>,
+    break_depth: u32,
+    switch_depth: u32,
+    labels: HashMap<String, String>,
     diags: Vec<Diagnostic>,
 
     scopes: Vec<HashMap<String, LocalRef>>,
@@ -217,6 +270,7 @@ struct Analyzer {
     loop_depth: u32,
     unsafe_depth: u32,
     current_fn: String,
+    entry_params: usize,
 }
 
 impl Analyzer {
@@ -290,6 +344,62 @@ impl Analyzer {
         }
     }
 
+    fn collect_typedefs(&mut self, program: &Program) {
+        for t in &program.typedefs {
+            if BUILTINS.contains(&t.name.as_str()) {
+                self.error(
+                    "E0202",
+                    t.name_span,
+                    format!("`{}` is a reserved builtin name", t.name),
+                );
+                continue;
+            }
+            if self.typedef_defs.contains_key(&t.name) {
+                self.error(
+                    "E0228",
+                    t.name_span,
+                    format!("duplicate type `{}`", t.name),
+                );
+                continue;
+            }
+            self.typedef_defs.insert(t.name.clone(), t.ty.clone());
+        }
+    }
+
+    /// Resolve a typedef by name, with cycle detection. Results are cached.
+    fn resolve_typedef(&mut self, name: &str, span: Span) -> Option<Type> {
+        if let Some(cached) = self.typedef_cache.get(name) {
+            return Some(cached.clone());
+        }
+        let raw = self.typedef_defs.get(name)?.clone();
+        if !self.typedef_resolving.insert(name.to_string()) {
+            self.error(
+                "E0224",
+                span,
+                format!("type alias `{name}` refers to itself"),
+            );
+            return Some(Type::Unit);
+        }
+        let resolved = self.resolve_type(&raw, span);
+        self.typedef_resolving.remove(name);
+        self.typedef_cache.insert(name.to_string(), resolved.clone());
+        Some(resolved)
+    }
+
+    fn validate_typedefs(&mut self, program: &Program) {
+        for t in &program.typedefs {
+            if self.enum_defs.contains_key(&t.name) || self.struct_defs.contains_key(&t.name) {
+                self.error(
+                    "E0228",
+                    t.name_span,
+                    format!("duplicate type `{}`", t.name),
+                );
+                continue;
+            }
+            self.resolve_typedef(&t.name, t.name_span);
+        }
+    }
+
     fn resolve_type(&mut self, ty: &Type, span: Span) -> Type {
         match ty {
             Type::Named(name) => {
@@ -297,6 +407,8 @@ impl Analyzer {
                     Type::Enum(name.clone())
                 } else if let Some(info) = self.struct_defs.get(name) {
                     Type::Struct(info.clone())
+                } else if self.typedef_defs.contains_key(name) {
+                    self.resolve_typedef(name, span).unwrap_or(Type::Unit)
                 } else {
                     self.error("E0201", span, format!("undefined type `{name}`"));
                     Type::Unit
@@ -312,6 +424,15 @@ impl Analyzer {
             }
             Type::Slice(elem) => Type::Slice(Box::new(self.resolve_type(elem, span))),
             Type::Vec(elem) => Type::Vec(Box::new(self.resolve_type(elem, span))),
+            Type::Fn(sig) => Type::Fn(FnType {
+                params: sig
+                    .params
+                    .iter()
+                    .map(|p| self.resolve_type(p, span))
+                    .collect(),
+                ret: Box::new(self.resolve_type(&sig.ret, span)),
+                variadic: sig.variadic,
+            }),
             other => other.clone(),
         }
     }
@@ -321,8 +442,23 @@ impl Analyzer {
             if self.enum_defs.contains_key(&st.name) || self.struct_defs.contains_key(&st.name) {
                 self.error("E0228", st.name_span, format!("duplicate type `{}`", st.name));
             }
+            if self.typedef_defs.contains_key(&st.name) {
+                self.error(
+                    "E0228",
+                    st.name_span,
+                    format!("duplicate type `{}`: a type alias has the same name", st.name),
+                );
+            }
             if st.fields.is_empty() {
-                self.error("E0228", st.name_span, "structs must have at least one field");
+                self.error(
+                    "E0228",
+                    st.name_span,
+                    if st.is_union {
+                        "unions must have at least one field"
+                    } else {
+                        "structs must have at least one field"
+                    },
+                );
             }
             let info = std::rc::Rc::new(StructInfo {
                 name: st.name.clone(),
@@ -330,6 +466,9 @@ impl Analyzer {
                 size: Cell::new(0),
                 align: Cell::new(1),
                 resolved: Cell::new(false),
+                is_union: st.is_union,
+                packed: st.packed,
+                explicit_align: st.align,
             });
             self.struct_defs.entry(st.name.clone()).or_insert(info);
         }
@@ -345,15 +484,66 @@ impl Analyzer {
                     self.error(
                         "E0228",
                         f.span,
-                        format!("duplicate field `{}` in struct `{}`", f.name, st.name),
+                        format!("duplicate field `{}` in type `{}`", f.name, st.name),
                     );
                 }
                 let ty = self.resolve_type(&f.ty, f.span);
+                if f.bit_width > 0 {
+                    let bits = match &ty {
+                        Type::Int(t) => t.bits(),
+                        Type::Enum(_) => 32,
+                        _ => 0,
+                    };
+                    if bits == 0 {
+                        self.error(
+                            "E0216",
+                            f.span,
+                            format!(
+                                "bitfield `{}` must have an integer type, found `{}`",
+                                f.name,
+                                ty.display()
+                            ),
+                        );
+                    } else if f.bit_width > bits {
+                        self.error(
+                            "E0215",
+                            f.span,
+                            format!(
+                                "bitfield `{}` is {} bits wide but its type is only {bits} bits",
+                                f.name, f.bit_width
+                            ),
+                        );
+                    }
+                }
                 resolved_fields.push(StructField {
                     name: f.name.clone(),
                     ty,
                     offset: 0,
+                    bit_width: f.bit_width,
+                    bit_offset: 0,
                 });
+            }
+            // A flexible array member (`[T; 0]`) is allowed only as the last
+            // field of a struct.
+            for (index, field) in resolved_fields.iter().enumerate() {
+                if matches!(field.ty, Type::Array { len: 0, .. }) {
+                    if st.is_union {
+                        self.error(
+                            "E0224",
+                            st.name_span,
+                            "flexible array members are not allowed in unions",
+                        );
+                    } else if index + 1 != resolved_fields.len() {
+                        self.error(
+                            "E0224",
+                            st.name_span,
+                            format!(
+                                "flexible array member `{}` must be the last field",
+                                field.name
+                            ),
+                        );
+                    }
+                }
             }
             *info.fields.borrow_mut() = resolved_fields;
         }
@@ -361,6 +551,7 @@ impl Analyzer {
         for st in &program.structs {
             self.finalize_struct(&st.name, st.name_span);
         }
+        self.validate_typedefs(program);
     }
 
     fn finalize_struct(&mut self, name: &str, span: Span) -> Option<(u64, u64)> {
@@ -373,7 +564,7 @@ impl Analyzer {
                 self.error(
                     "E0224",
                     span,
-                    format!("struct `{name}` contains itself by value; use a pointer"),
+                    format!("type `{name}` contains itself by value; use a pointer"),
                 );
                 return None;
             }
@@ -387,21 +578,90 @@ impl Analyzer {
             self.ensure_layout(&field.ty, span);
         }
 
+        let packed = info.packed;
         let mut offset: u64 = 0;
         let mut align: u64 = 1;
-        for field in fields.iter_mut() {
-            let fa = field.ty.align_bytes().max(1);
-            offset = align_to(offset, fa);
-            field.offset = offset;
-            offset = offset.checked_add(field.ty.size_bytes())?;
-            align = align.max(fa);
+        // Current bitfield storage unit: (byte offset, unit bits, bits used).
+        let mut bit_unit: Option<(u64, u32, u32)> = None;
+
+        if info.is_union {
+            let mut size: u64 = 0;
+            for field in fields.iter_mut() {
+                let fa = field.ty.align_bytes().max(1);
+                field.offset = 0;
+                field.bit_offset = 0;
+                size = size.max(field.ty.size_bytes());
+                align = align.max(fa);
+            }
+            align = align.max(info.explicit_align).max(1);
+            let size = align_to(size, align);
+            if size > MAX_VALUE_BYTES {
+                self.error(
+                    "E0223",
+                    span,
+                    format!(
+                        "union `{name}` is {size} bytes; the stack allocation limit is {MAX_VALUE_BYTES} bytes"
+                    ),
+                );
+            }
+            *info.fields.borrow_mut() = fields;
+            info.size.set(size);
+            info.align.set(align);
+            info.resolved.set(true);
+            self.struct_state.insert(name.to_string(), 2);
+            return Some((size, align));
         }
+
+        for field in fields.iter_mut() {
+            let natural_align = field.ty.align_bytes().max(1);
+            if field.bit_width > 0 {
+                let unit_bits = field.ty.size_bytes() as u32 * 8;
+                let unit_size = field.ty.size_bytes();
+                let fits = matches!(
+                    bit_unit,
+                    Some((_, bits, used))
+                        if bits == unit_bits && used + field.bit_width <= unit_bits
+                );
+                if fits {
+                    let (unit_offset, _, used) = bit_unit.unwrap();
+                    field.offset = unit_offset;
+                    field.bit_offset = used;
+                    bit_unit = Some((unit_offset, unit_bits, used + field.bit_width));
+                } else {
+                    if !packed {
+                        offset = align_to(offset, natural_align);
+                    }
+                    field.offset = offset;
+                    field.bit_offset = 0;
+                    offset = offset
+                        .checked_add(unit_size)?;
+                    bit_unit = Some((field.offset, unit_bits, field.bit_width));
+                }
+                if !packed {
+                    align = align.max(natural_align);
+                }
+            } else {
+                bit_unit = None;
+                if !packed {
+                    offset = align_to(offset, natural_align);
+                }
+                field.offset = offset;
+                offset = offset.checked_add(field.ty.size_bytes())?;
+                if !packed {
+                    align = align.max(natural_align);
+                }
+            }
+        }
+
+        align = align.max(info.explicit_align).max(1);
         let size = align_to(offset, align);
         if size > MAX_VALUE_BYTES {
             self.error(
                 "E0223",
                 span,
-                format!("struct `{name}` is {size} bytes; the stack allocation limit is {MAX_VALUE_BYTES} bytes"),
+                format!(
+                    "struct `{name}` is {size} bytes; the stack allocation limit is {MAX_VALUE_BYTES} bytes"
+                ),
             );
         }
         *info.fields.borrow_mut() = fields;
@@ -453,6 +713,9 @@ impl Analyzer {
                 self.error("E0216", g.name_span, "globals cannot have type `void`");
             }
             self.check_value_size(&ty, g.name_span);
+            if g.is_extern {
+                self.external_globals.insert(g.name.clone());
+            }
             self.globals.insert(g.name.clone(), (ty, g.mutable));
             self.global_order.push(g.name.clone());
         }
@@ -516,6 +779,9 @@ impl Analyzer {
 
     fn check_global_inits(&mut self, program: &Program) {
         for g in &program.globals {
+            if g.is_extern {
+                continue;
+            }
             if !self.globals.contains_key(&g.name) {
                 continue;
             }
@@ -681,6 +947,7 @@ impl Analyzer {
                     f.name_span,
                     format!("duplicate function `{}`", f.name),
                 );
+                continue;
             }
             let ret = self.resolve_type(&f.ret, f.ret_span);
             if matches!(ret, Type::Array { .. }) {
@@ -707,11 +974,35 @@ impl Analyzer {
                 self.check_value_size(&ty, p.span);
                 param_types.push(ty);
             }
+            if f.variadic && f.extern_abi.is_none() {
+                self.error(
+                    "E0216",
+                    f.name_span,
+                    "only `extern \"C\"` functions may be variadic",
+                );
+            }
+            if !f.variadic && f.body.is_none() && f.extern_abi.is_some() {
+                // A non-variadic extern declaration is fine.
+            }
+            let external = f.body.is_none();
+            if external {
+                if f.extern_abi.is_none() {
+                    self.error(
+                        "E0216",
+                        f.name_span,
+                        "a function without a body must be declared `extern \"C\"`",
+                    );
+                }
+                self.external_fns.insert(f.name.clone());
+            }
             self.sigs.insert(
                 f.name.clone(),
                 FnSig {
                     params: param_types,
                     ret,
+                    variadic: f.variadic,
+                    c_abi: f.extern_abi.is_some(),
+                    external,
                 },
             );
         }
@@ -726,16 +1017,28 @@ impl Analyzer {
                     "`_start` must be declared as `fn _start()` with no parameters and no return type",
                 );
             }
+            self.entry_params = 0;
             return Some("_start".to_string());
         }
         if let Some(f) = program.fns.iter().find(|f| f.name == "main") {
-            if !f.params.is_empty() || f.ret != Type::Int(IntTy::I32) {
+            let is_string_vector = |ty: &Type| {
+                matches!(ty, Type::Ptr { pointee, .. }
+                    if matches!(&**pointee, Type::Ptr { pointee, .. }
+                        if **pointee == Type::Int(IntTy::U8)))
+            };
+            let args_ok = f.params.is_empty()
+                || (f.params.len() == 3
+                    && matches!(f.params[0].ty, Type::Int(IntTy::I32))
+                    && is_string_vector(&f.params[1].ty)
+                    && is_string_vector(&f.params[2].ty));
+            if !args_ok || f.ret != Type::Int(IntTy::I32) {
                 self.error(
                     "E0217",
                     f.name_span,
-                    "`main` must be declared as `fn main() -> i32`",
+                    "`main` must be declared as `fn main() -> i32` or `fn main(argc: i32, argv: **u8, envp: **u8) -> i32`",
                 );
             }
+            self.entry_params = f.params.len();
             return Some("main".to_string());
         }
         self.error(
@@ -747,6 +1050,9 @@ impl Analyzer {
     }
 
     fn check_fn(&mut self, f: &FnDecl) {
+        let Some(body) = &f.body else {
+            return;
+        };
         self.current_fn = f.name.clone();
         self.scopes = vec![HashMap::new()];
         self.slot_types = Vec::new();
@@ -758,10 +1064,17 @@ impl Analyzer {
             .unwrap_or(FnSig {
                 params: Vec::new(),
                 ret: self.resolve_type(&f.ret, f.ret_span),
+                variadic: f.variadic,
+                c_abi: f.extern_abi.is_some(),
+                external: false,
             });
         self.ret_ty = sig.ret.clone();
         self.loop_depth = 0;
         self.unsafe_depth = 0;
+        self.break_depth = 0;
+        self.switch_depth = 0;
+        self.labels.clear();
+        self.collect_labels(body);
 
         // Parameters are immutable: the specification requires copying into a
         // `mut` binding before mutating (E0205).
@@ -769,9 +1082,9 @@ impl Analyzer {
             self.declare(&p.name, p.span, ty, false);
         }
 
-        self.check_block(&f.body);
+        self.check_block(body);
 
-        let diverges = block_diverges(&f.body);
+        let diverges = block_diverges(body);
         if diverges {
             self.diverging.insert(f.name.clone());
         }
@@ -801,6 +1114,47 @@ impl Analyzer {
                 slot_types: std::mem::take(&mut self.slot_types),
             },
         );
+    }
+
+    fn collect_labels(&mut self, block: &Block) {
+        for stmt in &block.stmts {
+            self.collect_labels_stmt(stmt);
+        }
+    }
+
+    fn collect_labels_stmt(&mut self, stmt: &Stmt) {
+        match stmt {
+            Stmt::Label { name, stmt, span } => {
+                if self.labels.contains_key(name) {
+                    self.error("E0202", *span, format!("duplicate label `{name}`"));
+                } else {
+                    self.labels.insert(name.clone(), name.clone());
+                }
+                self.collect_labels_stmt(stmt);
+            }
+            Stmt::If {
+                then_block,
+                else_branch,
+                ..
+            } => {
+                self.collect_labels(then_block);
+                if let Some(branch) = else_branch {
+                    self.collect_labels_stmt(branch);
+                }
+            }
+            Stmt::While { body, .. }
+            | Stmt::Loop { body, .. }
+            | Stmt::For { body, .. }
+            | Stmt::DoWhile { body, .. }
+            | Stmt::Unsafe { body, .. }
+            | Stmt::Block(body) => self.collect_labels(body),
+            Stmt::Switch { arms, .. } => {
+                for arm in arms {
+                    self.collect_labels(&arm.body);
+                }
+            }
+            _ => {}
+        }
     }
 
     // ----- scopes ------------------------------------------------------
@@ -986,17 +1340,126 @@ impl Analyzer {
             Stmt::While { cond, body, .. } => {
                 self.check_condition(cond);
                 self.loop_depth += 1;
+                self.break_depth += 1;
                 self.check_block(body);
+                self.break_depth -= 1;
                 self.loop_depth -= 1;
             }
             Stmt::Loop { body, .. } => {
                 self.loop_depth += 1;
+                self.break_depth += 1;
                 self.check_block(body);
+                self.break_depth -= 1;
                 self.loop_depth -= 1;
             }
+            Stmt::For {
+                init,
+                cond,
+                step,
+                body,
+                ..
+            } => {
+                self.push_scope();
+                if let Some(init) = init {
+                    self.check_stmt(init);
+                }
+                if let Some(cond) = cond {
+                    self.check_condition(cond);
+                }
+                if let Some(step) = step {
+                    self.check_stmt(step);
+                }
+                self.loop_depth += 1;
+                self.break_depth += 1;
+                self.check_block(body);
+                self.break_depth -= 1;
+                self.loop_depth -= 1;
+                self.pop_scope();
+            }
+            Stmt::DoWhile { body, cond, .. } => {
+                self.loop_depth += 1;
+                self.break_depth += 1;
+                self.check_block(body);
+                self.break_depth -= 1;
+                self.loop_depth -= 1;
+                self.check_condition(cond);
+            }
+            Stmt::Switch { value, arms, .. } => {
+                let switch_ty = match self.check_expr(value, None) {
+                    Ok(t) => t,
+                    Err(()) => Type::Int(IntTy::I32),
+                };
+                let usable = matches!(
+                    switch_ty,
+                    Type::Int(_) | Type::Char | Type::Enum(_) | Type::Bool
+                );
+                if !usable {
+                    self.error(
+                        "E0216",
+                        value.span,
+                        format!(
+                            "`switch` requires an integer, character, or enum value, found `{}`",
+                            switch_ty.display()
+                        ),
+                    );
+                }
+                self.switch_depth += 1;
+                self.break_depth += 1;
+                let mut seen = HashSet::new();
+                let mut default_seen = false;
+                for arm in arms {
+                    match &arm.value {
+                        Some(case_expr) => {
+                            let Some(raw) = eval_int_const(case_expr) else {
+                                self.error(
+                                    "E0221",
+                                    case_expr.span,
+                                    "case values must be integer constant expressions",
+                                );
+                                continue;
+                            };
+                            if !seen.insert(raw) {
+                                self.error(
+                                    "E0228",
+                                    case_expr.span,
+                                    format!("duplicate case value `{raw}`"),
+                                );
+                            }
+                        }
+                        None => {
+                            if default_seen {
+                                self.error(
+                                    "E0228",
+                                    arm.span,
+                                    "duplicate `default` arm in switch",
+                                );
+                            }
+                            default_seen = true;
+                        }
+                    }
+                    self.check_block(&arm.body);
+                }
+                self.break_depth -= 1;
+                self.switch_depth -= 1;
+            }
+            Stmt::Label { name, stmt, .. } => {
+                if !self.labels.contains_key(name) {
+                    self.labels.insert(name.clone(), name.clone());
+                }
+                self.check_stmt(stmt);
+            }
+            Stmt::Goto { label, span } => {
+                if !self.labels.contains_key(label) {
+                    self.error(
+                        "E0201",
+                        *span,
+                        format!("undefined label `{label}` (labels are function-local)"),
+                    );
+                }
+            }
             Stmt::Break(span) => {
-                if self.loop_depth == 0 {
-                    self.error("E0207", *span, "`break` outside of a loop");
+                if self.break_depth == 0 {
+                    self.error("E0207", *span, "`break` outside of a loop or switch");
                 }
             }
             Stmt::Continue(span) => {
@@ -1096,7 +1559,16 @@ impl Analyzer {
                 }
             }
             Type::Ptr { pointee, .. } => self.validate_type(pointee, span),
-            Type::Array { elem, .. } => self.validate_type(elem, span),
+            Type::Array { elem, len } => {
+                if *len == 0 {
+                    self.error(
+                        "E0224",
+                        span,
+                        "zero-length arrays are only allowed as the last field of a struct (flexible array member)",
+                    );
+                }
+                self.validate_type(elem, span)
+            }
             Type::Slice(elem) | Type::Vec(elem) => self.validate_type(elem, span),
             Type::Named(name) => {
                 self.error("E0201", span, format!("undefined type `{name}`"));
@@ -1238,13 +1710,23 @@ impl Analyzer {
                         }
                     }
                 }
-                for field in &layout {
-                    if !seen.contains(&field.name) {
+                if info.is_union {
+                    if fields.len() != 1 {
                         self.error(
                             "E0229",
                             e.span,
-                            format!("missing field `{}` in struct literal", field.name),
+                            "a union literal initializes exactly one field",
                         );
+                    }
+                } else {
+                    for field in &layout {
+                        if !seen.contains(&field.name) {
+                            self.error(
+                                "E0229",
+                                e.span,
+                                format!("missing field `{}` in struct literal", field.name),
+                            );
+                        }
                     }
                 }
                 Type::Struct(info)
@@ -1284,11 +1766,19 @@ impl Analyzer {
                     let ty = ty.clone();
                     self.expr_types.insert(e.id, ty.clone());
                     ty
-                } else if self.sigs.contains_key(name) || BUILTINS.contains(&name.as_str()) {
+                } else if let Some(sig) = self.sigs.get(name).cloned() {
+                    let ty = Type::Fn(FnType {
+                        params: sig.params,
+                        ret: Box::new(sig.ret),
+                        variadic: sig.variadic,
+                    });
+                    self.expr_types.insert(e.id, ty.clone());
+                    ty
+                } else if BUILTINS.contains(&name.as_str()) {
                     self.error(
                         "E0218",
                         e.span,
-                        format!("`{name}` is a function and cannot be used as a value"),
+                        format!("builtin `{name}` cannot be used as a value"),
                     );
                     return Err(());
                 } else {
@@ -1347,6 +1837,22 @@ impl Analyzer {
                         return Err(());
                     }
                     t
+                }
+                UnOp::AddrOf | UnOp::AddrOfMut
+                    if matches!(&expr.kind, ExprKind::Ident(name) if self.sigs.contains_key(name)) =>
+                {
+                    let name = match &expr.kind {
+                        ExprKind::Ident(name) => name.clone(),
+                        _ => unreachable!(),
+                    };
+                    let sig = self.sigs.get(&name).cloned().unwrap();
+                    let ty = Type::Fn(FnType {
+                        params: sig.params,
+                        ret: Box::new(sig.ret),
+                        variadic: sig.variadic,
+                    });
+                    self.expr_types.insert(expr.id, ty.clone());
+                    ty
                 }
                 UnOp::AddrOf => {
                     let (t, _) = self.check_place(expr)?;
@@ -1504,8 +2010,19 @@ impl Analyzer {
                     | (Type::Enum(_), Type::Int(_))
                     | (Type::Int(_), Type::Float(_))
                     | (Type::Float(_), Type::Int(_))
-                    | (Type::Float(_), Type::Float(_)) => {}
-                    (Type::Int(_), Type::Ptr { .. }) | (Type::Ptr { .. }, Type::Int(_)) => {
+                    | (Type::Float(_), Type::Float(_))
+                    | (Type::Fn(_), Type::Fn(_))
+                    | (Type::Fn(_), Type::Ptr { .. })
+                    | (Type::Ptr { .. }, Type::Fn(_))
+                    | (Type::CStr, Type::Ptr { .. })
+                    | (Type::Ptr { .. }, Type::CStr)
+                    | (Type::CStr, Type::Str) => {}
+                    (Type::Int(_), Type::Ptr { .. })
+                    | (Type::Ptr { .. }, Type::Int(_))
+                    | (Type::Int(_), Type::Fn(_))
+                    | (Type::Fn(_), Type::Int(_))
+                    | (Type::Int(_), Type::CStr)
+                    | (Type::CStr, Type::Int(_)) => {
                         if self.unsafe_depth == 0 {
                             self.error(
                                 "E0209",
@@ -1528,6 +2045,168 @@ impl Analyzer {
                     }
                 }
                 to
+            }
+            ExprKind::CStr(bytes) => {
+                let _ = bytes;
+                Type::CStr
+            }
+            ExprKind::Null => match expected {
+                Some(t @ (Type::Ptr { .. } | Type::Fn(_) | Type::CStr)) => t.clone(),
+                _ => {
+                    self.error(
+                        "E0203",
+                        e.span,
+                        "cannot infer the type of `null`; annotate the binding or use a cast",
+                    );
+                    return Err(());
+                }
+            },
+            ExprKind::SizeOf(ty) | ExprKind::AlignOf(ty) => {
+                let resolved = self.resolve_type(ty, e.span);
+                self.ensure_layout(&resolved, e.span);
+                self.validate_type(&resolved, e.span);
+                let value = match &e.kind {
+                    ExprKind::SizeOf(_) => checked_size(&resolved).unwrap_or(0),
+                    _ => resolved.align_bytes().max(1),
+                };
+                self.type_operands.insert(e.id, resolved);
+                self.const_sizes.insert(e.id, value);
+                Type::Int(IntTy::Usize)
+            }
+            ExprKind::OffsetOf(ty, field) => {
+                let resolved = self.resolve_type(ty, e.span);
+                self.ensure_layout(&resolved, e.span);
+                let Type::Struct(info) = &resolved else {
+                    self.error(
+                        "E0203",
+                        e.span,
+                        format!(
+                            "`offsetof` requires a struct or union type, found `{}`",
+                            resolved.display()
+                        ),
+                    );
+                    return Err(());
+                };
+                let fields = info.fields.borrow();
+                let Some(f) = fields.iter().find(|f| f.name == *field) else {
+                    self.error(
+                        "E0227",
+                        e.span,
+                        format!("type `{}` has no field `{field}`", info.name),
+                    );
+                    return Err(());
+                };
+                if f.bit_width != 0 {
+                    self.error(
+                        "E0203",
+                        e.span,
+                        "`offsetof` cannot be applied to a bitfield",
+                    );
+                    return Err(());
+                }
+                let value = f.offset;
+                drop(fields);
+                self.type_operands.insert(e.id, resolved);
+                self.const_sizes.insert(e.id, value);
+                Type::Int(IntTy::Usize)
+            }
+            ExprKind::CompoundLit { ty, fields } => {
+                let resolved = self.resolve_type(ty, e.span);
+                self.ensure_layout(&resolved, e.span);
+                self.type_operands.insert(e.id, resolved.clone());
+                match &resolved {
+                    Type::Array { elem, len } => {
+                        let mut seen = HashSet::new();
+                        for (key, value) in fields {
+                            let Ok(index) = key.parse::<u64>() else {
+                                self.error(
+                                    "E0100",
+                                    value.span,
+                                    format!("invalid array designator `{key}`"),
+                                );
+                                continue;
+                            };
+                            if index >= *len {
+                                self.error(
+                                    "E0222",
+                                    value.span,
+                                    format!(
+                                        "designated index {index} is out of bounds for `[{}; {len}]`",
+                                        elem.display()
+                                    ),
+                                );
+                            }
+                            if !seen.insert(index) {
+                                self.error(
+                                    "E0228",
+                                    value.span,
+                                    format!("duplicate designator `{index}`"),
+                                );
+                            }
+                            if let Ok(found) = self.check_expr(value, Some(elem)) {
+                                if !self.compatible(elem, &found) {
+                                    self.type_mismatch(
+                                        value.span,
+                                        elem,
+                                        &found,
+                                        " in compound literal",
+                                    );
+                                }
+                            }
+                        }
+                        resolved
+                    }
+                    Type::Struct(info) => {
+                        if info.is_union && fields.len() != 1 {
+                            self.error(
+                                "E0229",
+                                e.span,
+                                "a union compound literal initializes exactly one field",
+                            );
+                        }
+                        let layout = info.fields.borrow().clone();
+                        let mut seen = HashSet::new();
+                        for (fname, value) in fields {
+                            let Some(field) = layout.iter().find(|f| f.name == *fname) else {
+                                self.error(
+                                    "E0227",
+                                    value.span,
+                                    format!("type `{}` has no field `{fname}`", info.name),
+                                );
+                                continue;
+                            };
+                            if !seen.insert(fname.clone()) {
+                                self.error(
+                                    "E0228",
+                                    value.span,
+                                    format!("field `{fname}` is initialized twice"),
+                                );
+                            }
+                            if let Ok(found) = self.check_expr(value, Some(&field.ty)) {
+                                if !self.compatible(&field.ty, &found) {
+                                    self.type_mismatch(
+                                        value.span,
+                                        &field.ty,
+                                        &found,
+                                        " in compound literal",
+                                    );
+                                }
+                            }
+                        }
+                        resolved
+                    }
+                    other => {
+                        self.error(
+                            "E0203",
+                            e.span,
+                            format!(
+                                "compound literals require a struct, union, or array type, found `{}`",
+                                other.display()
+                            ),
+                        );
+                        return Err(());
+                    }
+                }
             }
             ExprKind::Array(elems) => {
                 if elems.is_empty() {
@@ -1683,8 +2362,9 @@ impl Analyzer {
         if op.is_comparison() {
             match &decided {
                 Type::Int(_) | Type::Char | Type::Enum(_) | Type::Float(_) => {}
-                Type::Ptr { .. } if matches!(op, BinOp::Eq | BinOp::Ne) => {}
-                Type::Ptr { .. } => {
+                Type::Ptr { .. } | Type::Fn(_) | Type::CStr
+                    if matches!(op, BinOp::Eq | BinOp::Ne) => {}
+                Type::Ptr { .. } | Type::Fn(_) | Type::CStr => {
                     self.error(
                         "E0210",
                         e.span,
@@ -1798,15 +2478,147 @@ impl Analyzer {
         args: &[Expr],
         expected: Option<&Type>,
     ) -> Result<Type, ()> {
+        // A local binding that holds a function pointer shadows a function of
+        // the same name; any non-identifier callee is an indirect call.
+        let indirect = match &callee.kind {
+            ExprKind::Ident(name) => {
+                self.lookup(name).is_some()
+                    || (!BUILTINS.contains(&name.as_str()) && !self.sigs.contains_key(name))
+            }
+            _ => true,
+        };
+        if indirect {
+            let callee_ty = self.check_expr(callee, None)?;
+            let Some(sig) = callee_ty.fn_sig().cloned() else {
+                self.error(
+                    "E0218",
+                    callee.span,
+                    format!(
+                        "call target must be a function or function pointer, found `{}`",
+                        callee_ty.display()
+                    ),
+                );
+                return Err(());
+            };
+            let fixed = sig.params.len();
+            if args.len() < fixed || (!sig.variadic && args.len() != fixed) {
+                self.error(
+                    "E0204",
+                    e.span,
+                    format!(
+                        "function pointer takes {}{} argument(s), found {}",
+                        fixed,
+                        if sig.variadic { " or more" } else { "" },
+                        args.len()
+                    ),
+                );
+                return Err(());
+            }
+            for (arg, param) in args.iter().zip(sig.params.iter()) {
+                if let Ok(t) = self.check_expr(arg, Some(param)) {
+                    if !self.compatible(param, &t) {
+                        self.type_mismatch(arg.span, param, &t, " in argument");
+                    }
+                }
+            }
+            for arg in &args[fixed..] {
+                match self.check_expr(arg, None) {
+                    Ok(t) if !t.is_aggregate() && t != Type::Unit => {}
+                    Ok(t) => self.error(
+                        "E0216",
+                        arg.span,
+                        format!("variadic argument has type `{}`, which is not C ABI friendly", t.display()),
+                    ),
+                    Err(()) => {}
+                }
+            }
+            self.calls.insert(e.id, Callee::Indirect);
+            return Ok((*sig.ret).clone());
+        }
         let ExprKind::Ident(name) = &callee.kind else {
-            self.error(
-                "E0218",
-                callee.span,
-                "call target must be a function name (CoreX has no function pointers)",
-            );
-            return Err(());
+            unreachable!("indirect calls handled above");
         };
 
+        if name == "cstr_len" {
+            if args.len() != 1 {
+                self.error("E0204", e.span, format!("`cstr_len` takes 1 argument, found {}", args.len()));
+                return Err(());
+            }
+            if let Ok(t) = self.check_expr(&args[0], Some(&Type::CStr)) {
+                if t != Type::CStr {
+                    self.error(
+                        "E0203",
+                        args[0].span,
+                        format!("`cstr_len` expects `cstr`, found `{}`", t.display()),
+                    );
+                }
+            }
+            self.calls.insert(e.id, Callee::CStrLen);
+            return Ok(Type::Int(IntTy::Usize));
+        }
+        if name == "cstr_to_str" {
+            if args.len() != 1 {
+                self.error("E0204", e.span, format!("`cstr_to_str` takes 1 argument, found {}", args.len()));
+                return Err(());
+            }
+            if let Ok(t) = self.check_expr(&args[0], Some(&Type::CStr)) {
+                if t != Type::CStr {
+                    self.error(
+                        "E0203",
+                        args[0].span,
+                        format!("`cstr_to_str` expects `cstr`, found `{}`", t.display()),
+                    );
+                }
+            }
+            self.calls.insert(e.id, Callee::CStrToStr);
+            return Ok(Type::Str);
+        }
+        if name == "str_to_cstr" {
+            if args.len() != 3 {
+                self.error(
+                    "E0204",
+                    e.span,
+                    format!("`str_to_cstr` takes 3 arguments (buffer, capacity, str), found {}", args.len()),
+                );
+                return Err(());
+            }
+            if self.unsafe_depth == 0 {
+                self.error(
+                    "E0209",
+                    e.span,
+                    "`str_to_cstr` writes raw memory and is only allowed inside an `unsafe` block",
+                );
+            }
+            if let Ok(t) = self.check_expr(&args[0], Some(&Type::ptr_to(Type::Int(IntTy::U8), true))) {
+                if !matches!(&t, Type::Ptr { mutable: true, pointee } if **pointee == Type::Int(IntTy::U8)) {
+                    self.error(
+                        "E0203",
+                        args[0].span,
+                        format!("`str_to_cstr` buffer must be `*mut u8`, found `{}`", t.display()),
+                    );
+                }
+            }
+            if let Ok(t) = self.check_expr(&args[1], Some(&Type::Int(IntTy::Usize))) {
+                if t != Type::Int(IntTy::Usize) {
+                    self.error(
+                        "E0203",
+                        args[1].span,
+                        format!("`str_to_cstr` capacity must be `usize`, found `{}`", t.display()),
+                    );
+                }
+            }
+            if let Ok(t) = self.check_expr(&args[2], Some(&Type::Str)) {
+                if !matches!(t, Type::Str | Type::Slice(_)) {
+                    self.error(
+                        "E0203",
+                        args[2].span,
+                        format!("`str_to_cstr` expects `str` data, found `{}`", t.display()),
+                    );
+                }
+            }
+            self.calls.insert(e.id, Callee::StrToCStr);
+            return Ok(Type::CStr);
+        }
         if name == "panic" {
             if args.len() != 1 {
                 self.error(
@@ -2090,7 +2902,7 @@ impl Analyzer {
                 && arg_ty != Type::Char
                 && !arg_ty.is_enum()
                 && !arg_ty.is_float()
-                && !matches!(&arg_ty, Type::Str)
+                && !matches!(&arg_ty, Type::Str | Type::CStr)
                 && !matches!(&arg_ty, Type::Slice(elem) if **elem == Type::Int(IntTy::U8))
             {
                 self.diags.push(
@@ -2187,13 +2999,16 @@ impl Analyzer {
                     self.error("E0201", callee.span, format!("undefined function `{other}`"));
                     return Err(());
                 };
-                if sig.params.len() != args.len() {
+                if args.len() < sig.params.len()
+                    || (!sig.variadic && sig.params.len() != args.len())
+                {
                     self.error(
                         "E0204",
                         e.span,
                         format!(
-                            "`{other}` takes {} argument(s), found {}",
+                            "`{other}` takes {}{} argument(s), found {}",
                             sig.params.len(),
+                            if sig.variadic { " or more" } else { "" },
                             args.len()
                         ),
                     );
@@ -2207,6 +3022,23 @@ impl Analyzer {
             if let Ok(t) = self.check_expr(arg, Some(param)) {
                 if !self.compatible(param, &t) {
                     self.type_mismatch(arg.span, param, &t, " in argument");
+                }
+            }
+        }
+        let fixed = params.len();
+        if args.len() > fixed {
+            for arg in &args[fixed..] {
+                match self.check_expr(arg, None) {
+                    Ok(t) if !t.is_aggregate() && t != Type::Unit => {}
+                    Ok(t) => self.error(
+                        "E0216",
+                        arg.span,
+                        format!(
+                            "variadic argument has type `{}`, which is not C ABI friendly",
+                            t.display()
+                        ),
+                    ),
+                    Err(()) => {}
                 }
             }
         }
@@ -2392,7 +3224,7 @@ fn checked_size(ty: &Type) -> Option<u64> {
         Type::Bool | Type::Char => Some(1),
         Type::Float(t) => Some((t.bits() / 8) as u64),
         Type::Int(t) => Some((t.bits() / 8) as u64),
-        Type::Ptr { .. } => Some(8),
+        Type::Ptr { .. } | Type::Fn(_) | Type::CStr => Some(8),
         Type::Array { elem, len } => checked_size(elem)?.checked_mul(*len),
         Type::Enum(_) => Some(4),
         Type::Slice(_) | Type::Str => Some(16),

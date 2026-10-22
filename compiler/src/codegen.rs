@@ -13,6 +13,8 @@
 //!   - `syscall`, `alloc`, and `free` lower to inline-asm syscalls
 //!     (`syscall` instruction) so the produced executable needs no libc.
 
+use std::collections::HashMap;
+
 use crate::ast::*;
 use crate::semantic::{Analysis, Callee, FnSig, GlobalDef};
 
@@ -29,7 +31,10 @@ pub fn generate(program: &Program, analysis: &Analysis, module_name: &str) -> St
         slot_ptrs: Vec::new(),
         terminated: false,
         current_label: "entry".to_string(),
-        loop_stack: Vec::new(),
+        break_stack: Vec::new(),
+        continue_stack: Vec::new(),
+        label_map: HashMap::new(),
+        current_fn: String::new(),
         used_syscall: false,
         used_alloc: false,
         used_free: false,
@@ -39,6 +44,7 @@ pub fn generate(program: &Program, analysis: &Analysis, module_name: &str) -> St
         used_print_f64: false,
         used_print_str: false,
         used_memcpy: false,
+        used_strlen: false,
         used_file_io: false,
         used_panic: false,
         used_print_i64: false,
@@ -48,6 +54,22 @@ pub fn generate(program: &Program, analysis: &Analysis, module_name: &str) -> St
 
     cg.gen_globals(&analysis.globals);
 
+    // C ABI declarations for `extern` functions.
+    let mut declares = String::new();
+    for f in &program.fns {
+        if f.body.is_some() {
+            continue;
+        }
+        if let Some(sig) = analysis.fn_sigs.get(&f.name) {
+            declares.push_str(&format!(
+                "declare {} @{}({})\n\n",
+                llvm_ret(sig, true),
+                f.name,
+                llvm_params(sig, true)
+            ));
+        }
+    }
+
     for f in &program.fns {
         cg.gen_fn(f);
     }
@@ -56,11 +78,28 @@ pub fn generate(program: &Program, analysis: &Analysis, module_name: &str) -> St
     // string globals, so they must be materialized before the module header,
     // globals, and function bodies are assembled.
     let mut start_def = String::new();
+    let mut module_asm = String::new();
     if analysis.entry == "main" {
         cg.used_syscall = true;
-        start_def.push_str(
-            "define void @_start() #0 {\nentry:\n  %r = call i32 @main()\n  %ext = sext i32 %r to i64\n  %e = call i64 @__corex_syscall(i64 60, i64 %ext, i64 0, i64 0, i64 0, i64 0, i64 0)\n  unreachable\n}\n\n",
-        );
+        if analysis.entry_params == 3 {
+            for line in [
+                ".globl _start",
+                "_start:",
+                "  movq %rsp, %rdi",
+                "  andq $-16, %rsp",
+                "  call __corex_entry",
+                "  hlt",
+            ] {
+                module_asm.push_str(&format!("module asm \"{line}\"\n"));
+            }
+            start_def.push_str(
+                "define void @__corex_entry(i64 %sp) #0 {\nentry:\n  %argc_p = inttoptr i64 %sp to ptr\n  %argc = load i32, ptr %argc_p, align 4\n  %argv_off = add i64 %sp, 8\n  %argv = inttoptr i64 %argv_off to ptr\n  %argc64 = sext i32 %argc to i64\n  %env_idx = add i64 %argc64, 2\n  %env_off = mul i64 %env_idx, 8\n  %env_addr = add i64 %sp, %env_off\n  %envp = inttoptr i64 %env_addr to ptr\n  %r = call i32 @main(i32 %argc, ptr %argv, ptr %envp)\n  %ext = sext i32 %r to i64\n  %e = call i64 @__corex_syscall(i64 60, i64 %ext, i64 0, i64 0, i64 0, i64 0, i64 0)\n  unreachable\n}\n\n",
+            );
+        } else {
+            start_def.push_str(
+                "define void @_start() #0 {\nentry:\n  %r = call i32 @main()\n  %ext = sext i32 %r to i64\n  %e = call i64 @__corex_syscall(i64 60, i64 %ext, i64 0, i64 0, i64 0, i64 0, i64 0)\n  unreachable\n}\n\n",
+            );
+        }
     }
     let helpers = cg.helpers();
 
@@ -68,6 +107,11 @@ pub fn generate(program: &Program, analysis: &Analysis, module_name: &str) -> St
     module.push_str(&format!("; CoreX module: {module_name}\n"));
     module.push_str(&format!("source_filename = \"{module_name}\"\n"));
     module.push_str("target triple = \"x86_64-unknown-linux-gnu\"\n\n");
+    module.push_str(&module_asm);
+    if !module_asm.is_empty() {
+        module.push('\n');
+    }
+    module.push_str(&declares);
 
     for g in &cg.globals {
         module.push_str(g);
@@ -107,7 +151,6 @@ struct CodeGen<'a> {
     slot_ptrs: Vec<String>,
     terminated: bool,
     current_label: String,
-    loop_stack: Vec<(String, String)>,
     used_syscall: bool,
     used_alloc: bool,
     used_free: bool,
@@ -117,11 +160,16 @@ struct CodeGen<'a> {
     used_print_f64: bool,
     used_print_str: bool,
     used_memcpy: bool,
+    used_strlen: bool,
     used_file_io: bool,
     used_panic: bool,
     used_print_i64: bool,
     used_print_bool: bool,
     current_ret: Type,
+    break_stack: Vec<String>,
+    continue_stack: Vec<String>,
+    label_map: HashMap<String, String>,
+    current_fn: String,
 }
 
 impl<'a> CodeGen<'a> {
@@ -172,6 +220,22 @@ impl<'a> CodeGen<'a> {
         self.globals.push(format!(
             "{name} = private unnamed_addr constant [{} x i8] c\"{escaped}\"",
             bytes.len()
+        ));
+        name
+    }
+
+    fn add_cstr_string(&mut self, bytes: &[u8]) -> String {
+        let mut terminated = bytes.to_vec();
+        terminated.push(0);
+        if let Some((name, _b)) = self.strings.iter().find(|(_, b)| b == &terminated) {
+            return name.clone();
+        }
+        let name = format!("@.cstr.{}", self.strings.len());
+        self.strings.push((name.clone(), terminated.clone()));
+        let escaped = escape_string(&terminated);
+        self.globals.push(format!(
+            "{name} = private unnamed_addr constant [{} x i8] c\"{escaped}\"",
+            terminated.len()
         ));
         name
     }
@@ -371,6 +435,11 @@ ok:
                 "define internal void @__corex_print_bool(i8 %value) {{\nentry:\n  %t = icmp ne i8 %value, 0\n  %p = select i1 %t, ptr {t}, ptr {f}\n  %n = select i1 %t, i64 4, i64 5\n  %pi = ptrtoint ptr %p to i64\n  %w = call i64 @__corex_syscall(i64 1, i64 1, i64 %pi, i64 %n, i64 0, i64 0, i64 0)\n  call void @__corex_newline()\n  ret void\n}}\n\n"
             ));
         }
+        if self.used_strlen {
+            h.push_str(
+                "define internal i64 @__corex_strlen(ptr %s) {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [ 0, %entry ], [ %next, %body ]\n  %p = getelementptr inbounds i8, ptr %s, i64 %i\n  %c = load i8, ptr %p, align 1\n  %stop = icmp eq i8 %c, 0\n  br i1 %stop, label %done, label %body\nbody:\n  %next = add i64 %i, 1\n  br label %loop\ndone:\n  ret i64 %i\n}\n\n",
+            );
+        }
         if self.used_memcpy {
             h.push_str(
                 "define internal void @__corex_memcpy(ptr %dst, ptr %src, i64 %n) {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [ 0, %entry ], [ %next, %body ]\n  %cond = icmp ult i64 %i, %n\n  br i1 %cond, label %body, label %done\nbody:\n  %sp = getelementptr inbounds i8, ptr %src, i64 %i\n  %b = load i8, ptr %sp, align 1\n  %dp = getelementptr inbounds i8, ptr %dst, i64 %i\n  store i8 %b, ptr %dp, align 1\n  %next = add i64 %i, 1\n  br label %loop\ndone:\n  ret void\n}\n\n",
@@ -487,6 +556,15 @@ ok:
 
     fn gen_globals(&mut self, globals: &[GlobalDef]) {
         for g in globals {
+            if self.analysis.external_globals.contains(&g.name) {
+                self.globals.push(format!(
+                    "@{} = external global {}, align {}",
+                    g.name,
+                    g.ty.llvm(),
+                    g.ty.align_bytes()
+                ));
+                continue;
+            }
             if let ConstValue::Str(bytes) = &g.value {
                 if matches!(g.ty, Type::Str | Type::Slice(_)) {
                     let data = self.add_string(bytes);
@@ -524,6 +602,9 @@ ok:
     }
 
     fn gen_fn(&mut self, f: &FnDecl) {
+        let Some(body) = &f.body else {
+            return;
+        };
         self.out.clear();
         self.entry.clear();
         self.slot_ptrs.clear();
@@ -531,7 +612,11 @@ ok:
         self.lbl = 0;
         self.terminated = false;
         self.current_label = "entry".to_string();
-        self.loop_stack.clear();
+        self.current_fn = f.name.clone();
+        self.break_stack.clear();
+        self.continue_stack.clear();
+        self.label_map.clear();
+        collect_goto_labels(body, &mut self.label_map);
 
         let sig = self
             .analysis
@@ -541,6 +626,9 @@ ok:
             .unwrap_or(FnSig {
                 params: f.params.iter().map(|p| p.ty.clone()).collect(),
                 ret: f.ret.clone(),
+                variadic: f.variadic,
+                c_abi: f.extern_abi.is_some(),
+                external: f.body.is_none(),
             });
         self.current_ret = sig.ret.clone();
 
@@ -561,11 +649,18 @@ ok:
         }
 
         let mut params = Vec::new();
-        if sig.ret.is_aggregate() {
+        if sig.ret.is_aggregate() && !sig.c_abi {
             params.push("ptr %sret".to_string());
         }
         for (i, ty) in sig.params.iter().enumerate() {
-            if ty.is_aggregate() {
+            if ty.is_aggregate() && sig.c_abi {
+                params.push(format!("{} %p{i}", ty.llvm()));
+                self.entry.push_str(&format!(
+                    "  store {} %p{i}, ptr %slot{i}, align {}\n",
+                    ty.llvm(),
+                    ty.align_bytes()
+                ));
+            } else if ty.is_aggregate() {
                 params.push(format!("ptr %p{i}"));
                 let loaded = self.fresh_val();
                 self.entry.push_str(&format!(
@@ -588,7 +683,7 @@ ok:
             }
         }
 
-        let body_terminated = self.gen_block(&f.body);
+        let body_terminated = self.gen_block(body);
 
         if !body_terminated {
             if f.name == "_start" {
@@ -615,7 +710,7 @@ ok:
         // `alignstack=16`, optimized code can emit misaligned SSE accesses.
         let attrs = if f.name == "_start" { " #0" } else { "" };
         let mut def = String::new();
-        let ret_llvm = if sig.ret.is_aggregate() {
+        let ret_llvm = if sig.ret.is_aggregate() && !sig.c_abi {
             "void".to_string()
         } else {
             sig.ret.llvm()
@@ -633,8 +728,8 @@ ok:
 
     fn gen_block(&mut self, block: &Block) -> bool {
         for stmt in &block.stmts {
-            if self.terminated {
-                break;
+            if self.terminated && !matches!(stmt, Stmt::Label { .. }) {
+                continue;
             }
             self.gen_stmt(stmt);
         }
@@ -660,6 +755,16 @@ ok:
                 let _ = ty;
             }
             Stmt::Assign { target, value, .. } => {
+                if let Some(field) = self.bitfield_target(target) {
+                    let ExprKind::Field { base, name } = &target.kind else {
+                        unreachable!()
+                    };
+                    let (base_ptr, base_ty) = self.gen_place(base);
+                    let (ptr, _) = self.gen_field_ptr(&base_ptr, &base_ty, name);
+                    let val = self.gen_expr(value);
+                    self.store_bitfield(&ptr, &field, &val);
+                    return;
+                }
                 let (ptr, ty) = self.gen_place(target);
                 let val = self.gen_expr(value);
                 debug_assert_eq!(val.ty, ty);
@@ -671,6 +776,20 @@ ok:
                 value,
                 ..
             } => {
+                if let Some(field) = self.bitfield_target(target) {
+                    let ExprKind::Field { base, name } = &target.kind else {
+                        unreachable!()
+                    };
+                    let (base_ptr, base_ty) = self.gen_place(base);
+                    let (ptr, _) = self.gen_field_ptr(&base_ptr, &base_ty, name);
+                    let cur = self.load(&ptr, &field.ty);
+                    // Reading a bitfield applies the shift and mask.
+                    let read = self.read_bitfield(cur, &field);
+                    let rhs = self.gen_expr(value);
+                    let result = self.emit_int_arith(*op, &read, &rhs, &field.ty);
+                    self.store_bitfield(&ptr, &field, &result);
+                    return;
+                }
                 let (ptr, ty) = self.gen_place(target);
                 let cur = self.load(&ptr, &ty);
                 let rhs = self.gen_expr(value);
@@ -694,24 +813,68 @@ ok:
             Stmt::Loop { body, .. } => self.gen_loop(body),
             Stmt::Break(_) => {
                 let target = self
-                    .loop_stack
+                    .break_stack
                     .last()
-                    .map(|(b, _)| b.clone())
+                    .cloned()
                     .unwrap_or_else(|| "bb0".to_string());
                 self.terminate(format!("br label %{target}"));
             }
             Stmt::Continue(_) => {
                 let target = self
-                    .loop_stack
+                    .continue_stack
                     .last()
-                    .map(|(_, c)| c.clone())
+                    .cloned()
                     .unwrap_or_else(|| "bb0".to_string());
+                self.terminate(format!("br label %{target}"));
+            }
+            Stmt::For {
+                init,
+                cond,
+                step,
+                body,
+                ..
+            } => self.gen_for(init.as_deref(), cond.as_ref(), step.as_deref(), body),
+            Stmt::DoWhile { body, cond, .. } => self.gen_do_while(body, cond),
+            Stmt::Switch { value, arms, .. } => self.gen_switch(value, arms),
+            Stmt::Label { name, stmt, .. } => {
+                let label = self
+                    .label_map
+                    .get(name)
+                    .cloned()
+                    .unwrap_or_else(|| format!("lbl_{name}"));
+                self.label(&label);
+                self.gen_stmt(stmt);
+            }
+            Stmt::Goto { label, .. } => {
+                let target = self
+                    .label_map
+                    .get(label)
+                    .cloned()
+                    .unwrap_or_else(|| format!("lbl_{label}"));
                 self.terminate(format!("br label %{target}"));
             }
             Stmt::Return { value, .. } => match value {
                 Some(e) => {
                     let v = self.gen_expr(e);
-                    if self.current_ret.is_aggregate() {
+                    let c_abi = self
+                        .analysis
+                        .fn_sigs
+                        .get(&self.current_fn)
+                        .map(|s| s.c_abi)
+                        .unwrap_or(false);
+                    if self.current_ret.is_aggregate() && c_abi {
+                        let loaded = self.fresh_val();
+                        self.inst(format!(
+                            "{loaded} = load {}, ptr {}, align {}",
+                            self.current_ret.llvm(),
+                            v.ssa,
+                            self.current_ret.align_bytes()
+                        ));
+                        self.terminate(format!(
+                            "ret {} {loaded}",
+                            self.current_ret.llvm()
+                        ));
+                    } else if self.current_ret.is_aggregate() {
                         self.store_value("%sret", &v);
                         self.terminate("ret void".to_string());
                     } else if v.ty == Type::Unit {
@@ -772,9 +935,11 @@ ok:
         self.terminate(format!("br i1 {c}, label %{body_l}, label %{end_l}"));
 
         self.label(&body_l);
-        self.loop_stack.push((end_l.clone(), cond_l.clone()));
+        self.break_stack.push(end_l.clone());
+        self.continue_stack.push(cond_l.clone());
         let t = self.gen_block(body);
-        self.loop_stack.pop();
+        self.continue_stack.pop();
+        self.break_stack.pop();
         if !t {
             self.terminate(format!("br label %{cond_l}"));
         }
@@ -788,13 +953,120 @@ ok:
 
         self.terminate(format!("br label %{body_l}"));
         self.label(&body_l);
-        self.loop_stack.push((end_l.clone(), body_l.clone()));
+        self.break_stack.push(end_l.clone());
+        self.continue_stack.push(body_l.clone());
         let t = self.gen_block(body);
-        self.loop_stack.pop();
+        self.continue_stack.pop();
+        self.break_stack.pop();
         if !t {
             self.terminate(format!("br label %{body_l}"));
         }
 
+        self.label(&end_l);
+    }
+
+    fn gen_for(
+        &mut self,
+        init: Option<&Stmt>,
+        cond: Option<&Expr>,
+        step: Option<&Stmt>,
+        body: &Block,
+    ) {
+        if let Some(init) = init {
+            self.gen_stmt(init);
+        }
+        let cond_l = self.fresh_label();
+        let body_l = self.fresh_label();
+        let step_l = self.fresh_label();
+        let end_l = self.fresh_label();
+
+        self.terminate(format!("br label %{cond_l}"));
+        self.label(&cond_l);
+        match cond {
+            Some(cond) => {
+                let c = self.gen_cond(cond);
+                self.terminate(format!("br i1 {c}, label %{body_l}, label %{end_l}"));
+            }
+            None => self.terminate(format!("br label %{body_l}")),
+        }
+
+        self.label(&body_l);
+        self.break_stack.push(end_l.clone());
+        self.continue_stack.push(step_l.clone());
+        let terminated = self.gen_block(body);
+        self.continue_stack.pop();
+        self.break_stack.pop();
+        if !terminated {
+            self.terminate(format!("br label %{step_l}"));
+        }
+
+        self.label(&step_l);
+        if let Some(step) = step {
+            self.gen_stmt(step);
+        }
+        self.terminate(format!("br label %{cond_l}"));
+
+        self.label(&end_l);
+    }
+
+    fn gen_do_while(&mut self, body: &Block, cond: &Expr) {
+        let body_l = self.fresh_label();
+        let cond_l = self.fresh_label();
+        let end_l = self.fresh_label();
+
+        self.terminate(format!("br label %{body_l}"));
+        self.label(&body_l);
+        self.break_stack.push(end_l.clone());
+        self.continue_stack.push(cond_l.clone());
+        let terminated = self.gen_block(body);
+        self.continue_stack.pop();
+        self.break_stack.pop();
+        if !terminated {
+            self.terminate(format!("br label %{cond_l}"));
+        }
+
+        self.label(&cond_l);
+        let c = self.gen_cond(cond);
+        self.terminate(format!("br i1 {c}, label %{body_l}, label %{end_l}"));
+        self.label(&end_l);
+    }
+
+    fn gen_switch(&mut self, value: &Expr, arms: &[SwitchArm]) {
+        let v = self.gen_expr(value);
+        let end_l = self.fresh_label();
+        let labels: Vec<String> = arms.iter().map(|_| self.fresh_label()).collect();
+        let mut default_l = end_l.clone();
+
+        for (index, arm) in arms.iter().enumerate() {
+            match &arm.value {
+                Some(case_expr) => {
+                    let case_v = self.gen_expr(case_expr);
+                    let cmp = self.fresh_val();
+                    self.inst(format!(
+                        "{cmp} = icmp eq {} {}, {}",
+                        v.ty.llvm(),
+                        v.ssa,
+                        case_v.ssa
+                    ));
+                    let next = self.fresh_label();
+                    self.terminate(format!(
+                        "br i1 {cmp}, label %{}, label %{next}",
+                        labels[index]
+                    ));
+                    self.label(&next);
+                }
+                None => default_l = labels[index].clone(),
+            }
+        }
+        self.terminate(format!("br label %{default_l}"));
+
+        for (index, arm) in arms.iter().enumerate() {
+            self.label(&labels[index]);
+            self.break_stack.push(end_l.clone());
+            self.gen_block(&arm.body);
+            self.break_stack.pop();
+            // C fallthrough: the next arm's block follows directly.
+        }
         self.label(&end_l);
     }
 
@@ -899,11 +1171,14 @@ ok:
                     ty.llvm(),
                     ty.align_bytes()
                 ));
+                self.inst(format!(
+                    "store {} zeroinitializer, ptr {ptr}, align {}",
+                    ty.llvm(),
+                    ty.align_bytes()
+                ));
                 for (fname, value) in fields {
-                    let (field_ptr, field_ty) = self.gen_field_ptr(&ptr, &ty, fname);
                     let v = self.gen_expr(value);
-                    self.store_value(&field_ptr, &v);
-                    let _ = field_ty;
+                    self.store_field(&ptr, &ty, fname, &v);
                 }
                 Val { ssa: ptr, ty }
             }
@@ -915,14 +1190,20 @@ ok:
                         | ExprKind::Index { .. }
                         | ExprKind::Unary { op: UnOp::Deref, .. }
                 );
-                let (ptr, field_ty) = if base_is_place {
-                    self.gen_place(e)
+                let (base_ptr, base_ty) = if base_is_place {
+                    self.gen_place(base)
                 } else {
                     let base_val = self.gen_expr(base);
-                    let (ptr, field_ty) =
-                        self.gen_field_ptr(&base_val.ssa, &base_val.ty, name);
-                    (ptr, field_ty)
+                    (base_val.ssa, base_val.ty)
                 };
+                let field = self.field_info(&base_ty, name);
+                let (ptr, field_ty) = self.gen_field_ptr(&base_ptr, &base_ty, name);
+                if let Some(f) = field {
+                    if f.bit_width > 0 {
+                        let raw = self.load(&ptr, &f.ty);
+                        return self.read_bitfield(raw, &f);
+                    }
+                }
                 if field_ty.is_aggregate() {
                     Val {
                         ssa: ptr,
@@ -963,6 +1244,12 @@ ok:
                 }
             }
             ExprKind::Ident(name) => {
+                if ty.is_fn() && self.analysis.idents.get(&e.id).is_none() {
+                    return Val {
+                        ssa: format!("@{name}"),
+                        ty,
+                    };
+                }
                 if self.analysis.idents.get(&e.id).is_none() {
                     if let Some((cty, cv)) = self.analysis.consts.get(name).cloned() {
                         return self.const_val(&cty, &cv);
@@ -1017,6 +1304,20 @@ ok:
                     }
                 }
                 UnOp::AddrOf | UnOp::AddrOfMut => {
+                    if let ExprKind::Ident(name) = &expr.kind {
+                        if self
+                            .analysis
+                            .expr_types
+                            .get(&expr.id)
+                            .map(|t| t.is_fn())
+                            .unwrap_or(false)
+                        {
+                            return Val {
+                                ssa: format!("@{name}"),
+                                ty,
+                            };
+                        }
+                    }
                     let (ptr, _) = self.gen_place(expr);
                     if let Some(len) = self.analysis.slice_from_array.get(&e.id).copied() {
                         let tmp = self.fresh_val();
@@ -1171,6 +1472,68 @@ ok:
                     self.store_value(&ep, &v);
                 }
                 Val { ssa: ptr, ty }
+            }
+            ExprKind::CStr(bytes) => {
+                let g = self.add_cstr_string(bytes);
+                Val { ssa: g, ty }
+            }
+            ExprKind::Null => Val {
+                ssa: "null".to_string(),
+                ty,
+            },
+            ExprKind::SizeOf(_) | ExprKind::AlignOf(_) | ExprKind::OffsetOf(_, _) => Val {
+                ssa: self
+                    .analysis
+                    .const_sizes
+                    .get(&e.id)
+                    .copied()
+                    .unwrap_or(0)
+                    .to_string(),
+                ty,
+            },
+            ExprKind::CompoundLit { fields, .. } => {
+                let resolved = self
+                    .analysis
+                    .type_operands
+                    .get(&e.id)
+                    .cloned()
+                    .unwrap_or_else(|| ty.clone());
+                let ptr = self.fresh_val();
+                self.entry.push_str(&format!(
+                    "  {ptr} = alloca {}, align {}\n",
+                    resolved.llvm(),
+                    resolved.align_bytes()
+                ));
+                self.inst(format!(
+                    "store {} zeroinitializer, ptr {ptr}, align {}",
+                    resolved.llvm(),
+                    resolved.align_bytes()
+                ));
+                match &resolved {
+                    Type::Struct(_) => {
+                        for (fname, value) in fields {
+                            let v = self.gen_expr(value);
+                            self.store_field(&ptr, &resolved, fname, &v);
+                        }
+                    }
+                    Type::Array { elem, .. } => {
+                        for (key, value) in fields {
+                            let Ok(index) = key.parse::<u64>() else {
+                                continue;
+                            };
+                            let v = self.gen_expr(value);
+                            let ep = self.fresh_val();
+                            self.inst(format!(
+                                "{ep} = getelementptr inbounds {}, ptr {ptr}, i64 0, i64 {index}",
+                                resolved.llvm()
+                            ));
+                            let _ = elem;
+                            self.store_value(&ep, &v);
+                        }
+                    }
+                    _ => {}
+                }
+                Val { ssa: ptr, ty: resolved }
             }
             ExprKind::Array(elems) => {
                 let ptr = self.fresh_val();
@@ -1552,6 +1915,21 @@ ok:
                         };
                         self.inst(format!("call void @__corex_print_i64(i64 {wide})"));
                     }
+                    Type::CStr => {
+                        self.used_print_str = true;
+                        self.used_strlen = true;
+                        let len = self.fresh_val();
+                        self.inst(format!(
+                            "{len} = call i64 @__corex_strlen(ptr {})",
+                            v.ssa
+                        ));
+                        let ip = self.fresh_val();
+                        self.inst(format!("{ip} = ptrtoint ptr {} to i64", v.ssa));
+                        self.inst(format!(
+                            "call i64 @__corex_syscall(i64 1, i64 1, i64 {ip}, i64 {len}, i64 0, i64 0, i64 0)"
+                        ));
+                        self.inst("call void @__corex_newline()".to_string());
+                    }
                     Type::Str | Type::Slice(_) => {
                         self.used_print_str = true;
                         let p0 = self.fresh_val();
@@ -1621,6 +1999,70 @@ ok:
                 Val {
                     ssa: String::new(),
                     ty: Type::Unit,
+                }
+            }
+            Callee::CStrLen => {
+                self.used_strlen = true;
+                let v = self.gen_expr(&args[0]);
+                let t = self.fresh_val();
+                self.inst(format!("{t} = call i64 @__corex_strlen(ptr {})", v.ssa));
+                Val {
+                    ssa: t,
+                    ty: Type::Int(IntTy::Usize),
+                }
+            }
+            Callee::CStrToStr => {
+                self.used_strlen = true;
+                let v = self.gen_expr(&args[0]);
+                let len = self.fresh_val();
+                self.inst(format!("{len} = call i64 @__corex_strlen(ptr {})", v.ssa));
+                let tmp = self.fresh_val();
+                self.entry
+                    .push_str(&format!("  {tmp} = alloca {{ ptr, i64 }}, align 8\n"));
+                let p0 = self.fresh_val();
+                let p1 = self.fresh_val();
+                self.inst(format!(
+                    "{p0} = getelementptr inbounds {{ ptr, i64 }}, ptr {tmp}, i64 0, i32 0"
+                ));
+                self.inst(format!("store ptr {}, ptr {p0}, align 8", v.ssa));
+                self.inst(format!(
+                    "{p1} = getelementptr inbounds {{ ptr, i64 }}, ptr {tmp}, i64 0, i32 1"
+                ));
+                self.inst(format!("store i64 {len}, ptr {p1}, align 8"));
+                Val {
+                    ssa: tmp,
+                    ty: Type::Str,
+                }
+            }
+            Callee::StrToCStr => {
+                self.used_memcpy = true;
+                let buf = self.gen_expr(&args[0]);
+                let cap = self.gen_expr(&args[1]);
+                let s = self.gen_expr(&args[2]);
+                let (data, len) = self.load_slice_parts(&s.ssa);
+                let need = self.fresh_val();
+                let ok = self.fresh_val();
+                self.inst(format!("{need} = add i64 {len}, 1"));
+                self.inst(format!("{ok} = icmp ule i64 {need}, {}", cap.ssa));
+                let good_l = self.fresh_label();
+                let bad_l = self.fresh_label();
+                self.terminate(format!("br i1 {ok}, label %{good_l}, label %{bad_l}"));
+                self.label(&bad_l);
+                self.fatal("corex: cstr buffer too small\n");
+                self.label(&good_l);
+                self.inst(format!(
+                    "call void @__corex_memcpy(ptr {}, ptr {data}, i64 {len})",
+                    buf.ssa
+                ));
+                let end = self.fresh_val();
+                self.inst(format!(
+                    "{end} = getelementptr inbounds i8, ptr {}, i64 {len}",
+                    buf.ssa
+                ));
+                self.inst(format!("store i8 0, ptr {end}, align 1"));
+                Val {
+                    ssa: buf.ssa,
+                    ty: Type::CStr,
                 }
             }
             Callee::Len => {
@@ -1919,10 +2361,17 @@ ok:
             }
             Callee::User(fname) => {
                 let sig = self.analysis.fn_sigs.get(&fname).cloned();
-                let ret = sig.as_ref().map(|s| s.ret.clone()).unwrap_or_else(|| ty.clone());
+                let c_abi = sig.as_ref().map(|s| s.c_abi).unwrap_or(false);
+                let variadic = sig.as_ref().map(|s| s.variadic).unwrap_or(false);
+                let fixed = sig.as_ref().map(|s| s.params.len()).unwrap_or(args.len());
+                let ret = sig
+                    .as_ref()
+                    .map(|s| s.ret.clone())
+                    .unwrap_or_else(|| ty.clone());
+
                 let mut arg_strs = Vec::new();
                 let mut sret_ptr = None;
-                if ret.is_aggregate() {
+                if ret.is_aggregate() && !c_abi {
                     let ptr = self.fresh_val();
                     self.entry.push_str(&format!(
                         "  {ptr} = alloca {}, align {}\n",
@@ -1932,22 +2381,81 @@ ok:
                     arg_strs.push(format!("ptr {ptr}"));
                     sret_ptr = Some(ptr);
                 }
-                for a in args {
+                for (index, a) in args.iter().enumerate() {
                     let v = self.gen_expr(a);
+                    let v = if index >= fixed && variadic {
+                        self.promote_variadic(v)
+                    } else {
+                        v
+                    };
                     if v.ty.is_aggregate() {
-                        arg_strs.push(format!("ptr {}", v.ssa));
+                        if c_abi {
+                            let loaded = self.fresh_val();
+                            self.inst(format!(
+                                "{loaded} = load {}, ptr {}, align {}",
+                                v.ty.llvm(),
+                                v.ssa,
+                                v.ty.align_bytes()
+                            ));
+                            arg_strs.push(format!("{} {loaded}", v.ty.llvm()));
+                        } else {
+                            arg_strs.push(format!("ptr {}", v.ssa));
+                        }
                     } else {
                         arg_strs.push(format!("{} {}", v.ty.llvm(), v.ssa));
                     }
                 }
-                if ret.is_aggregate() {
-                    self.inst(format!("call void @{fname}({})", arg_strs.join(", ")));
+                let call_head = if variadic {
+                    let params = sig
+                        .as_ref()
+                        .map(|s| {
+                            let mut parts: Vec<String> =
+                                s.params.iter().map(|t| t.llvm()).collect();
+                            parts.push("...".to_string());
+                            parts.join(", ")
+                        })
+                        .unwrap_or_default();
+                    format!("call {} ({})", ret.llvm(), params)
+                } else {
+                    format!("call {}", ret.llvm())
+                };
+                if ret.is_aggregate() && c_abi {
+                    let t = self.fresh_val();
+                    self.inst(format!(
+                        "{t} = {call_head} @{fname}({})",
+                        arg_strs.join(", ")
+                    ));
+                    let ptr = self.fresh_val();
+                    self.entry.push_str(&format!(
+                        "  {ptr} = alloca {}, align {}\n",
+                        ret.llvm(),
+                        ret.align_bytes()
+                    ));
+                    self.inst(format!(
+                        "store {} {t}, ptr {ptr}, align {}",
+                        ret.llvm(),
+                        ret.align_bytes()
+                    ));
+                    Val { ssa: ptr, ty: ret }
+                } else if ret.is_aggregate() {
+                    self.inst(format!(
+                        "call void @{fname}({})",
+                        arg_strs.join(", ")
+                    ));
                     Val {
                         ssa: sret_ptr.unwrap_or_default(),
                         ty: ret,
                     }
                 } else if ret == Type::Unit {
-                    self.inst(format!("call void @{fname}({})", arg_strs.join(", ")));
+                    let head = if variadic {
+                        call_head.replace("call void", "call void")
+                    } else {
+                        "call void".to_string()
+                    };
+                    self.inst(format!(
+                        "{head} @{fname}({})",
+                        arg_strs.join(", ")
+                    ));
                     Val {
                         ssa: String::new(),
                         ty: Type::Unit,
@@ -1955,16 +2463,145 @@ ok:
                 } else {
                     let t = self.fresh_val();
                     self.inst(format!(
-                        "{t} = call {} @{fname}({})",
-                        ret.llvm(),
+                        "{t} = {call_head} @{fname}({})",
+                        arg_strs.join(", ")
+                    ));
+                    Val { ssa: t, ty: ret }
+                }
+            }
+            Callee::Indirect => {
+                let callee_val = self.gen_expr(callee);
+                let sig = self
+                    .analysis
+                    .expr_types
+                    .get(&callee.id)
+                    .and_then(|t| t.fn_sig().cloned())
+                    .unwrap_or(FnType {
+                        params: args
+                            .iter()
+                            .map(|a| {
+                                self.analysis
+                                    .expr_types
+                                    .get(&a.id)
+                                    .cloned()
+                                    .unwrap_or(Type::Int(IntTy::I32))
+                            })
+                            .collect(),
+                        ret: Box::new(ty.clone()),
+                        variadic: false,
+                    });
+                let fixed = sig.params.len();
+                let mut arg_strs = Vec::new();
+                let mut sret_ptr = None;
+                if sig.ret.is_aggregate() {
+                    let ptr = self.fresh_val();
+                    self.entry.push_str(&format!(
+                        "  {ptr} = alloca {}, align {}\n",
+                        sig.ret.llvm(),
+                        sig.ret.align_bytes()
+                    ));
+                    arg_strs.push(format!("ptr {ptr}"));
+                    sret_ptr = Some(ptr);
+                }
+                for (index, a) in args.iter().enumerate() {
+                    let v = self.gen_expr(a);
+                    let v = if index >= fixed && sig.variadic {
+                        self.promote_variadic(v)
+                    } else {
+                        v
+                    };
+                    if v.ty.is_aggregate() {
+                        arg_strs.push(format!("ptr {}", v.ssa));
+                    } else {
+                        arg_strs.push(format!("{} {}", v.ty.llvm(), v.ssa));
+                    }
+                }
+                let mut type_parts: Vec<String> =
+                    sig.params.iter().map(|t| t.llvm()).collect();
+                if sig.variadic {
+                    type_parts.push("...".to_string());
+                }
+                let ret_ty = if sig.ret.is_aggregate() {
+                    "void".to_string()
+                } else {
+                    sig.ret.llvm()
+                };
+                let call_head = format!("call {ret_ty} ({})", type_parts.join(", "));
+                if sig.ret.is_aggregate() {
+                    self.inst(format!(
+                        "{call_head} {}({})",
+                        callee_val.ssa,
+                        arg_strs.join(", ")
+                    ));
+                    Val {
+                        ssa: sret_ptr.unwrap_or_default(),
+                        ty: (*sig.ret).clone(),
+                    }
+                } else if *sig.ret == Type::Unit {
+                    self.inst(format!(
+                        "{call_head} {}({})",
+                        callee_val.ssa,
+                        arg_strs.join(", ")
+                    ));
+                    Val {
+                        ssa: String::new(),
+                        ty: Type::Unit,
+                    }
+                } else {
+                    let t = self.fresh_val();
+                    self.inst(format!(
+                        "{t} = {call_head} {}({})",
+                        callee_val.ssa,
                         arg_strs.join(", ")
                     ));
                     Val {
                         ssa: t,
-                        ty: ret,
+                        ty: (*sig.ret).clone(),
                     }
                 }
             }
+        }
+    }
+
+    /// C default argument promotions for values passed through `...`.
+    fn promote_variadic(&mut self, v: Val) -> Val {
+        match &v.ty {
+            Type::Float(FloatTy::F32) => {
+                let t = self.fresh_val();
+                self.inst(format!("{t} = fpext float {} to double", v.ssa));
+                Val {
+                    ssa: t,
+                    ty: Type::Float(FloatTy::F64),
+                }
+            }
+            Type::Bool => {
+                let t = self.fresh_val();
+                self.inst(format!("{t} = zext i8 {} to i32", v.ssa));
+                Val {
+                    ssa: t,
+                    ty: Type::Int(IntTy::I32),
+                }
+            }
+            Type::Char => {
+                let t = self.fresh_val();
+                self.inst(format!("{t} = zext i8 {} to i32", v.ssa));
+                Val {
+                    ssa: t,
+                    ty: Type::Int(IntTy::I32),
+                }
+            }
+            Type::Int(t) if t.bits() < 32 => {
+                let bits = t.bits();
+                let signed = t.signed();
+                let out = self.fresh_val();
+                let op = if signed { "sext" } else { "zext" };
+                self.inst(format!("{out} = {op} i{bits} {} to i32", v.ssa));
+                Val {
+                    ssa: out,
+                    ty: Type::Int(IntTy::I32),
+                }
+            }
+            _ => v,
         }
     }
 
@@ -2004,11 +2641,34 @@ ok:
             };
         }
 
-        // Pointer <-> pointer: representation is identical.
-        if from.is_pointer() && to.is_pointer() {
+        // Pointer/fn/C-string representations are all `ptr`.
+        if from.is_pointer_like() && to.is_pointer_like() {
             return Val {
                 ssa: v.ssa,
                 ty: to.clone(),
+            };
+        }
+
+        if from.is_cstr() && to.is_str() {
+            self.used_strlen = true;
+            let len = self.fresh_val();
+            self.inst(format!("{len} = call i64 @__corex_strlen(ptr {})", v.ssa));
+            let tmp = self.fresh_val();
+            self.entry
+                .push_str(&format!("  {tmp} = alloca {{ ptr, i64 }}, align 8\n"));
+            let p0 = self.fresh_val();
+            let p1 = self.fresh_val();
+            self.inst(format!(
+                "{p0} = getelementptr inbounds {{ ptr, i64 }}, ptr {tmp}, i64 0, i32 0"
+            ));
+            self.inst(format!("store ptr {}, ptr {p0}, align 8", v.ssa));
+            self.inst(format!(
+                "{p1} = getelementptr inbounds {{ ptr, i64 }}, ptr {tmp}, i64 0, i32 1"
+            ));
+            self.inst(format!("store i64 {len}, ptr {p1}, align 8"));
+            return Val {
+                ssa: tmp,
+                ty: Type::Str,
             };
         }
 
@@ -2083,7 +2743,7 @@ ok:
             };
         }
 
-        if from.is_pointer() && to.is_integer() {
+        if from.is_pointer_like() && to.is_integer() {
             let i = self.fresh_val();
             self.inst(format!("{i} = ptrtoint ptr {} to i64", v.ssa));
             let target_bits = to.int_ty().unwrap().bits();
@@ -2101,7 +2761,7 @@ ok:
             };
         }
 
-        if from.is_integer() && to.is_pointer() {
+        if from.is_integer() && to.is_pointer_like() {
             let from_bits = from.int_ty().unwrap().bits();
             let wide = if from_bits < 64 {
                 let t = self.fresh_val();
@@ -2180,27 +2840,131 @@ ok:
         (d, l)
     }
 
-    fn gen_field_ptr(&mut self, base_ptr: &str, base_ty: &Type, name: &str) -> (String, Type) {
-        let Some(info) = base_ty.struct_info().cloned() else {
-            return (base_ptr.to_string(), Type::Int(IntTy::I32));
-        };
+    fn field_info(&self, base_ty: &Type, name: &str) -> Option<StructField> {
+        let info = base_ty.struct_info()?;
         let fields = info.fields.borrow();
-        let Some((index, field)) = fields
-            .iter()
-            .enumerate()
-            .find(|(_, f)| f.name == name)
-        else {
-            drop(fields);
+        fields.iter().find(|f| f.name == name).cloned()
+    }
+
+    fn bitfield_target(&self, e: &Expr) -> Option<StructField> {
+        let ExprKind::Field { base, name } = &e.kind else {
+            return None;
+        };
+        let base_ty = self.analysis.expr_types.get(&base.id)?;
+        let field = self.field_info(base_ty, name)?;
+        if field.bit_width > 0 {
+            Some(field)
+        } else {
+            None
+        }
+    }
+
+    fn bitfield_bits(ty: &Type) -> u32 {
+        match ty {
+            Type::Int(t) => t.bits(),
+            Type::Enum(_) => 32,
+            Type::Bool | Type::Char => 8,
+            _ => 64,
+        }
+    }
+
+    fn read_bitfield(&mut self, raw: Val, field: &StructField) -> Val {
+        let ty = field.ty.llvm();
+        let mut value = raw.ssa;
+        if field.bit_offset > 0 {
+            let shifted = self.fresh_val();
+            self.inst(format!(
+                "{shifted} = lshr {ty} {value}, {}",
+                field.bit_offset
+            ));
+            value = shifted;
+        }
+        let bits = Self::bitfield_bits(&field.ty);
+        if field.bit_width < bits {
+            let mask = (1u64 << field.bit_width) - 1;
+            let masked = self.fresh_val();
+            self.inst(format!(
+                "{masked} = and {ty} {value}, {}",
+                int_const(&field.ty, mask)
+            ));
+            value = masked;
+        }
+        Val {
+            ssa: value,
+            ty: field.ty.clone(),
+        }
+    }
+
+    fn store_bitfield(&mut self, ptr: &str, field: &StructField, val: &Val) {
+        let ty = field.ty.llvm();
+        let bits = Self::bitfield_bits(&field.ty);
+        let width = field.bit_width.min(bits);
+        let low = if width >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << width) - 1
+        };
+        let shifted_mask = if field.bit_offset >= 64 {
+            0
+        } else {
+            low.checked_shl(field.bit_offset).unwrap_or(0)
+        };
+        let raw = self.load(ptr, &field.ty);
+        let keep = self.fresh_val();
+        self.inst(format!(
+            "{keep} = and {ty} {}, {}",
+            raw.ssa,
+            int_const(&field.ty, !shifted_mask)
+        ));
+        let masked = self.fresh_val();
+        self.inst(format!(
+            "{masked} = and {ty} {}, {}",
+            val.ssa,
+            int_const(&field.ty, low)
+        ));
+        let placed = if field.bit_offset > 0 {
+            let shifted = self.fresh_val();
+            self.inst(format!(
+                "{shifted} = shl {ty} {masked}, {}",
+                field.bit_offset
+            ));
+            shifted
+        } else {
+            masked
+        };
+        let result = self.fresh_val();
+        self.inst(format!("{result} = or {ty} {keep}, {placed}"));
+        self.store_value(
+            ptr,
+            &Val {
+                ssa: result,
+                ty: field.ty.clone(),
+            },
+        );
+    }
+
+    fn store_field(&mut self, base: &str, base_ty: &Type, name: &str, val: &Val) {
+        let Some(field) = self.field_info(base_ty, name) else {
+            return;
+        };
+        let (ptr, _) = self.gen_field_ptr(base, base_ty, name);
+        if field.bit_width > 0 {
+            self.store_bitfield(&ptr, &field, val);
+        } else {
+            self.store_value(&ptr, val);
+        }
+    }
+
+    fn gen_field_ptr(&mut self, base_ptr: &str, base_ty: &Type, name: &str) -> (String, Type) {
+        let Some(field) = self.field_info(base_ty, name) else {
             return (base_ptr.to_string(), Type::Int(IntTy::I32));
         };
-        let field_ty = field.ty.clone();
-        drop(fields);
         let ptr = self.fresh_val();
         self.inst(format!(
-            "{ptr} = getelementptr inbounds {}, ptr {base_ptr}, i64 0, i32 {index}",
-            base_ty.llvm()
+            "{ptr} = getelementptr inbounds i8, ptr {base_ptr}, i64 {}",
+            field.offset
         ));
-        (ptr, field_ty)
+        (ptr, field.ty)
     }
 
     fn gen_place(&mut self, e: &Expr) -> (String, Type) {
@@ -2400,6 +3164,69 @@ impl<'a> CodeGen<'a> {
                 }
             }
         }
+    }
+}
+
+fn collect_goto_labels(block: &Block, map: &mut HashMap<String, String>) {
+    for stmt in &block.stmts {
+        collect_goto_labels_stmt(stmt, map);
+    }
+}
+
+fn collect_goto_labels_stmt(stmt: &Stmt, map: &mut HashMap<String, String>) {
+    match stmt {
+        Stmt::Label { name, stmt, .. } => {
+            map.entry(name.clone()).or_insert_with(|| format!("lbl_{name}"));
+            collect_goto_labels_stmt(stmt, map);
+        }
+        Stmt::If {
+            then_block,
+            else_branch,
+            ..
+        } => {
+            collect_goto_labels(then_block, map);
+            if let Some(branch) = else_branch {
+                collect_goto_labels_stmt(branch, map);
+            }
+        }
+        Stmt::While { body, .. }
+        | Stmt::Loop { body, .. }
+        | Stmt::For { body, .. }
+        | Stmt::DoWhile { body, .. }
+        | Stmt::Unsafe { body, .. }
+        | Stmt::Block(body) => collect_goto_labels(body, map),
+        Stmt::Switch { arms, .. } => {
+            for arm in arms {
+                collect_goto_labels(&arm.body, map);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn llvm_params(sig: &FnSig, c_abi: bool) -> String {
+    let mut parts: Vec<String> = sig
+        .params
+        .iter()
+        .map(|t| {
+            if t.is_aggregate() && !c_abi {
+                "ptr".to_string()
+            } else {
+                t.llvm()
+            }
+        })
+        .collect();
+    if sig.variadic {
+        parts.push("...".to_string());
+    }
+    parts.join(", ")
+}
+
+fn llvm_ret(sig: &FnSig, c_abi: bool) -> String {
+    if sig.ret.is_aggregate() && !c_abi {
+        "void".to_string()
+    } else {
+        sig.ret.llvm()
     }
 }
 

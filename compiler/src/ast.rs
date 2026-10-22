@@ -101,6 +101,10 @@ pub struct StructField {
     pub ty: Type,
     /// Byte offset within the struct, filled in by semantic analysis.
     pub offset: u64,
+    /// Bit width for a C-style bitfield, or 0 for a normal field.
+    pub bit_width: u32,
+    /// Bit offset within the storage unit for a bitfield.
+    pub bit_offset: u32,
 }
 
 /// Struct layout shared by every `Type::Struct` value. Interior mutability lets
@@ -113,6 +117,37 @@ pub struct StructInfo {
     pub size: Cell<u64>,
     pub align: Cell<u64>,
     pub resolved: Cell<bool>,
+    /// C `union` layout: every field starts at offset 0 and the size is the
+    /// largest member.
+    pub is_union: bool,
+    /// No padding between fields; alignment is 1 unless raised explicitly.
+    pub packed: bool,
+    /// Minimum alignment from `align(N)`; 0 means natural alignment.
+    pub explicit_align: u64,
+}
+
+impl StructInfo {
+    fn has_bitfields(&self) -> bool {
+        self.fields.borrow().iter().any(|f| f.bit_width != 0)
+    }
+
+    fn has_flexible_array(&self) -> bool {
+        self.fields
+            .borrow()
+            .last()
+            .map(|f| matches!(f.ty, Type::Array { len: 0, .. }))
+            .unwrap_or(false)
+    }
+
+    /// True when LLVM's default struct layout matches this type's layout, so
+    /// the LLVM literal struct form can be used (needed for C ABI interop).
+    pub fn is_plain_c(&self) -> bool {
+        !self.is_union
+            && !self.packed
+            && self.explicit_align == 0
+            && !self.has_bitfields()
+            && !self.has_flexible_array()
+    }
 }
 
 impl PartialEq for StructInfo {
@@ -141,8 +176,20 @@ pub enum Type {
     Str,
     Vec(Box<Type>),
     Struct(Rc<StructInfo>),
+    /// Function pointer type. Its representation is a bare code pointer.
+    Fn(FnType),
+    /// NUL-terminated C string: layout is a single pointer.
+    CStr,
     /// Unresolved named type produced by the parser (`Color`, `Point`).
     Named(String),
+}
+
+/// Signature of a function pointer type.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct FnType {
+    pub params: Vec<Type>,
+    pub ret: Box<Type>,
+    pub variadic: bool,
 }
 
 impl Type {
@@ -228,6 +275,30 @@ impl Type {
         matches!(self, Type::Ptr { .. })
     }
 
+    pub fn is_fn(&self) -> bool {
+        matches!(self, Type::Fn(_))
+    }
+
+    pub fn fn_sig(&self) -> Option<&FnType> {
+        match self {
+            Type::Fn(sig) => Some(sig),
+            _ => None,
+        }
+    }
+
+    pub fn is_cstr(&self) -> bool {
+        matches!(self, Type::CStr)
+    }
+
+    pub fn is_str(&self) -> bool {
+        matches!(self, Type::Str)
+    }
+
+    /// True for types whose LLVM representation is a single `ptr`.
+    pub fn is_pointer_like(&self) -> bool {
+        matches!(self, Type::Ptr { .. } | Type::Fn(_) | Type::CStr)
+    }
+
     pub fn is_aggregate(&self) -> bool {
         matches!(
             self,
@@ -258,7 +329,7 @@ impl Type {
             Type::Char => 1,
             Type::Float(t) => (t.bits() / 8) as u64,
             Type::Int(t) => (t.bits() / 8) as u64,
-            Type::Ptr { .. } => 8,
+            Type::Ptr { .. } | Type::Fn(_) | Type::CStr => 8,
             Type::Array { elem, len } => elem.size_bytes() * len,
             Type::Enum(_) => 4,
             Type::Struct(info) => info.size.get(),
@@ -274,7 +345,7 @@ impl Type {
             Type::Array { elem, .. } => elem.align_bytes(),
             Type::Enum(_) => 4,
             Type::Struct(info) => info.align.get().max(1),
-            Type::Slice(_) | Type::Str => 8,
+            Type::Slice(_) | Type::Str | Type::Fn(_) | Type::CStr => 8,
             Type::Vec(_) => 8,
             Type::Named(_) => 1,
             other => other.size_bytes().max(1),
@@ -290,13 +361,21 @@ impl Type {
             Type::Float(FloatTy::F32) => "float".to_string(),
             Type::Float(FloatTy::F64) => "double".to_string(),
             Type::Int(t) => format!("i{}", t.bits()),
-            Type::Ptr { .. } => "ptr".to_string(),
+            Type::Ptr { .. } | Type::Fn(_) | Type::CStr => "ptr".to_string(),
             Type::Array { elem, len } => format!("[{} x {}]", len, elem.llvm()),
             Type::Enum(_) => "i32".to_string(),
             Type::Struct(info) => {
-                let fields = info.fields.borrow();
-                let body: Vec<String> = fields.iter().map(|f| f.ty.llvm()).collect();
-                format!("{{ {} }}", body.join(", "))
+                if info.is_plain_c() {
+                    let fields = info.fields.borrow();
+                    let body: Vec<String> = fields.iter().map(|f| f.ty.llvm()).collect();
+                    format!("{{ {} }}", body.join(", "))
+                } else {
+                    // Unions, packed/aligned structs, bitfields, and flexible
+                    // array members have a layout LLVM's default struct layout
+                    // cannot express; store them as opaque bytes and access
+                    // fields through byte offsets computed by semantic analysis.
+                    format!("[{} x i8]", info.size.get())
+                }
             }
             Type::Slice(elem) => format!("{{ ptr, i64 }} /* [{}] */", elem.display()),
             Type::Str => "{ ptr, i64 }".to_string(),
@@ -325,6 +404,18 @@ impl Type {
             Type::Slice(elem) => format!("[{}]", elem.display()),
             Type::Str => "str".to_string(),
             Type::Vec(elem) => format!("vec<{}>", elem.display()),
+            Type::Fn(f) => {
+                let params: Vec<String> = f.params.iter().map(|p| p.display()).collect();
+                let mut sig = params.join(", ");
+                if f.variadic {
+                    if !sig.is_empty() {
+                        sig.push_str(", ");
+                    }
+                    sig.push_str("...");
+                }
+                format!("fn({sig}) -> {}", f.ret.display())
+            }
+            Type::CStr => "cstr".to_string(),
             Type::Named(name) => name.clone(),
         }
     }
@@ -340,6 +431,7 @@ impl fmt::Display for Type {
 pub struct Program {
     pub imports: Vec<ImportDecl>,
     pub fns: Vec<FnDecl>,
+    pub typedefs: Vec<TypedefDecl>,
     pub globals: Vec<GlobalDecl>,
     pub consts: Vec<ConstDecl>,
     pub enums: Vec<EnumDecl>,
@@ -352,6 +444,18 @@ pub struct StructDecl {
     pub name_span: Span,
     pub fields: Vec<StructFieldDecl>,
     pub span: Span,
+    pub is_union: bool,
+    pub packed: bool,
+    pub align: u64,
+    pub public: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct TypedefDecl {
+    pub name: String,
+    pub name_span: Span,
+    pub ty: Type,
+    pub public: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -359,6 +463,7 @@ pub struct StructFieldDecl {
     pub name: String,
     pub span: Span,
     pub ty: Type,
+    pub bit_width: u32,
 }
 
 #[derive(Clone, Debug)]
@@ -369,6 +474,8 @@ pub struct GlobalDecl {
     pub mutable: bool,
     pub init: Expr,
     pub span: Span,
+    pub is_extern: bool,
+    pub public: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -384,6 +491,7 @@ pub struct ConstDecl {
     pub ty: Type,
     pub value: Expr,
     pub span: Span,
+    pub public: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -392,6 +500,7 @@ pub struct EnumDecl {
     pub name_span: Span,
     pub variants: Vec<EnumVariant>,
     pub span: Span,
+    pub public: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -419,8 +528,14 @@ pub struct FnDecl {
     pub params: Vec<Param>,
     pub ret: Type,
     pub ret_span: Span,
-    pub body: Block,
+    /// `None` for an `extern` declaration without a body.
+    pub body: Option<Block>,
     pub span: Span,
+    /// `Some("C")` for a function using the C ABI / unmangled symbol.
+    pub extern_abi: Option<String>,
+    /// Trailing `...` in the parameter list (C varargs).
+    pub variadic: bool,
+    pub public: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -433,6 +548,14 @@ pub struct Param {
 #[derive(Clone, Debug)]
 pub struct Block {
     pub stmts: Vec<Stmt>,
+    pub span: Span,
+}
+
+#[derive(Clone, Debug)]
+pub struct SwitchArm {
+    /// `None` is the `default` arm.
+    pub value: Option<Expr>,
+    pub body: Block,
     pub span: Span,
 }
 
@@ -469,6 +592,36 @@ pub enum Stmt {
         body: Block,
         span: Span,
     },
+    /// `for (init; cond; step) { body }`; any clause may be omitted.
+    For {
+        init: Option<Box<Stmt>>,
+        cond: Option<Expr>,
+        step: Option<Box<Stmt>>,
+        body: Block,
+        span: Span,
+    },
+    /// `do { body } while cond;`
+    DoWhile {
+        body: Block,
+        cond: Expr,
+        span: Span,
+    },
+    /// C `switch` with fallthrough between arms.
+    Switch {
+        value: Expr,
+        arms: Vec<SwitchArm>,
+        span: Span,
+    },
+    /// A labeled statement: `name: stmt`.
+    Label {
+        name: String,
+        stmt: Box<Stmt>,
+        span: Span,
+    },
+    Goto {
+        label: String,
+        span: Span,
+    },
     Loop {
         body: Block,
         span: Span,
@@ -497,6 +650,11 @@ impl Stmt {
             | Stmt::If { span, .. }
             | Stmt::While { span, .. }
             | Stmt::Loop { span, .. }
+            | Stmt::For { span, .. }
+            | Stmt::DoWhile { span, .. }
+            | Stmt::Switch { span, .. }
+            | Stmt::Label { span, .. }
+            | Stmt::Goto { span, .. }
             | Stmt::Return { span, .. }
             | Stmt::Unsafe { span, .. }
             | Stmt::Empty(span)
@@ -520,8 +678,14 @@ pub enum ExprKind {
     Int(u64),
     Float(f64),
     Str(Vec<u8>),
+    CStr(Vec<u8>),
     Char(u8),
     Bool(bool),
+    /// Typed null pointer (`null`).
+    Null,
+    SizeOf(Type),
+    AlignOf(Type),
+    OffsetOf(Type, String),
     Ident(String),
     EnumVariant {
         enum_name: String,
@@ -567,6 +731,12 @@ pub enum ExprKind {
     ArrayRepeat {
         value: Box<Expr>,
         count: u64,
+    },
+    /// Typed compound literal: `Point { x: 1, y: 2 }` with fields omitted
+    /// zero-initialized, or `[i32; 4] { 0: 1, 3: 7 }` for arrays.
+    CompoundLit {
+        ty: Type,
+        fields: Vec<(String, Expr)>,
     },
 }
 

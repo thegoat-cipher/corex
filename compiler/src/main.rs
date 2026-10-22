@@ -14,8 +14,9 @@ const USAGE: &str = "\
 CoreX compiler (corex 0.1.0)
 
 Usage:
-  corex build   <file.cx | -> [-o <output>] [--opt <0-3>]
-  corex run     <file.cx | -> [--opt <0-3>] [-- <program args>...]
+  corex build   <file.cx | -> [-o <output>] [--opt <0-3>] [--link <obj|a>]...
+                [-L <dir>]... [-l <lib>]... [--hosted] [--shared]
+  corex run     <file.cx | -> [--opt <0-3>] [--link ...] [--hosted] [-- <program args>...]
   corex exec    '<source>' [--opt <0-3>] [-- <program args>...]
   corex repl    [--opt <0-3>]
   corex emit-ir <file.cx | -> [--verify]
@@ -76,6 +77,7 @@ struct CommonArgs {
     opt: u8,
     verify: bool,
     program_args: Vec<String>,
+    link: driver::LinkInputs,
 }
 
 fn parse_opt(value: Option<&String>) -> Result<u8, String> {
@@ -94,6 +96,7 @@ fn parse_common(args: &[String], allow_output: bool, allow_opt: bool) -> Result<
         opt: 2,
         verify: false,
         program_args: Vec::new(),
+        link: driver::LinkInputs::default(),
     };
     let mut i = 0;
     while i < args.len() {
@@ -111,6 +114,29 @@ fn parse_common(args: &[String], allow_output: bool, allow_opt: bool) -> Result<
                 let v = args.get(i + 1).ok_or("`-o` requires a path")?;
                 out.output = Some(PathBuf::from(v));
                 i += 2;
+            }
+            "--link" => {
+                let v = args.get(i + 1).ok_or("`--link` requires a path")?;
+                out.link.objects.push(PathBuf::from(v));
+                i += 2;
+            }
+            "-L" => {
+                let v = args.get(i + 1).ok_or("`-L` requires a directory")?;
+                out.link.lib_paths.push(PathBuf::from(v));
+                i += 2;
+            }
+            "-l" => {
+                let v = args.get(i + 1).ok_or("`-l` requires a library name")?;
+                out.link.libs.push(v.clone());
+                i += 2;
+            }
+            "--hosted" => {
+                out.link.hosted = true;
+                i += 1;
+            }
+            "--shared" => {
+                out.link.shared = true;
+                i += 1;
             }
             "--" => {
                 out.program_args = args[i + 1..].to_vec();
@@ -201,7 +227,12 @@ fn default_output(file: &Path) -> PathBuf {
 }
 
 /// Build `file` into a temp directory, run it, and return its exit status.
-fn run_source(file: &SourceFile, opt: u8, program_args: &[String]) -> i32 {
+fn run_source(
+    file: &SourceFile,
+    opt: u8,
+    program_args: &[String],
+    link: &driver::LinkInputs,
+) -> i32 {
     let work = driver::temp_dir("corex-run");
     if let Err(e) = std::fs::create_dir_all(&work) {
         eprintln!("error: cannot create {}: {e}", work.display());
@@ -209,7 +240,7 @@ fn run_source(file: &SourceFile, opt: u8, program_args: &[String]) -> i32 {
     }
     let exe = work.join("program");
 
-    let artifacts = match driver::build(file, &exe, opt, false) {
+    let artifacts = match driver::build_with(file, &exe, opt, false, link) {
         Ok(a) => a,
         Err(diags) => {
             report(file, &diags);
@@ -263,7 +294,7 @@ fn cmd_build(args: &[String]) -> i32 {
         .output
         .unwrap_or_else(|| default_output(&input));
 
-    match driver::build(&file, &output, parsed.opt, false) {
+    match driver::build_with(&file, &output, parsed.opt, false, &parsed.link) {
         Ok(art) => {
             println!(
                 "compiled {} -> {}",
@@ -292,7 +323,7 @@ fn cmd_run(args: &[String]) -> i32 {
         Ok(f) => f,
         Err(code) => return code,
     };
-    run_source(&file, parsed.opt, &parsed.program_args)
+    run_source(&file, parsed.opt, &parsed.program_args, &parsed.link)
 }
 
 fn cmd_exec(args: &[String]) -> i32 {
@@ -342,7 +373,7 @@ fn cmd_exec(args: &[String]) -> i32 {
         SourceFile::new("<exec>", source)
     };
 
-    run_source(&file, opt, &program_args)
+    run_source(&file, opt, &program_args, &driver::LinkInputs::default())
 }
 
 fn cmd_repl(args: &[String]) -> i32 {
