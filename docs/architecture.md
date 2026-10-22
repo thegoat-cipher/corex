@@ -6,7 +6,7 @@ were read from the code, not proposed.
 - Rust 1.99.1, edition 2021, **zero external crates**.
 - LLVM 20.1.8 tools invoked as processes (`llvm-as`, `llc`).
 - Target: `x86_64-unknown-linux-gnu`, statically linked, freestanding ELF.
-- Test suite: 174 tests (61 unit, 113 integration), all passing.
+- Test suite: 175 tests (61 unit, 114 integration), all passing.
 
 ---
 
@@ -337,7 +337,7 @@ still produce errors.
 | `tests/opt_levels.rs` | integration | 5 | identical observable behavior at `--opt 0..3`; no `nsw`/`nuw` in emitted IR; generated differential arithmetic (1,104 assertions) |
 | `tests/robustness.rs` | integration | 2 | malformed and adversarial input produces diagnostics, never a panic |
 | `tests/native.rs` | integration | 18 | compile → link → execute: stdout, exit codes, wrapping, masked shifts, aborts (101), heap round-trip, pointer arithmetic, `_start` fallthrough |
-| `tests/cli.rs` | integration | 14 | stdin source, inline `exec`, exit-status forwarding, REPL accumulation/redefinition/statement mode, pasted programs with blank lines |
+| `tests/cli.rs` | integration | 15 | stdin source, inline `exec`, exit-status forwarding, REPL accumulation/redefinition/statement mode, pasted programs with blank lines |
 | `tests/features.rs` | integration | 7 | compound assignment, inference, chars, globals, enums, floats, structs, slices, strings, ranges, `len`, bounds aborts, checked-in feature example |
 | `tests/compiler_caps.rs` | integration | 8 | `vec<T>`, `const`, file I/O, recursive imports and per-file diagnostics, panic/assert, recursive structs, compiler-data example |
 | `tests/extended.rs` | integration | 6 | function pointers, switch/for/do/goto, unions/bitfields, layout, cstr, macros |

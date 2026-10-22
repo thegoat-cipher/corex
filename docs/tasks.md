@@ -4,8 +4,8 @@ Status values: NOT STARTED, IN PROGRESS, BLOCKED, COMPLETED. Validated status
 changed only after the acceptance criteria passed. Evidence names the command or
 test that proves completion; counts are from the run on 2026-10-21.
 
-Test totals (v0.3, 2026-10-22): `cargo test` → **174 passed, 0 failed**
-(61 unit, 113 integration).
+Test totals (v0.3, 2026-10-22): `cargo test` → **175 passed, 0 failed**
+(61 unit, 114 integration).
 
 | ID | Description | Workstream | Priority | Depends on | Status | Acceptance criteria | Validation evidence |
 |---|---|---|---|---|---|---|---|

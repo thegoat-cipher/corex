@@ -473,6 +473,7 @@ pub struct TypedefDecl {
     pub name_span: Span,
     pub ty: Type,
     pub public: bool,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug)]

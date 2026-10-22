@@ -127,8 +127,8 @@ compiler port.
 ### 2.4 Tooling, tests, benchmarks, build
 
 - CLI: `build run exec repl emit-ir check fmt lint doc test`; `corex-lsp`.
-- Tests: **174 passed, 0 failed** (61 unit + 113 integration). Per binary:
-  `cli` 14, `compiler_caps` 8, `concurrency` 3, `diagnostics` 29, `extended` 6,
+- Tests: **175 passed, 0 failed** (61 unit + 114 integration). Per binary:
+  `cli` 15, `compiler_caps` 8, `concurrency` 3, `diagnostics` 29, `extended` 6,
   `features` 7, `ffi` 2, `ir` 6, `modules` 4, `native` 18, `opt_levels` 5,
   `robustness` 2, `stdlib` 2, `tooling` 7. Unit tests: `semantic` 26,
   `parser` 14, `lexer` 9, `diagnostics` 4, `format` 4, `lsp` 3, `docgen` 1.
@@ -376,7 +376,7 @@ test result: ok. 2 passed;  0 failed   (stdlib)
 test result: ok. 7 passed;  0 failed   (tooling)
 ```
 
-Total: **174 passed, 0 failed**. This matches the README and `docs/tasks.md`.
+Total: **175 passed, 0 failed**. This matches the README and `docs/tasks.md`.
 The suite includes native compile/run tests, IR verification, diagnostics,
 modules/archives/shared objects, C ABI in both directions, DWARF inspection,
 sanitizers, an LSP session, and optimization-level equivalence.
@@ -482,7 +482,7 @@ compiler are expressible. The gaps are library ergonomics, not semantics.
 
 | Phase | Work | Exit gate |
 |---|---|---|
-| **0. Prerequisites** | Implement P0 items in §8; add the differential harness and a CoreX-native test runner | `cargo test` still 174; new tests cover map/builder/driver helpers; probes B1/B2/B3/B4 have documented workarounds |
+| **0. Prerequisites** | Implement P0 items in §8; add the differential harness and a CoreX-native test runner | `cargo test` still 175; new tests cover map/builder/driver helpers; probes B1/B2/B3/B4 have documented workarounds |
 | **1. Infrastructure** | Arena, growable builder, string map/set, diagnostics/source map, path helpers, temp dirs | Unit tests for map/builder; can read a file and emit a diagnostic with a span |
 | **2. Lexer** | Port `token.rs` + `lexer.rs`; token dump mode | Token stream for every `examples/*.cx` and corpus file matches the Rust lexer; negative cases produce the same codes |
 | **3. AST + parser** | Tagged AST, recursive descent, precedence climbing, recovery, `#[cfg]`, macros (last) | Parses all corpus files; AST dump normalized and compared; malformed corpus yields the same diagnostic codes and counts |
@@ -553,12 +553,12 @@ binary". Self-compilation comes only after codegen and driver parity.
 | AC-1 | Corpus parity: every corpus program produces the same stdout/stderr/exit with both compilers at `--opt 0..3` | differential runner report |
 | AC-2 | Negative parity: every negative input produces the same ordered diagnostic codes and start positions | differential runner report |
 | AC-3 | IR validity: every emitted module passes `llvm-as` | `emit-ir --verify` |
-| AC-4 | Existing behavior tests: the 174-test suite's behavioral cases pass when run against `corexc` | ported/parameterized harness |
+| AC-4 | Existing behavior tests: the 175-test suite's behavioral cases pass when run against `corexc` | ported/parameterized harness |
 | AC-5 | Modules/FFI: separate compilation, archives, shared objects, `dlopen`, C calls both directions work | `tests/modules.rs`, `tests/ffi.rs` equivalents |
 | AC-6 | Determinism: twin builds produce identical artifacts | SHA-256 comparison |
 | AC-7 | Fixed point: stage2 and stage3 agree on the compiler source | normalized IR/ELF diff |
 | AC-8 | Performance: self-compile at `--opt 2` under an agreed budget (suggest ≤ 10 s on the reference machine), frontend within 2× of Rust `corex check` on the same input | timing harness |
-| AC-9 | No regression: Rust `corex` remains the default and all 174 tests pass | CI |
+| AC-9 | No regression: Rust `corex` remains the default and all 175 tests pass | CI |
 
 ### 6.7 Rollback
 
