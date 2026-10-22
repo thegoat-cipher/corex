@@ -1,0 +1,110 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  RUST_VERSION: "1.99.1"
+  LLVM_VERSION: "20.1.8"
+  LLVM_TARBALL: "LLVM-20.1.8-Linux-X64.tar.xz"
+
+jobs:
+  linux-x86_64:
+    name: Linux x86-64 (test, examples, install)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    steps:
+      - name: Checkout
+        uses: actions/checkout@08eba0b27e820071cde6df949e0beb9ba4906955 # v4.3.0
+
+      - name: Install Rust ${{ env.RUST_VERSION }}
+        uses: dtolnay/rust-toolchain@d124f86f28ff42855784ff3319f48ac182c248f8 # 1.99.1
+        with:
+          toolchain: "1.99.1"
+
+      - name: Cache LLVM tarball
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: ${{ runner.temp }}/${{ env.LLVM_TARBALL }}
+          key: llvm-${{ env.LLVM_VERSION }}-linux-x64
+
+      - name: Cache Cargo registry and build
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4.3.0
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            compiler/target
+          key: cargo-${{ runner.os }}-${{ env.RUST_VERSION }}-${{ hashFiles('compiler/Cargo.lock') }}
+          restore-keys: |
+            cargo-${{ runner.os }}-${{ env.RUST_VERSION }}-
+
+      - name: Install LLVM ${{ env.LLVM_VERSION }}
+        run: |
+          set -euo pipefail
+          tarball="$RUNNER_TEMP/$LLVM_TARBALL"
+          if [ ! -f "$tarball" ]; then
+            curl -fsSL --retry 3 --retry-delay 5 -o "$tarball.part" \
+              "https://github.com/llvm/llvm-project/releases/download/llvmorg-${LLVM_VERSION}/${LLVM_TARBALL}"
+            mv "$tarball.part" "$tarball"
+          fi
+          mkdir -p "$RUNNER_TEMP/llvm"
+          tar -xJf "$tarball" -C "$RUNNER_TEMP/llvm"
+          llvm_bin="$RUNNER_TEMP/llvm/LLVM-${LLVM_VERSION}-Linux-X64/bin"
+          test -x "$llvm_bin/llvm-as"
+          test -x "$llvm_bin/opt"
+          test -x "$llvm_bin/llc"
+          echo "COREX_LLVM_BIN=$llvm_bin" >> "$GITHUB_ENV"
+          echo "$llvm_bin" >> "$GITHUB_PATH"
+
+      - name: Verify toolchain
+        run: |
+          set -euo pipefail
+          rustc --version
+          cargo --version
+          for tool in llvm-as opt llc; do
+            "$tool" --version 2>&1 | grep -F "$LLVM_VERSION"
+          done
+          cc --version
+          gcc --version
+
+      - name: cargo test
+        working-directory: compiler
+        run: |
+          set -euo pipefail
+          cargo test --locked 2>&1 | tee "$RUNNER_TEMP/cargo-test.log"
+          passed="$(grep -cE '^test .* \.\.\. ok$' "$RUNNER_TEMP/cargo-test.log")"
+          echo "tests passed: $passed"
+          if [ "$passed" -ne 205 ]; then
+            echo "error: expected 205 passing tests, saw $passed" >&2
+            exit 1
+          fi
+
+      - name: C FFI and separate compilation
+        working-directory: compiler
+        run: cargo test --locked --test ffi --test modules
+
+      - name: Build compiler binary
+        working-directory: compiler
+        run: cargo build --locked
+
+      - name: Examples at --opt 0,1,2,3
+        run: ./scripts/example-matrix.sh
+
+      - name: Install smoke
+        run: |
+          set -euo pipefail
+          cargo install --path compiler --locked --root "$RUNNER_TEMP/corex"
+          "$RUNNER_TEMP/corex/bin/corex" --version | tee "$RUNNER_TEMP/version.txt"
+          grep -F "corex 0.3.0" "$RUNNER_TEMP/version.txt"
+          "$RUNNER_TEMP/corex/bin/corex" run examples/hello.cx
