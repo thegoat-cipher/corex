@@ -10,8 +10,10 @@ use std::path::{Path, PathBuf};
 use corex::diagnostics::{Diagnostic, SourceFile};
 use corex::driver;
 
-const USAGE: &str = "\
-CoreX compiler (corex 0.1.0)
+const USAGE: &str = concat!(
+    "CoreX compiler (corex ",
+    env!("CARGO_PKG_VERSION"),
+    ")
 
 Usage:
   corex build   <file.cx | -> [-o <output>] [--opt <0-3>] [--link <obj|a>]...
@@ -49,7 +51,8 @@ Reading source:
 Environment:
   COREX_LLVM_BIN  Directory containing llvm-as, opt, llc (LLVM 20).
   COREX_CC        Linker driver used to produce the ELF (default: cc).
-";
+"
+);
 
 fn main() {
     let code = real_main();
@@ -63,7 +66,7 @@ fn real_main() -> i32 {
         return if args.is_empty() { 2 } else { 0 };
     }
     if args[0] == "--version" || args[0] == "-V" {
-        println!("corex 0.1.0 (LLVM 20 backend)");
+        println!("corex {} (LLVM 20 backend)", env!("CARGO_PKG_VERSION"));
         return 0;
     }
 

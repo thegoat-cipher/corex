@@ -1,6 +1,6 @@
 [package]
 name = "corex"
-version = "0.1.0"
+version = "0.3.0"
 edition = "2021"
 default-run = "corex"
 description = "CoreX compiler: lexer, parser, semantic analysis, LLVM 20 IR backend"

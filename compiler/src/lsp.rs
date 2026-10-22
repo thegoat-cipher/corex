@@ -374,7 +374,7 @@ fn handle(state: &mut State, message: Json) -> bool {
                         "serverInfo",
                         Json::obj(vec![
                             ("name", Json::Str("corex-lsp".to_string())),
-                            ("version", Json::Str("0.1.0".to_string())),
+                            ("version", Json::Str(env!("CARGO_PKG_VERSION").to_string())),
                         ]),
                     ),
                 ]),
