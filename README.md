@@ -28,6 +28,9 @@ Language surface is deliberately small; see [Limitations](#limitations).
 
 ## Quick start
 
+For a step-by-step toolchain setup, verification, and troubleshooting, see
+[`docs/installation.md`](docs/installation.md). Short version:
+
 Prerequisites:
 
 - Rust 1.99+ with `cargo` (no external crates are used).
@@ -295,6 +298,8 @@ and runtime aborts for dynamic bounds and division by zero. See
 
 | Document | Contents |
 |---|---|
+| [`docs/installation.md`](docs/installation.md) | Toolchain setup, build, verification, environment variables, troubleshooting |
+| [`docs/resources.md`](docs/resources.md) | Curated project docs, examples, tests, source map, and external references |
 | [`docs/language-spec.md`](docs/language-spec.md) | Normative syntax and semantics, diagnostics catalog |
 | [`docs/grammar.ebnf`](docs/grammar.ebnf) | Formal grammar matching the parser |
 | [`docs/memory-model.md`](docs/memory-model.md) | Allocation model, pointer invariants, guarantee matrix, UB |

@@ -48,6 +48,7 @@ Test totals: `cargo test` → **142 passed, 0 failed** (53 unit, 89 integration)
 | T-052 | Recursive imports and multi-file diagnostics | Maintainer (Driver) | P0 | T-049 | COMPLETED | Relative import resolution, dedup/cycles, flat namespace, per-file span mapping | `tests/compiler_caps.rs::imports_resolve_relative_files_and_diagnose_paths` |
 | T-053 | Panic/assert error handling | Maintainer (Language + Backend) | P0 | T-049 | COMPLETED | Message + newline on fd 2, exit 101, panic satisfies return analysis | `tests/compiler_caps.rs::panic_and_assert_abort_with_messages`, `panic_satisfies_return_analysis` |
 | T-054 | Compiler-data capability example and docs | Documentation (isolated workstream) | P0 | T-049…T-053 | COMPLETED | Tokenizer example using enums/structs/const/vec/strings/slices/assert; docs and grammar updated | `examples/compiler_data.cx`; `tests/compiler_caps.rs::compiler_data_example_tokenizes`; README/spec/grammar/memory/architecture/PRD updated |
+| T-055 | Installation guide and curated resource index | Documentation (isolated workstream) | P0 | T-054 | COMPLETED | Reproducible install/build/verify/troubleshooting guide; project, source, test, example, and external reference map | `docs/installation.md`, `docs/resources.md`, README documentation index |
 
 ## Backlog (NOT STARTED)
 
@@ -64,6 +65,6 @@ Test totals: `cargo test` → **142 passed, 0 failed** (53 unit, 89 integration)
 
 ## Status summary
 
-- COMPLETED: T-001 … T-028, T-041 … T-046, and T-049 … T-054 (40 tasks).
+- COMPLETED: T-001 … T-028, T-041 … T-046, and T-049 … T-055 (41 tasks).
 - IN PROGRESS: none.
 - BLOCKED: none.
