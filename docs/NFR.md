@@ -233,5 +233,5 @@ are unchanged.
 - **G1-G9 (diagnostics):** 44 stable error codes are documented in
   `docs/language-spec.md` §11; 29 invalid programs are asserted against specific
   codes in `tests/diagnostics.rs`.
-- **T1-T8 (testability):** 194 tests pass (68 unit, 126 integration); integration
+- **T1-T8 (testability):** 205 tests pass (68 unit, 137 integration); integration
   tests link and execute real binaries.

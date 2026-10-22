@@ -6,7 +6,7 @@ were read from the code, not proposed.
 - Rust 1.99.1, edition 2021, **zero external crates**.
 - LLVM 20.1.8 tools invoked as processes (`llvm-as`, `llc`).
 - Target: `x86_64-unknown-linux-gnu`, statically linked, freestanding ELF.
-- Test suite: 194 tests (68 unit, 126 integration), all passing.
+- Test suite: 205 tests (68 unit, 137 integration), all passing.
 
 ---
 
@@ -331,21 +331,24 @@ still produce errors.
 
 | Test file | Kind | Count | What it proves |
 |---|---|---|---|
-| inline `#[cfg(test)]` in `lexer`, `parser`, `semantic`, `diagnostics` | unit | 61 | token streams, precedence, recovery, scope/type rules, layout tables, span rendering |
+| inline `#[cfg(test)]` in `lexer`, `parser`, `semantic`, `diagnostics` | unit | 68 | token streams, precedence, recovery, scope/type rules, layout tables, span rendering |
 | `tests/diagnostics.rs` | integration | 29 | every documented rejection path, by code |
 | `tests/ir.rs` | integration | 6 | all examples emit IR accepted by `llvm-as`; no libc symbols; no `undef`; regression for the invalid constant-expression bug; structural checks |
 | `tests/opt_levels.rs` | integration | 5 | identical observable behavior at `--opt 0..3`; no `nsw`/`nuw` in emitted IR; generated differential arithmetic (1,104 assertions) |
-| `tests/robustness.rs` | integration | 2 | malformed and adversarial input produces diagnostics, never a panic |
+| `tests/robustness.rs` | integration | 4 | malformed and adversarial input produces diagnostics, never a panic |
 | `tests/native.rs` | integration | 18 | compile → link → execute: stdout, exit codes, wrapping, masked shifts, aborts (101), heap round-trip, pointer arithmetic, `_start` fallthrough |
-| `tests/cli.rs` | integration | 15 | stdin source, inline `exec`, exit-status forwarding, REPL accumulation/redefinition/statement mode, pasted programs with blank lines |
-| `tests/features.rs` | integration | 7 | compound assignment, inference, chars, globals, enums, floats, structs, slices, strings, ranges, `len`, bounds aborts, checked-in feature example |
+| `tests/cli.rs` | integration | 17 | stdin source, inline `exec`, exit-status forwarding, REPL accumulation/redefinition/statement mode, pasted programs with blank lines |
+| `tests/features.rs` | integration | 8 | compound assignment, inference, chars, globals, enums, floats, structs, slices, strings, ranges, `len`, bounds aborts, checked-in feature example |
 | `tests/compiler_caps.rs` | integration | 8 | `vec<T>`, `const`, file I/O, recursive imports and per-file diagnostics, panic/assert, recursive structs, compiler-data example |
-| `tests/extended.rs` | integration | 6 | function pointers, switch/for/do/goto, unions/bitfields, layout, cstr, macros |
+| `tests/extended.rs` | integration | 9 | function pointers, switch/for/do/goto, unions/bitfields, layout, cstr, macros |
 | `tests/ffi.rs` | integration | 2 | extern C calls/exports, aggregates, variadics, main(argc,argv,envp) |
-| `tests/modules.rs` | integration | 4 | namespaced modules, cfg, manifests, archives, shared libraries/dlopen |
-| `tests/stdlib.rs` | integration | 2 | allocators, memory/string library, file/format/time/directory APIs |
+| `tests/modules.rs` | integration | 7 | namespaced modules, cfg, manifests, archives, shared libraries/dlopen |
+| `tests/stdlib.rs` | integration | 3 | allocators, memory/string library, file/format/time/directory APIs |
 | `tests/concurrency.rs` | integration | 3 | atomics/volatile, threads/futex, TLS |
 | `tests/tooling.rs` | integration | 7 | formatter, linter, docs, test runner, DWARF, sanitizers, LSP |
+| `tests/aggregates.rs` | integration | 6 | static array/struct tables, const array lengths |
+| `tests/collections.rs` | integration | 2 | insertion-ordered map/set and growable builder |
+| `tests/driver_helpers.rs` | integration | 3 | envp lookup, pipe/dup2 capture, argv process launch |
 
 `tests/native.rs` builds through the same `driver` API the CLI uses and executes
 the produced binaries; `tests/ir.rs` assembles through `driver::emit_ir` and the
