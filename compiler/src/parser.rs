@@ -13,14 +13,23 @@ use crate::token::{Token, TokenKind};
 const MAX_NESTING: usize = 128;
 
 pub fn parse(tokens: &[Token]) -> Result<Program, Vec<Diagnostic>> {
+    parse_with_cfg(tokens, &[])
+}
+
+/// Parse with a set of enabled `#[cfg]` keys, e.g. `feature=fast` or
+/// `target_os=linux`.
+pub fn parse_with_cfg(tokens: &[Token], cfg: &[String]) -> Result<Program, Vec<Diagnostic>> {
     let mut p = Parser {
         tokens,
         pos: 0,
         diags: Vec::new(),
         next_id: 0,
         depth: 0,
+        cfg: cfg.to_vec(),
     };
     let mut program = Program {
+        module_name: None,
+        mod_deps: Vec::new(),
         imports: Vec::new(),
         fns: Vec::new(),
         typedefs: Vec::new(),
@@ -52,6 +61,7 @@ struct Parser<'a> {
     diags: Vec<Diagnostic>,
     next_id: NodeId,
     depth: usize,
+    cfg: Vec<String>,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -96,6 +106,108 @@ impl<'a> Parser<'a> {
     // ----- items -------------------------------------------------------
 
     fn parse_item(&mut self, program: &mut Program) -> Result<(), ()> {
+        let enabled = self.parse_cfg_attrs()?;
+        if !enabled {
+            // Parse the item for recovery, then discard its declarations.
+            let mut scratch = Program {
+                module_name: None,
+                mod_deps: Vec::new(),
+                imports: Vec::new(),
+                fns: Vec::new(),
+                typedefs: Vec::new(),
+                globals: Vec::new(),
+                consts: Vec::new(),
+                enums: Vec::new(),
+                structs: Vec::new(),
+            };
+            let result = self.parse_item_inner(&mut scratch);
+            if result.is_err() {
+                self.skip_stmt();
+            }
+            return result;
+        }
+        self.parse_item_inner(program)
+    }
+
+    /// Parse zero or more `#[cfg(...)]` attributes. Returns false when a
+    /// condition evaluates to false and the item must be skipped.
+    fn parse_cfg_attrs(&mut self) -> Result<bool, ()> {
+        let mut enabled = true;
+        while self.at(&TokenKind::Hash) {
+            self.advance();
+            self.expect(&TokenKind::LBracket, "after `#`")?;
+            let (name, span) = self.expect_ident("attribute name")?;
+            if name != "cfg" {
+                let _: Result<(), ()> =
+                    self.error("E0100", span, format!("unknown attribute `{name}`"));
+                // Skip to `]` so parsing can continue.
+                while !self.at(&TokenKind::RBracket) && !self.at(&TokenKind::Eof) {
+                    self.advance();
+                }
+                self.expect(&TokenKind::RBracket, "after attribute")?;
+                continue;
+            }
+            self.expect(&TokenKind::LParen, "after `cfg`")?;
+            let value = self.parse_cfg_expr()?;
+            self.expect(&TokenKind::RParen, "after cfg expression")?;
+            self.expect(&TokenKind::RBracket, "after cfg attribute")?;
+            if !value {
+                enabled = false;
+            }
+        }
+        Ok(enabled)
+    }
+
+    fn parse_cfg_expr(&mut self) -> Result<bool, ()> {
+        let (name, span) = self.expect_ident("cfg key")?;
+        match name.as_str() {
+            "not" => {
+                self.expect(&TokenKind::LParen, "after `not`")?;
+                let inner = self.parse_cfg_expr()?;
+                self.expect(&TokenKind::RParen, "after `not` expression")?;
+                Ok(!inner)
+            }
+            "all" | "any" => {
+                self.expect(&TokenKind::LParen, "after cfg combinator")?;
+                let mut values = Vec::new();
+                while !self.at(&TokenKind::RParen) {
+                    values.push(self.parse_cfg_expr()?);
+                    if self.at(&TokenKind::Comma) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.expect(&TokenKind::RParen, "after cfg combinator")?;
+                Ok(if name == "all" {
+                    values.iter().all(|v| *v)
+                } else {
+                    values.iter().any(|v| *v)
+                })
+            }
+            key => {
+                self.expect(&TokenKind::Assign, "after cfg key")?;
+                let value = match self.peek().clone() {
+                    TokenKind::Str(bytes) => {
+                        self.advance();
+                        String::from_utf8_lossy(&bytes).to_string()
+                    }
+                    other => {
+                        let span = self.peek_span();
+                        return self.error(
+                            "E0100",
+                            span,
+                            format!("expected a string cfg value, found {}", other.describe()),
+                        );
+                    }
+                };
+                let _ = span;
+                Ok(self.cfg.iter().any(|k| k == &format!("{key}={value}")))
+            }
+        }
+    }
+
+    fn parse_item_inner(&mut self, program: &mut Program) -> Result<(), ()> {
         let start_span = self.peek_span();
         let public = if self.at(&TokenKind::Pub) {
             self.advance();
@@ -157,6 +269,39 @@ impl<'a> Parser<'a> {
         }
 
         match self.peek().clone() {
+            TokenKind::Module => {
+                if public {
+                    return self.error("E0100", start_span, "`pub` does not apply to `module`");
+                }
+                self.advance();
+                let (name, _) = self.expect_ident("module name")?;
+                self.expect(&TokenKind::Semi, "after module name")?;
+                if program.module_name.is_some() {
+                    return self.error(
+                        "E0202",
+                        start_span,
+                        "a file may declare only one `module`",
+                    );
+                }
+                program.module_name = Some(name);
+                Ok(())
+            }
+            TokenKind::Mod => {
+                self.advance();
+                let (name, _) = self.expect_ident("module dependency name")?;
+                if self.at(&TokenKind::LBrace) {
+                    return self.error(
+                        "E0100",
+                        self.peek_span(),
+                        "inline modules are not supported; put the module in its own file and write `mod name;`",
+                    );
+                }
+                self.expect(&TokenKind::Semi, "after module dependency")?;
+                if !program.mod_deps.contains(&name) {
+                    program.mod_deps.push(name);
+                }
+                Ok(())
+            }
             TokenKind::Fn => {
                 let f = self.parse_fn(public, None)?;
                 program.fns.push(f);
@@ -223,11 +368,13 @@ impl<'a> Parser<'a> {
                     "ABI name must be valid UTF-8",
                 ));
             })?;
-            if abi != "C" {
+            if abi != "C" && abi != "corex" {
                 return self.error(
                     "E0100",
                     self.peek_span(),
-                    format!("unsupported ABI `{abi}`; only `extern \"C\"` is supported"),
+                    format!(
+                        "unsupported ABI `{abi}`; expected `extern \"C\"` or `extern \"corex\"`"
+                    ),
                 );
             }
         }
@@ -300,6 +447,9 @@ impl<'a> Parser<'a> {
                 | TokenKind::Typedef
                 | TokenKind::Extern
                 | TokenKind::Pub
+                | TokenKind::Mod
+                | TokenKind::Module
+                | TokenKind::Hash
                 | TokenKind::Repr
                 | TokenKind::Packed
                 | TokenKind::Align
@@ -1329,6 +1479,26 @@ impl<'a> Parser<'a> {
                         span,
                     );
                 }
+                TokenKind::Arrow => {
+                    self.advance();
+                    let (field, fspan) = self.expect_ident("field name")?;
+                    let arrow_span = expr.span;
+                    let deref = self.mk_expr(
+                        ExprKind::Unary {
+                            op: UnOp::Deref,
+                            expr: Box::new(expr),
+                        },
+                        arrow_span,
+                    );
+                    let span = arrow_span.merge(fspan);
+                    expr = self.mk_expr(
+                        ExprKind::Field {
+                            base: Box::new(deref),
+                            name: field,
+                        },
+                        span,
+                    );
+                }
                 TokenKind::Dot => {
                     self.advance();
                     let (field, fspan) = self.expect_ident("field name")?;
@@ -1439,17 +1609,11 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident(name) => {
                 self.advance();
-                if self.at(&TokenKind::ColonColon) {
+                let mut segments = vec![name];
+                while self.at(&TokenKind::ColonColon) {
                     self.advance();
-                    let (variant, vspan) = self.expect_ident("enum variant")?;
-                    let span = span.merge(vspan);
-                    return Ok(self.mk_expr(
-                        ExprKind::EnumVariant {
-                            enum_name: name,
-                            variant,
-                        },
-                        span,
-                    ));
+                    let (seg, _) = self.expect_ident("path segment")?;
+                    segments.push(seg);
                 }
                 if self.looks_like_struct_literal() {
                     self.advance();
@@ -1472,18 +1636,26 @@ impl<'a> Parser<'a> {
                         }
                     }
                     let close = self.expect(&TokenKind::RBrace, "after struct literal")?;
-                    let span = span.merge(close.span);
+                    let full_span = span.merge(close.span);
+                    let joined = segments.join("::");
                     let kind = if partial {
                         ExprKind::CompoundLit {
-                            ty: Type::Named(name),
+                            ty: Type::Named(joined),
                             fields,
                         }
                     } else {
-                        ExprKind::StructLit { name, fields }
+                        ExprKind::StructLit {
+                            name: joined,
+                            fields,
+                        }
                     };
-                    return Ok(self.mk_expr(kind, span));
+                    return Ok(self.mk_expr(kind, full_span));
                 }
-                Ok(self.mk_expr(ExprKind::Ident(name), span))
+                if segments.len() == 1 {
+                    Ok(self.mk_expr(ExprKind::Ident(segments[0].clone()), span))
+                } else {
+                    Ok(self.mk_expr(ExprKind::Path(segments), span))
+                }
             }
             TokenKind::LParen => {
                 self.advance();

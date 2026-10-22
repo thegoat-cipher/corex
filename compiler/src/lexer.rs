@@ -63,6 +63,7 @@ impl<'a> Lexer<'a> {
                 b'}' => self.push(TokenKind::RBrace, start),
                 b'[' => self.push(TokenKind::LBracket, start),
                 b']' => self.push(TokenKind::RBracket, start),
+                b'#' => self.push(TokenKind::Hash, start),
                 b',' => self.push(TokenKind::Comma, start),
                 b'.' => {
                     if self.peek() == Some(b'.') {
@@ -237,7 +238,8 @@ impl<'a> Lexer<'a> {
                     }
                 }
                 b'_' | b'a'..=b'z' | b'A'..=b'Z' => {
-                    while matches!(self.peek(), Some(c) if c == b'_' || c.is_ascii_alphanumeric()) {
+                    // `$` is reserved for compiler-generated module symbols.
+                    while matches!(self.peek(), Some(c) if c == b'_' || c == b'$' || c.is_ascii_alphanumeric()) {
                         self.bump();
                     }
                     let text = std::str::from_utf8(&self.src[start..self.pos])
@@ -617,6 +619,7 @@ fn keyword(text: &str) -> Option<TokenKind> {
         "extern" => TokenKind::Extern,
         "pub" => TokenKind::Pub,
         "mod" => TokenKind::Mod,
+        "module" => TokenKind::Module,
         "switch" => TokenKind::Switch,
         "case" => TokenKind::Case,
         "default" => TokenKind::Default,

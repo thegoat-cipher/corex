@@ -1,0 +1,78 @@
+//! Freestanding memory primitives. These are the CoreX equivalents of the C
+//! `mem*` family and allocate nothing.
+
+module std_mem;
+
+pub fn memcpy(dst: *mut u8, src: *u8, n: usize) -> *mut u8 {
+    let mut i: usize = 0;
+    unsafe {
+        while i < n {
+            *(dst + i) = *(src + i);
+            i += 1;
+        }
+    }
+    return dst;
+}
+
+pub fn memmove(dst: *mut u8, src: *u8, n: usize) -> *mut u8 {
+    unsafe {
+        if (dst as usize) < (src as usize) {
+            let mut i: usize = 0;
+            while i < n {
+                *(dst + i) = *(src + i);
+                i += 1;
+            }
+        } else {
+            let mut i: usize = n;
+            while i > 0 {
+                i -= 1;
+                *(dst + i) = *(src + i);
+            }
+        }
+    }
+    return dst;
+}
+
+pub fn memset(dst: *mut u8, value: u8, n: usize) -> *mut u8 {
+    let mut i: usize = 0;
+    unsafe {
+        while i < n {
+            *(dst + i) = value;
+            i += 1;
+        }
+    }
+    return dst;
+}
+
+pub fn memzero(dst: *mut u8, n: usize) -> *mut u8 {
+    return memset(dst, 0, n);
+}
+
+pub fn memcmp(a: *u8, b: *u8, n: usize) -> i32 {
+    let mut i: usize = 0;
+    unsafe {
+        while i < n {
+            let x: u8 = *(a + i);
+            let y: u8 = *(b + i);
+            if x != y {
+                if x < y { return -1; }
+                return 1;
+            }
+            i += 1;
+        }
+    }
+    return 0;
+}
+
+pub fn memchr(s: *u8, value: u8, n: usize) -> *u8 {
+    let mut i: usize = 0;
+    unsafe {
+        while i < n {
+            if *(s + i) == value {
+                return s + i;
+            }
+            i += 1;
+        }
+    }
+    return null;
+}

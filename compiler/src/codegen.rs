@@ -63,9 +63,9 @@ pub fn generate(program: &Program, analysis: &Analysis, module_name: &str) -> St
         if let Some(sig) = analysis.fn_sigs.get(&f.name) {
             declares.push_str(&format!(
                 "declare {} @{}({})\n\n",
-                llvm_ret(sig, true),
+                llvm_ret(sig, sig.c_abi),
                 f.name,
-                llvm_params(sig, true)
+                llvm_params(sig, sig.c_abi)
             ));
         }
     }
@@ -435,6 +435,21 @@ ok:
                 "define internal void @__corex_print_bool(i8 %value) {{\nentry:\n  %t = icmp ne i8 %value, 0\n  %p = select i1 %t, ptr {t}, ptr {f}\n  %n = select i1 %t, i64 4, i64 5\n  %pi = ptrtoint ptr %p to i64\n  %w = call i64 @__corex_syscall(i64 1, i64 1, i64 %pi, i64 %n, i64 0, i64 0, i64 0)\n  call void @__corex_newline()\n  ret void\n}}\n\n"
             ));
         }
+        // Weak freestanding implementations of the C memory functions that
+        // LLVM's loop-idiom pass may synthesize as library calls. A user
+        // definition (strong symbol) overrides these.
+        h.push_str(
+            "define weak void @memset(ptr %dst, i8 %value, i64 %n) {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [ 0, %entry ], [ %next, %body ]\n  %cond = icmp ult i64 %i, %n\n  br i1 %cond, label %body, label %done\nbody:\n  %p = getelementptr inbounds i8, ptr %dst, i64 %i\n  store i8 %value, ptr %p, align 1\n  %next = add i64 %i, 1\n  br label %loop\ndone:\n  ret void\n}\n\n",
+        );
+        h.push_str(
+            "define weak ptr @memcpy(ptr %dst, ptr %src, i64 %n) {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [ 0, %entry ], [ %next, %body ]\n  %cond = icmp ult i64 %i, %n\n  br i1 %cond, label %body, label %done\nbody:\n  %s = getelementptr inbounds i8, ptr %src, i64 %i\n  %b = load i8, ptr %s, align 1\n  %d = getelementptr inbounds i8, ptr %dst, i64 %i\n  store i8 %b, ptr %d, align 1\n  %next = add i64 %i, 1\n  br label %loop\ndone:\n  ret ptr %dst\n}\n\n",
+        );
+        h.push_str(
+            "define weak ptr @memmove(ptr %dst, ptr %src, i64 %n) {\nentry:\n  %di = ptrtoint ptr %dst to i64\n  %si = ptrtoint ptr %src to i64\n  %fwd = icmp ult i64 %di, %si\n  br i1 %fwd, label %forward, label %backward\nforward:\n  br label %floop\nfloop:\n  %fi = phi i64 [ 0, %forward ], [ %fnext, %fbody ]\n  %fc = icmp ult i64 %fi, %n\n  br i1 %fc, label %fbody, label %done\nfbody:\n  %fs = getelementptr inbounds i8, ptr %src, i64 %fi\n  %fb = load i8, ptr %fs, align 1\n  %fd = getelementptr inbounds i8, ptr %dst, i64 %fi\n  store i8 %fb, ptr %fd, align 1\n  %fnext = add i64 %fi, 1\n  br label %floop\nbackward:\n  br label %bloop\nbloop:\n  %bi = phi i64 [ %n, %backward ], [ %bnext, %bcont ]\n  %bc = icmp ugt i64 %bi, 0\n  br i1 %bc, label %bcont, label %done\nbcont:\n  %bnext = sub i64 %bi, 1\n  %bs = getelementptr inbounds i8, ptr %src, i64 %bnext\n  %bb = load i8, ptr %bs, align 1\n  %bd = getelementptr inbounds i8, ptr %dst, i64 %bnext\n  store i8 %bb, ptr %bd, align 1\n  br label %bloop\ndone:\n  ret ptr %dst\n}\n\n",
+        );
+        h.push_str(
+            "define weak i32 @memcmp(ptr %a, ptr %b, i64 %n) {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [ 0, %entry ], [ %next, %more ]\n  %cond = icmp ult i64 %i, %n\n  br i1 %cond, label %body, label %equal\nbody:\n  %ap = getelementptr inbounds i8, ptr %a, i64 %i\n  %av = load i8, ptr %ap, align 1\n  %bp = getelementptr inbounds i8, ptr %b, i64 %i\n  %bv = load i8, ptr %bp, align 1\n  %same = icmp eq i8 %av, %bv\n  br i1 %same, label %more, label %diff\nmore:\n  %next = add i64 %i, 1\n  br label %loop\ndiff:\n  %ax = zext i8 %av to i32\n  %bx = zext i8 %bv to i32\n  %d = sub i32 %ax, %bx\n  ret i32 %d\nequal:\n  ret i32 0\n}\n\n",
+        );
         if self.used_strlen {
             h.push_str(
                 "define internal i64 @__corex_strlen(ptr %s) {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [ 0, %entry ], [ %next, %body ]\n  %p = getelementptr inbounds i8, ptr %s, i64 %i\n  %c = load i8, ptr %p, align 1\n  %stop = icmp eq i8 %c, 0\n  br i1 %stop, label %done, label %body\nbody:\n  %next = add i64 %i, 1\n  br label %loop\ndone:\n  ret i64 %i\n}\n\n",
@@ -1243,6 +1258,42 @@ ok:
                     Val { ssa: ptr, ty }
                 }
             }
+            ExprKind::Path(segments) => {
+                let full = segments.join("$");
+                if let Some(sig) = self.analysis.fn_sigs.get(&full).cloned() {
+                    return Val {
+                        ssa: format!("@{full}"),
+                        ty: Type::Fn(FnType {
+                            params: sig.params,
+                            ret: Box::new(sig.ret),
+                            variadic: sig.variadic,
+                        }),
+                    };
+                }
+                if let Some((cty, cv)) = self.analysis.consts.get(&full).cloned() {
+                    return self.const_val(&cty, &cv);
+                }
+                let n = segments.len();
+                let enum_name = segments[..n - 1].join("$");
+                if let Some(info) = self.analysis.enums.get(&enum_name) {
+                    let value = info
+                        .variants
+                        .iter()
+                        .find(|(v, _)| *v == segments[n - 1])
+                        .map(|(_, v)| *v as i64 as u64)
+                        .unwrap_or(0);
+                    return Val {
+                        ssa: int_const(&ty, value),
+                        ty,
+                    };
+                }
+                let (ptr, t) = self.gen_place(e);
+                if t.is_aggregate() {
+                    Val { ssa: ptr, ty: t }
+                } else {
+                    self.load(&ptr, &t)
+                }
+            }
             ExprKind::Ident(name) => {
                 if ty.is_fn() && self.analysis.idents.get(&e.id).is_none() {
                     return Val {
@@ -2001,6 +2052,35 @@ ok:
                     ty: Type::Unit,
                 }
             }
+            Callee::DataPtr => {
+                let v = self.gen_expr(&args[0]);
+                let (data, _len) = self.load_slice_parts(&v.ssa);
+                Val {
+                    ssa: data,
+                    ty: ty.clone(),
+                }
+            }
+            Callee::StrFromRaw => {
+                let data = self.gen_expr(&args[0]);
+                let len = self.gen_expr(&args[1]);
+                let tmp = self.fresh_val();
+                self.entry
+                    .push_str(&format!("  {tmp} = alloca {{ ptr, i64 }}, align 8\n"));
+                let p0 = self.fresh_val();
+                let p1 = self.fresh_val();
+                self.inst(format!(
+                    "{p0} = getelementptr inbounds {{ ptr, i64 }}, ptr {tmp}, i64 0, i32 0"
+                ));
+                self.inst(format!("store ptr {}, ptr {p0}, align 8", data.ssa));
+                self.inst(format!(
+                    "{p1} = getelementptr inbounds {{ ptr, i64 }}, ptr {tmp}, i64 0, i32 1"
+                ));
+                self.inst(format!("store i64 {}, ptr {p1}, align 8", len.ssa));
+                Val {
+                    ssa: tmp,
+                    ty: Type::Str,
+                }
+            }
             Callee::CStrLen => {
                 self.used_strlen = true;
                 let v = self.gen_expr(&args[0]);
@@ -2615,6 +2695,12 @@ ok:
         }
         if from == Type::Char {
             if let Some(t) = to.int_ty() {
+                if t.bits() == 8 {
+                    return Val {
+                        ssa: v.ssa,
+                        ty: to.clone(),
+                    };
+                }
                 let tmp = self.fresh_val();
                 self.inst(format!("{tmp} = zext i8 {} to i{}", v.ssa, t.bits()));
                 return Val {
@@ -2625,6 +2711,12 @@ ok:
         }
         if *to == Type::Char {
             if let Some(t) = from.int_ty() {
+                if t.bits() == 8 {
+                    return Val {
+                        ssa: v.ssa,
+                        ty: to.clone(),
+                    };
+                }
                 let tmp = self.fresh_val();
                 self.inst(format!("{tmp} = trunc i{} {} to i8", t.bits(), v.ssa));
                 return Val {
@@ -2980,6 +3072,7 @@ ok:
                 let (base_ptr, base_ty) = self.gen_place(base);
                 self.gen_field_ptr(&base_ptr, &base_ty, name)
             }
+            ExprKind::Path(segments) => (format!("@{}", segments.join("$")), ty),
             ExprKind::Ident(name) => {
                 if let Some(local) = self.analysis.idents.get(&e.id) {
                     let ptr = self

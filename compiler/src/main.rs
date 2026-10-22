@@ -16,6 +16,7 @@ CoreX compiler (corex 0.1.0)
 Usage:
   corex build   <file.cx | -> [-o <output>] [--opt <0-3>] [--link <obj|a>]...
                 [-L <dir>]... [-l <lib>]... [--hosted] [--shared]
+                [--cfg name=value]... [-I <dir>]... [--emit obj|shared|staticlib]
   corex run     <file.cx | -> [--opt <0-3>] [--link ...] [--hosted] [-- <program args>...]
   corex exec    '<source>' [--opt <0-3>] [-- <program args>...]
   corex repl    [--opt <0-3>]
@@ -23,7 +24,8 @@ Usage:
   corex check   <file.cx | ->
 
 Commands:
-  build    Compile to a freestanding Linux x86-64 ELF executable.
+  build    Compile to a freestanding Linux x86-64 ELF executable. Pass a
+           directory containing corex.toml to build a project.
   run      Compile, then run; exits with the program's status.
   exec     Run source given directly on the command line (no file).
   repl     Interactive session: type code, finish a block with a blank line.
@@ -78,6 +80,9 @@ struct CommonArgs {
     verify: bool,
     program_args: Vec<String>,
     link: driver::LinkInputs,
+    cfg: Vec<String>,
+    include_paths: Vec<PathBuf>,
+    emit: Option<String>,
 }
 
 fn parse_opt(value: Option<&String>) -> Result<u8, String> {
@@ -97,6 +102,9 @@ fn parse_common(args: &[String], allow_output: bool, allow_opt: bool) -> Result<
         verify: false,
         program_args: Vec::new(),
         link: driver::LinkInputs::default(),
+        cfg: Vec::new(),
+        include_paths: Vec::new(),
+        emit: None,
     };
     let mut i = 0;
     while i < args.len() {
@@ -137,6 +145,21 @@ fn parse_common(args: &[String], allow_output: bool, allow_opt: bool) -> Result<
             "--shared" => {
                 out.link.shared = true;
                 i += 1;
+            }
+            "--cfg" => {
+                let v = args.get(i + 1).ok_or("`--cfg` requires `name=value`")?;
+                out.cfg.push(v.clone());
+                i += 2;
+            }
+            "-I" | "--include" => {
+                let v = args.get(i + 1).ok_or("`-I` requires a directory")?;
+                out.include_paths.push(PathBuf::from(v));
+                i += 2;
+            }
+            "--emit" => {
+                let v = args.get(i + 1).ok_or("`--emit` requires obj, shared, or staticlib")?;
+                out.emit = Some(v.clone());
+                i += 2;
             }
             "--" => {
                 out.program_args = args[i + 1..].to_vec();
@@ -232,6 +255,7 @@ fn run_source(
     opt: u8,
     program_args: &[String],
     link: &driver::LinkInputs,
+    config: &driver::BuildConfig,
 ) -> i32 {
     let work = driver::temp_dir("corex-run");
     if let Err(e) = std::fs::create_dir_all(&work) {
@@ -240,7 +264,7 @@ fn run_source(
     }
     let exe = work.join("program");
 
-    let artifacts = match driver::build_with(file, &exe, opt, false, link) {
+    let artifacts = match driver::build_with_config(file, &exe, opt, false, link, config) {
         Ok(a) => a,
         Err(diags) => {
             report(file, &diags);
@@ -286,6 +310,28 @@ fn cmd_build(args: &[String]) -> i32 {
         }
     };
     let input = parsed.file.unwrap();
+    if input.is_dir() || input.file_name().map(|n| n == "corex.toml").unwrap_or(false) {
+        return match driver::build_manifest(
+            &input,
+            Some(parsed.opt),
+            parsed.output.as_deref(),
+            &parsed.cfg,
+        ) {
+            Ok(path) => {
+                println!("built {} -> {}", input.display(), path.display());
+                0
+            }
+            Err(diags) => {
+                for d in &diags {
+                    eprintln!("error[{}]: {}", d.code, d.message);
+                    if let Some(note) = &d.note {
+                        eprintln!("  = note: {note}");
+                    }
+                }
+                exit_code_for(&diags)
+            }
+        };
+    }
     let file = match load(&input) {
         Ok(f) => f,
         Err(code) => return code,
@@ -293,8 +339,69 @@ fn cmd_build(args: &[String]) -> i32 {
     let output = parsed
         .output
         .unwrap_or_else(|| default_output(&input));
+    let config = driver::BuildConfig {
+        cfg: parsed.cfg.clone(),
+        include_paths: parsed.include_paths.clone(),
+        require_entry: true,
+    };
 
-    match driver::build_with(&file, &output, parsed.opt, false, &parsed.link) {
+    if let Some(emit) = &parsed.emit {
+        if emit == "obj" {
+            let work = driver::temp_dir("corex-obj");
+            let result = driver::compile_units(std::slice::from_ref(&file), &work, parsed.opt, &config);
+            return match result {
+                Ok((objects, _)) if objects.len() == 1 => {
+                    match std::fs::copy(&objects[0], &output) {
+                        Ok(_) => {
+                            println!("compiled {} -> {}", input.display(), output.display());
+                            let _ = std::fs::remove_dir_all(&work);
+                            0
+                        }
+                        Err(e) => {
+                            eprintln!("error: cannot write {}: {e}", output.display());
+                            2
+                        }
+                    }
+                }
+                Ok(_) => {
+                    eprintln!("error: project has multiple objects; use --emit staticlib");
+                    2
+                }
+                Err(diags) => {
+                    report(&file, &diags);
+                    exit_code_for(&diags)
+                }
+            };
+        }
+        if let Some(kind) = driver::OutputKind::parse(emit) {
+            if kind == driver::OutputKind::Executable {
+                // Fall through to the normal build path.
+            } else {
+                return match driver::build_project(
+                    std::slice::from_ref(&file),
+                    &output,
+                    parsed.opt,
+                    &parsed.link,
+                    &config,
+                    kind,
+                ) {
+                    Ok(art) => {
+                        println!("compiled {} -> {}", input.display(), art.executable.display());
+                        0
+                    }
+                    Err(diags) => {
+                        report(&file, &diags);
+                        exit_code_for(&diags)
+                    }
+                };
+            }
+        } else {
+            eprintln!("error: unknown --emit value `{emit}` (expected obj, shared, or staticlib)");
+            return 2;
+        }
+    }
+
+    match driver::build_with_config(&file, &output, parsed.opt, false, &parsed.link, &config) {
         Ok(art) => {
             println!(
                 "compiled {} -> {}",
@@ -323,7 +430,17 @@ fn cmd_run(args: &[String]) -> i32 {
         Ok(f) => f,
         Err(code) => return code,
     };
-    run_source(&file, parsed.opt, &parsed.program_args, &parsed.link)
+    run_source(
+        &file,
+        parsed.opt,
+        &parsed.program_args,
+        &parsed.link,
+        &driver::BuildConfig {
+            cfg: parsed.cfg.clone(),
+            include_paths: parsed.include_paths.clone(),
+            require_entry: true,
+        },
+    )
 }
 
 fn cmd_exec(args: &[String]) -> i32 {
@@ -373,7 +490,13 @@ fn cmd_exec(args: &[String]) -> i32 {
         SourceFile::new("<exec>", source)
     };
 
-    run_source(&file, opt, &program_args, &driver::LinkInputs::default())
+    run_source(
+        &file,
+        opt,
+        &program_args,
+        &driver::LinkInputs::default(),
+        &driver::BuildConfig::default(),
+    )
 }
 
 fn cmd_repl(args: &[String]) -> i32 {

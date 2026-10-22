@@ -24,10 +24,10 @@ use crate::ast::*;
 use crate::diagnostics::{Diagnostic, Span};
 
 /// Names that are always in scope and cannot be redefined.
-pub const BUILTINS: [&str; 16] = [
+pub const BUILTINS: [&str; 18] = [
     "syscall", "alloc", "free", "print", "len", "vec_new", "vec_push", "vec_free",
     "vec_slice", "read_file", "write_file", "panic", "assert",
-    "cstr_len", "cstr_to_str", "str_to_cstr",
+    "cstr_len", "cstr_to_str", "str_to_cstr", "data_ptr", "str_from_raw",
 ];
 
 /// Maximum size of a stack-allocated value. Keeps `alloca` within a sane
@@ -56,6 +56,8 @@ pub enum Callee {
     CStrLen,
     CStrToStr,
     StrToCStr,
+    DataPtr,
+    StrFromRaw,
 }
 
 #[derive(Clone, Debug)]
@@ -139,6 +141,15 @@ pub struct Analysis {
 }
 
 pub fn analyze(program: &Program) -> Result<Analysis, Vec<Diagnostic>> {
+    analyze_with(program, true)
+}
+
+/// Analyze a compilation unit. Module dependency units have no entry point, so
+/// `require_entry` is false for them.
+pub fn analyze_with(
+    program: &Program,
+    require_entry: bool,
+) -> Result<Analysis, Vec<Diagnostic>> {
     let mut a = Analyzer {
         sigs: HashMap::new(),
         expr_types: HashMap::new(),
@@ -184,7 +195,11 @@ pub fn analyze(program: &Program) -> Result<Analysis, Vec<Diagnostic>> {
     a.collect_fns(program);
     a.collect_globals(program);
     a.collect_consts(program);
-    let entry = a.check_entry(program);
+    let entry = if require_entry {
+        a.check_entry(program)
+    } else {
+        None
+    };
     a.check_global_inits(program);
 
     for f in &program.fns {
@@ -808,6 +823,36 @@ impl Analyzer {
             ExprKind::Bool(b) => ConstValue::Bool(*b),
             ExprKind::Char(c) => ConstValue::Char(*c),
             ExprKind::Str(bytes) => ConstValue::Str(bytes.clone()),
+            ExprKind::Path(segments) => {
+                let n = segments.len();
+                let enum_name = segments[..n - 1].join("$");
+                if let Some(info) = self.enum_defs.get(&enum_name) {
+                    let variant = &segments[n - 1];
+                    match info.variants.iter().find(|(v, _)| v == variant) {
+                        Some((_, value)) => ConstValue::Int(*value as i64 as u64),
+                        None => {
+                            self.error(
+                                "E0222",
+                                e.span,
+                                format!("enum `{}` has no variant `{variant}`", segments[..n - 1].join("::")),
+                            );
+                            return None;
+                        }
+                    }
+                } else {
+                    let full = segments.join("$");
+                    if let Some((_, value)) = self.consts.get(&full) {
+                        value.clone()
+                    } else {
+                        self.error(
+                            "E0226",
+                            e.span,
+                            format!("`{}` is not a constant", segments.join("::")),
+                        );
+                        return None;
+                    }
+                }
+            }
             ExprKind::Ident(name) => {
                 if let Some((_, value)) = self.consts.get(name) {
                     return Some(value.clone());
@@ -974,7 +1019,7 @@ impl Analyzer {
                 self.check_value_size(&ty, p.span);
                 param_types.push(ty);
             }
-            if f.variadic && f.extern_abi.is_none() {
+            if f.variadic && f.extern_abi.as_deref() != Some("C") {
                 self.error(
                     "E0216",
                     f.name_span,
@@ -990,7 +1035,7 @@ impl Analyzer {
                     self.error(
                         "E0216",
                         f.name_span,
-                        "a function without a body must be declared `extern \"C\"`",
+                        "a function without a body must be declared `extern`",
                     );
                 }
                 self.external_fns.insert(f.name.clone());
@@ -1001,7 +1046,7 @@ impl Analyzer {
                     params: param_types,
                     ret,
                     variadic: f.variadic,
-                    c_abi: f.extern_abi.is_some(),
+                    c_abi: f.extern_abi.as_deref() == Some("C"),
                     external,
                 },
             );
@@ -1116,6 +1161,21 @@ impl Analyzer {
         );
     }
 
+    fn eval_case_const(&self, e: &Expr) -> Option<i64> {
+        if let ExprKind::Path(segments) = &e.kind {
+            let n = segments.len();
+            let enum_name = segments[..n - 1].join("$");
+            if let Some(info) = self.enum_defs.get(&enum_name) {
+                return info
+                    .variants
+                    .iter()
+                    .find(|(v, _)| *v == segments[n - 1])
+                    .map(|(_, v)| *v as i64);
+            }
+        }
+        eval_int_const(e)
+    }
+
     fn collect_labels(&mut self, block: &Block) {
         for stmt in &block.stmts {
             self.collect_labels_stmt(stmt);
@@ -1168,6 +1228,14 @@ impl Analyzer {
     }
 
     fn declare(&mut self, name: &str, span: Span, ty: Type, mutable: bool) -> LocalRef {
+        if name == "_" {
+            // `let _ = expr;` evaluates and discards; repeated wildcards are
+            // allowed and never enter scope.
+            let slot = self.slot_types.len();
+            self.slot_types.push(ty.clone());
+            self.slot_mut.insert(slot, mutable);
+            return LocalRef { slot, ty };
+        }
         if BUILTINS.contains(&name) {
             self.error(
                 "E0202",
@@ -1410,7 +1478,7 @@ impl Analyzer {
                 for arm in arms {
                     match &arm.value {
                         Some(case_expr) => {
-                            let Some(raw) = eval_int_const(case_expr) else {
+                            let Some(raw) = self.eval_case_const(case_expr) else {
                                 self.error(
                                     "E0221",
                                     case_expr.span,
@@ -1747,6 +1815,45 @@ impl Analyzer {
                 let ty = self.field_type(&base_ty, name, e.span)?;
                 self.expr_types.insert(e.id, ty.clone());
                 ty
+            }
+            ExprKind::Path(segments) => {
+                let n = segments.len();
+                let enum_name = segments[..n - 1].join("$");
+                if let Some(info) = self.enum_defs.get(&enum_name).cloned() {
+                    let variant = &segments[n - 1];
+                    if !info.variants.iter().any(|(v, _)| v == variant) {
+                        self.error(
+                            "E0222",
+                            e.span,
+                            format!(
+                                "enum `{}` has no variant `{variant}`",
+                                segments[..n - 1].join("::")
+                            ),
+                        );
+                        return Err(());
+                    }
+                    Type::Enum(enum_name)
+                } else {
+                    let full = segments.join("$");
+                    if let Some(sig) = self.sigs.get(&full).cloned() {
+                        Type::Fn(FnType {
+                            params: sig.params,
+                            ret: Box::new(sig.ret),
+                            variadic: sig.variadic,
+                        })
+                    } else if let Some((ty, _)) = self.globals.get(&full).cloned() {
+                        ty
+                    } else if let Some((ty, _)) = self.consts.get(&full).cloned() {
+                        ty
+                    } else {
+                        self.error(
+                            "E0201",
+                            e.span,
+                            format!("undefined item `{}`", segments.join("::")),
+                        );
+                        return Err(());
+                    }
+                }
             }
             ExprKind::Ident(name) => {
                 if let Some(local) = self.lookup(name) {
@@ -2478,6 +2585,36 @@ impl Analyzer {
         args: &[Expr],
         expected: Option<&Type>,
     ) -> Result<Type, ()> {
+        if let ExprKind::Path(segments) = &callee.kind {
+            let full = segments.join("$");
+            if let Some(sig) = self.sigs.get(&full).cloned() {
+                let fixed = sig.params.len();
+                if args.len() < fixed || (!sig.variadic && fixed != args.len()) {
+                    self.error(
+                        "E0204",
+                        e.span,
+                        format!(
+                            "`{}` takes {}{} argument(s), found {}",
+                            segments.join("::"),
+                            fixed,
+                            if sig.variadic { " or more" } else { "" },
+                            args.len()
+                        ),
+                    );
+                    return Err(());
+                }
+                for (arg, param) in args.iter().zip(sig.params.iter()) {
+                    if let Ok(t) = self.check_expr(arg, Some(param)) {
+                        if !self.compatible(param, &t) {
+                            self.type_mismatch(arg.span, param, &t, " in argument");
+                        }
+                    }
+                }
+                self.calls.insert(e.id, Callee::User(full));
+                return Ok(sig.ret);
+            }
+        }
+
         // A local binding that holds a function pointer shadows a function of
         // the same name; any non-identifier callee is an indirect call.
         let indirect = match &callee.kind {
@@ -2539,6 +2676,57 @@ impl Analyzer {
             unreachable!("indirect calls handled above");
         };
 
+        if name == "data_ptr" {
+            if args.len() != 1 {
+                self.error("E0204", e.span, format!("`data_ptr` takes 1 argument, found {}", args.len()));
+                return Err(());
+            }
+            let t = self.check_expr(&args[0], None)?;
+            let elem = match &t {
+                Type::Str => Type::Int(IntTy::U8),
+                Type::Slice(elem) => (**elem).clone(),
+                other => {
+                    self.error(
+                        "E0203",
+                        args[0].span,
+                        format!("`data_ptr` requires `str` or a slice, found `{}`", other.display()),
+                    );
+                    return Err(());
+                }
+            };
+            self.calls.insert(e.id, Callee::DataPtr);
+            return Ok(Type::ptr_to(elem, false));
+        }
+        if name == "str_from_raw" {
+            if args.len() != 2 {
+                self.error(
+                    "E0204",
+                    e.span,
+                    format!("`str_from_raw` takes 2 arguments (pointer, length), found {}", args.len()),
+                );
+                return Err(());
+            }
+            if let Ok(t) = self.check_expr(&args[0], Some(&Type::ptr_to(Type::Int(IntTy::U8), false))) {
+                if !matches!(&t, Type::Ptr { pointee, .. } if **pointee == Type::Int(IntTy::U8)) {
+                    self.error(
+                        "E0203",
+                        args[0].span,
+                        format!("`str_from_raw` pointer must be `*u8`, found `{}`", t.display()),
+                    );
+                }
+            }
+            if let Ok(t) = self.check_expr(&args[1], Some(&Type::Int(IntTy::Usize))) {
+                if t != Type::Int(IntTy::Usize) {
+                    self.error(
+                        "E0203",
+                        args[1].span,
+                        format!("`str_from_raw` length must be `usize`, found `{}`", t.display()),
+                    );
+                }
+            }
+            self.calls.insert(e.id, Callee::StrFromRaw);
+            return Ok(Type::Str);
+        }
         if name == "cstr_len" {
             if args.len() != 1 {
                 self.error("E0204", e.span, format!("`cstr_len` takes 1 argument, found {}", args.len()));
@@ -3073,6 +3261,29 @@ impl Analyzer {
 
     fn check_place(&mut self, e: &Expr) -> Result<(Type, bool), ()> {
         match &e.kind {
+            ExprKind::Path(segments) => {
+                let full = segments.join("$");
+                if let Some((ty, mutable)) = self.globals.get(&full).cloned() {
+                    self.expr_types.insert(e.id, ty.clone());
+                    return Ok((ty, mutable));
+                }
+                if self.consts.contains_key(&full) {
+                    self.error(
+                        "E0211",
+                        e.span,
+                        "a `const` is a compile-time value and is not a place",
+                    );
+                } else if self.sigs.contains_key(&full) {
+                    self.error("E0218", e.span, "a function is not a place");
+                } else {
+                    self.error(
+                        "E0201",
+                        e.span,
+                        format!("undefined item `{}`", segments.join("::")),
+                    );
+                }
+                Err(())
+            }
             ExprKind::Ident(name) => {
                 let Some(local) = self.lookup(name) else {
                     if self.consts.contains_key(name) {

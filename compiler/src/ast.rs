@@ -413,7 +413,11 @@ impl Type {
                     }
                     sig.push_str("...");
                 }
-                format!("fn({sig}) -> {}", f.ret.display())
+                if *f.ret == Type::Unit {
+                    format!("fn({sig})")
+                } else {
+                    format!("fn({sig}) -> {}", f.ret.display())
+                }
             }
             Type::CStr => "cstr".to_string(),
             Type::Named(name) => name.clone(),
@@ -429,6 +433,10 @@ impl fmt::Display for Type {
 
 #[derive(Clone, Debug)]
 pub struct Program {
+    /// This unit's module name from `module <name>;`.
+    pub module_name: Option<String>,
+    /// File modules this unit depends on (`mod <name>;`).
+    pub mod_deps: Vec<String>,
     pub imports: Vec<ImportDecl>,
     pub fns: Vec<FnDecl>,
     pub typedefs: Vec<TypedefDecl>,
@@ -687,6 +695,8 @@ pub enum ExprKind {
     AlignOf(Type),
     OffsetOf(Type, String),
     Ident(String),
+    /// Module-qualified path such as `math::add` or `Color::Red`.
+    Path(Vec<String>),
     EnumVariant {
         enum_name: String,
         variant: String,

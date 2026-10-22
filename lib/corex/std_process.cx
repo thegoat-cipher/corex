@@ -1,0 +1,86 @@
+//! Process control: exit, fork, exec, wait. Freestanding: no libc.
+
+module std_process;
+
+pub fn exit(code: i32) {
+    unsafe {
+        syscall(60, code as usize);
+    }
+}
+
+pub fn getpid() -> i32 {
+    unsafe {
+        return syscall(39) as i32;
+    }
+}
+
+pub fn fork() -> i32 {
+    unsafe {
+        return syscall(57) as i32;
+    }
+}
+
+pub fn exec(path: cstr, argv: **u8, envp: **u8) -> i32 {
+    unsafe {
+        return syscall(59, path as usize, argv as usize, envp as usize) as i32;
+    }
+}
+
+/// Wait for `pid`; returns the raw wait status, or -1.
+pub fn wait(pid: i32) -> i32 {
+    let mut status: i32 = 0;
+    unsafe {
+        let r: i64 = syscall(61, pid as usize, &mut status as usize, 0) as i64;
+        if r < 0 {
+            return -1;
+        }
+    }
+    return status;
+}
+
+/// Fork and exec `path` with no arguments. Returns the child pid in the parent
+/// and never returns in the child (it exits 127 if exec fails).
+pub fn spawn(path: cstr, envp: **u8) -> i32 {
+    let pid: i32 = fork();
+    if pid == 0 {
+        let mut argv: [*u8; 2] = [null, null];
+        argv[0] = path as *u8;
+        exec(path, &argv as *mut *u8, envp);
+        exit(127);
+    }
+    return pid;
+}
+
+/// Fork and exec with two arguments.
+pub fn spawn3(path: cstr, a0: cstr, a1: cstr, envp: **u8) -> i32 {
+    let pid: i32 = fork();
+    if pid == 0 {
+        let mut argv: [*u8; 4] = [null, null, null, null];
+        argv[0] = path as *u8;
+        argv[1] = a0 as *u8;
+        argv[2] = a1 as *u8;
+        exec(path, &argv as *mut *u8, envp);
+        exit(127);
+    }
+    return pid;
+}
+
+/// Run a command and wait for it; returns the child's exit status byte.
+pub fn run(path: cstr, envp: **u8) -> i32 {
+    let pid: i32 = spawn(path, envp);
+    if pid < 0 {
+        return -1;
+    }
+    let status: i32 = wait(pid);
+    return (status >> 8) & 255;
+}
+
+pub fn env_count(envp: **u8) -> usize {
+    unsafe {
+        let mut n: usize = 0;
+        while *(envp + n) != null {
+            n += 1;
+        }
+        return n;
+    }
+}
