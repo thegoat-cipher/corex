@@ -6,7 +6,7 @@ were read from the code, not proposed.
 - Rust 1.99.1, edition 2021, **zero external crates**.
 - LLVM 20.1.8 tools invoked as processes (`llvm-as`, `llc`).
 - Target: `x86_64-unknown-linux-gnu`, statically linked, freestanding ELF.
-- Test suite: 142 tests (53 unit, 89 integration), all passing.
+- Test suite: 174 tests (61 unit, 113 integration), all passing.
 
 ---
 
@@ -331,7 +331,7 @@ still produce errors.
 
 | Test file | Kind | Count | What it proves |
 |---|---|---|---|
-| inline `#[cfg(test)]` in `lexer`, `parser`, `semantic`, `diagnostics` | unit | 53 | token streams, precedence, recovery, scope/type rules, layout tables, span rendering |
+| inline `#[cfg(test)]` in `lexer`, `parser`, `semantic`, `diagnostics` | unit | 61 | token streams, precedence, recovery, scope/type rules, layout tables, span rendering |
 | `tests/diagnostics.rs` | integration | 29 | every documented rejection path, by code |
 | `tests/ir.rs` | integration | 6 | all examples emit IR accepted by `llvm-as`; no libc symbols; no `undef`; regression for the invalid constant-expression bug; structural checks |
 | `tests/opt_levels.rs` | integration | 5 | identical observable behavior at `--opt 0..3`; no `nsw`/`nuw` in emitted IR; generated differential arithmetic (1,104 assertions) |
@@ -340,6 +340,12 @@ still produce errors.
 | `tests/cli.rs` | integration | 14 | stdin source, inline `exec`, exit-status forwarding, REPL accumulation/redefinition/statement mode, pasted programs with blank lines |
 | `tests/features.rs` | integration | 7 | compound assignment, inference, chars, globals, enums, floats, structs, slices, strings, ranges, `len`, bounds aborts, checked-in feature example |
 | `tests/compiler_caps.rs` | integration | 8 | `vec<T>`, `const`, file I/O, recursive imports and per-file diagnostics, panic/assert, recursive structs, compiler-data example |
+| `tests/extended.rs` | integration | 6 | function pointers, switch/for/do/goto, unions/bitfields, layout, cstr, macros |
+| `tests/ffi.rs` | integration | 2 | extern C calls/exports, aggregates, variadics, main(argc,argv,envp) |
+| `tests/modules.rs` | integration | 4 | namespaced modules, cfg, manifests, archives, shared libraries/dlopen |
+| `tests/stdlib.rs` | integration | 2 | allocators, memory/string library, file/format/time/directory APIs |
+| `tests/concurrency.rs` | integration | 3 | atomics/volatile, threads/futex, TLS |
+| `tests/tooling.rs` | integration | 7 | formatter, linter, docs, test runner, DWARF, sanitizers, LSP |
 
 `tests/native.rs` builds through the same `driver` API the CLI uses and executes
 the produced binaries; `tests/ir.rs` assembles through `driver::emit_ir` and the
@@ -394,10 +400,13 @@ cargo test --test robustness  # malformed input never panics
 12. Parser nesting is capped at 256 recursion levels (`E0111`) to bound
     recursion; deeply nested generated code is rejected rather than overflowing
     the stack.
-13. There are no function pointers, unions, tuples, general generics, traits, or
-    namespaced modules. Imports share one flat global namespace.
-14. Struct/slice/vector ABI lowering is compiler-specific (pointer parameters
-    and a hidden `sret` result), not a stable C ABI.
+13. Function pointers, unions, namespaced modules, C FFI, macros, threads, and
+    tooling are implemented. Remaining language gaps: tuples, general generics,
+    traits, closures, exceptions, async, labeled `break`, `match`, operator
+    overloading, a package registry, thread join, and a language-level
+    `thread_local`.
+14. CoreX aggregate ABI is compiler-specific (pointer parameters and hidden
+    `sret`); the C ABI is used only at `extern "C"` boundaries.
 15. `vec<T>` copies shallowly; there is no move checking or reference counting.
 16. File I/O uses whole-file `read_file`/`write_file` builtins, not a streaming
     file handle API.
