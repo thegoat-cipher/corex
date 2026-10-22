@@ -336,3 +336,43 @@ fn manifest_builds_executable_and_static_library() {
     assert_eq!(run(&consumer_exe, &[]).stdout, "42\n");
     let _ = std::fs::remove_dir_all(&dir);
 }
+
+#[test]
+fn module_const_is_a_valid_array_length() {
+    let dir = driver::temp_dir("corex-mod-arraylen");
+    std::fs::create_dir_all(&dir).expect("create dir");
+    write(
+        &dir,
+        "tokens.cx",
+        r#"
+        module tokens;
+        pub const COUNT: usize = 3;
+        pub fn first() -> i32 { return 2; }
+        "#,
+    );
+    let root = write(
+        &dir,
+        "main.cx",
+        r#"
+        mod tokens;
+        static NAMES: [str; tokens::COUNT] = ["fn", "let", "if"];
+        static NUMS: [u8; tokens::COUNT] = [4, 5, 6];
+        fn main() -> i32 {
+            print(NAMES[1]);
+            print(NUMS[2]);
+            return tokens::first();
+        }
+        "#,
+    );
+    let config = BuildConfig {
+        include_paths: vec![dir.clone()],
+        ..Default::default()
+    };
+    let exe = dir.join("arraylen");
+    let artifacts = build_root(&root, &exe, &config, &LinkInputs::default())
+        .unwrap_or_else(|d| panic!("build failed: {d:?}"));
+    let r = run(&artifacts.executable, &[]);
+    assert_eq!(r.stdout, "let\n6\n");
+    assert_eq!(r.code, 2, "stderr: {}", r.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+}

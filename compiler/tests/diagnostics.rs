@@ -74,6 +74,11 @@ fn rejects_missing_return_and_return_of_wrong_type() {
         "fn f(b: bool) -> i32 { if b { return 1; } } fn main() -> i32 { return 0; }",
         "E0206",
     );
+    // A switch without `default` can fall out of the function.
+    assert_rejected(
+        "enum K { A, B } fn f(k: K) -> i32 { switch k { case K::A: { return 1; } } } fn main() -> i32 { return 0; }",
+        "E0206",
+    );
     assert_rejected(
         "fn f() -> i32 { return true; } fn main() -> i32 { return 0; }",
         "E0203",
