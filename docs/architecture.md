@@ -6,7 +6,7 @@ were read from the code, not proposed.
 - Rust 1.99.1, edition 2021, **zero external crates**.
 - LLVM 20.1.8 tools invoked as processes (`llvm-as`, `llc`).
 - Target: `x86_64-unknown-linux-gnu`, statically linked, freestanding ELF.
-- Test suite: 174 tests (61 unit, 113 integration), all passing.
+- Test suite: 193 tests (68 unit, 125 integration), all passing.
 
 ---
 
