@@ -204,7 +204,7 @@ cargo test
 Expected result on a correctly installed toolchain:
 
 ```text
-193 passed, 0 failed
+194 passed, 0 failed
 ```
 
 The integration tests invoke `llvm-as`, `llc`, and `cc` for real. If a tool is
@@ -212,7 +212,75 @@ missing, they fail rather than silently skipping.
 
 ---
 
-## 6. Environment variables
+## 6. Run the REPL
+
+The REPL is an interactive, in-memory program builder. Start it from the
+`compiler/` directory:
+
+```bash
+./target/release/corex repl
+```
+
+If `corex` is on your `PATH`:
+
+```bash
+corex repl
+```
+
+Example session:
+
+```text
+CoreX REPL — finish a block with an empty line. Type :help for commands.
+
+corex> 1 + 2
+3
+[exit 0]
+corex> fn fact(n: u64) -> u64 {
+   ...>     if n <= 1 { return 1; }
+   ...>     return n * fact(n - 1);
+   ...> }
+   ...>
+corex> fact(10)
+3628800
+[exit 0]
+corex> :quit
+```
+
+REPL basics:
+
+- A complete one-liner such as `1 + 2` runs on Enter.
+- A multi-line function or block finishes with a blank line.
+- Top-level items accumulate: functions, structs, unions, typedefs, enums,
+  consts, globals, and macros. Redefining an item replaces it.
+- `fn main` or `fn _start` is executed after each subsequent definition update,
+  so an old program may print again while you edit it. Use `:reset` before
+  pasting an unrelated program.
+- Bindings do not persist between submissions. Group related statements in
+  `{ ... }` and submit them together with `:submit`.
+- `:help` lists commands: `:run`, `:show`, `:history`, `:ir`, `:submit`,
+  `:reset`, `:quit`.
+- `Ctrl-D` or `:quit` exits.
+
+Piping a source file is useful for a demo:
+
+```bash
+corex repl < ../examples/hello.cx
+```
+
+It prints REPL prompts as well as program output. For scripts and normal
+execution, use plain file mode instead:
+
+```bash
+corex run ../examples/hello.cx
+corex run ../examples/features.cx
+```
+
+Do not type shell commands such as `corex run ../examples/features.cx` at the `corex>`
+prompt; that prompt expects CoreX code or a `:` command.
+
+---
+
+## 7. Environment variables
 
 | Variable | Effect |
 |---|---|
@@ -231,7 +299,7 @@ corex build program.cx -o program --opt 2
 
 ---
 
-## 7. Common failures
+## 8. Common failures
 
 | Symptom | Cause | Fix |
 |---|---|---|
@@ -248,7 +316,7 @@ corex build program.cx -o program --opt 2
 
 ---
 
-## 8. Updating and uninstalling
+## 9. Updating and uninstalling
 
 Update from the repository:
 
@@ -272,7 +340,7 @@ CoreX.
 
 ---
 
-## 9. Next steps
+## 10. Next steps
 
 - [`README.md`](../README.md) — quick start, CLI, language tour, limitations.
 - [`docs/resources.md`](resources.md) — curated documentation, source map, tests,
@@ -284,7 +352,7 @@ CoreX.
 
 ---
 
-## 10. v0.3 addendum: tooling and projects
+## 11. v0.3 addendum: tooling and projects
 
 The compiler now ships two binaries (`corex`, `corex-lsp`) and a freestanding
 standard library. All tools use the same LLVM 20 lookup as the compiler:

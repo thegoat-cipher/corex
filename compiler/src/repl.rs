@@ -1,11 +1,11 @@
 //! Interactive REPL.
 //!
-//! The REPL keeps the source text of every top-level function the user has
-//! submitted. A submission is parsed; each function it defines replaces any
-//! earlier definition with the same name (exactly the useful part of a REPL:
-//! redefining a function and re-running). The combined program is re-parsed and
-//! re-analyzed from source on every run, so diagnostics always point at real
-//! text.
+//! The REPL keeps the source text of every top-level item the user has
+//! submitted: functions, typedefs, structs/unions, enums, constants, globals,
+//! and macros. A submission is parsed; each item replaces any earlier item with
+//! the same name (exactly the useful part of a REPL: redefining and re-running).
+//! The combined program is re-parsed and re-analyzed from source on every run,
+//! so diagnostics always point at real text.
 //!
 //! Input rules:
 //!   - a blank line submits the accumulated block;
@@ -19,10 +19,8 @@
 //! Limitation: the REPL keeps stdin buffered, so programs that read stdin
 //! should be run with `corex run file.cx` or `corex run -` instead.
 
-use std::collections::BTreeMap;
-
 use crate::ast::Program;
-use crate::diagnostics::{Diagnostic, SourceFile};
+use crate::diagnostics::{Diagnostic, SourceFile, Span};
 use crate::driver;
 use crate::lexer;
 use crate::lineedit::{Editor, Input};
@@ -30,7 +28,7 @@ use crate::parser;
 
 pub fn run(opt_level: u8) -> i32 {
     let mut session = Session {
-        defs: BTreeMap::new(),
+        items: Vec::new(),
         opt: opt_level,
     };
 
@@ -123,18 +121,26 @@ pub fn run(opt_level: u8) -> i32 {
 }
 
 struct Session {
-    /// Function name -> exact source text of that function.
-    defs: BTreeMap<String, String>,
+    /// Key (`fn:name`, `type:name`, …) -> exact source text, in insertion order.
+    items: Vec<(String, String)>,
     opt: u8,
 }
 
 impl Session {
     fn combined(&self) -> String {
-        self.defs
-            .values()
-            .cloned()
+        self.items
+            .iter()
+            .map(|(_, text)| text.as_str())
             .collect::<Vec<_>>()
             .join("\n\n")
+    }
+
+    fn upsert(&mut self, key: String, source: String) {
+        if let Some(pos) = self.items.iter().position(|(k, _)| *k == key) {
+            self.items[pos].1 = source;
+        } else {
+            self.items.push((key, source));
+        }
     }
 
     /// Handle a `:command`. Returns true when the REPL should exit.
@@ -145,7 +151,7 @@ impl Session {
                 println!(
                     "\
   <code>          a complete one-liner runs on Enter; other blocks finish with an empty line
-  fn f(..) {{ }}    definitions accumulate; a redefinition replaces the old one
+  fn f(..) {{ }}    items accumulate; a redefinition replaces the old one
   :submit         compile and run the pending block even if it looks incomplete
   :run            re-run the current program
   :history        show the input history (also persisted in ~/.corex_history)
@@ -156,11 +162,11 @@ impl Session {
                 );
             }
             "reset" | "clear" => {
-                self.defs.clear();
+                self.items.clear();
                 println!("[repl] cleared");
             }
             "show" => {
-                if self.defs.is_empty() {
+                if self.items.is_empty() {
                     println!("[repl] nothing defined yet");
                 } else {
                     println!("{}", self.combined());
@@ -181,7 +187,7 @@ impl Session {
 
         // 1. A chunk that parses as top-level items is a definition update.
         match parse_program(chunk) {
-            Ok(program) if !program.fns.is_empty() => {
+            Ok(program) if has_items(&program) => {
                 self.install(chunk, &program);
                 self.run_current(quiet);
                 return;
@@ -202,7 +208,7 @@ impl Session {
             match crate::driver::check(&SourceFile::new("<repl>", combined.clone())) {
                 Ok(_) => {
                     if let Ok(program) = parse_program(&candidate) {
-                        if !program.fns.is_empty() {
+                        if has_items(&program) {
                             self.install(&candidate, &program);
                             self.run_current(quiet);
                             return;
@@ -238,8 +244,8 @@ impl Session {
     /// point (the candidate supplies its own `main`).
     fn text_with(&self, candidate: &str) -> String {
         let mut text = String::new();
-        for (name, source) in &self.defs {
-            if name == "main" || name == "_start" {
+        for (key, source) in &self.items {
+            if key == "value:main" || key == "value:_start" {
                 continue;
             }
             text.push_str(source);
@@ -250,17 +256,37 @@ impl Session {
     }
 
     fn install(&mut self, text: &str, program: &Program) {
+        let mut defined: Vec<(String, Span)> = Vec::new();
         for f in &program.fns {
-            let source = text
-                .get(f.span.start..f.span.end)
-                .unwrap_or("")
-                .to_string();
-            self.defs.insert(f.name.clone(), source);
+            defined.push((format!("value:{}", f.name), f.span));
+        }
+        for t in &program.typedefs {
+            defined.push((format!("type:{}", t.name), t.span));
+        }
+        for s in &program.structs {
+            defined.push((format!("type:{}", s.name), s.span));
+        }
+        for e in &program.enums {
+            defined.push((format!("type:{}", e.name), e.span));
+        }
+        for g in &program.globals {
+            defined.push((format!("value:{}", g.name), g.span));
+        }
+        for c in &program.consts {
+            defined.push((format!("value:{}", c.name), c.span));
+        }
+        for m in &program.macros {
+            defined.push((format!("macro:{}", m.name), m.span));
+        }
+        for (key, span) in defined {
+            if let Some(source) = text.get(span.start..span.end) {
+                self.upsert(key, source.to_string());
+            }
         }
     }
 
     fn print_ir(&mut self) {
-        if self.defs.is_empty() {
+        if self.items.is_empty() {
             println!("[repl] nothing defined yet");
             return;
         }
@@ -282,7 +308,7 @@ impl Session {
     }
 
     fn run_current(&mut self, quiet: bool) {
-        if self.defs.is_empty() {
+        if self.items.is_empty() {
             println!("[repl] nothing defined yet");
             return;
         }
@@ -460,6 +486,16 @@ fn candidates(chunk: &str) -> Vec<String> {
         "fn main() -> i32 {{\n{statements}\n    return 0;\n}}\n"
     ));
     out
+}
+
+fn has_items(program: &Program) -> bool {
+    !program.fns.is_empty()
+        || !program.typedefs.is_empty()
+        || !program.structs.is_empty()
+        || !program.enums.is_empty()
+        || !program.globals.is_empty()
+        || !program.consts.is_empty()
+        || !program.macros.is_empty()
 }
 
 fn parse_program(text: &str) -> Result<Program, Vec<Diagnostic>> {

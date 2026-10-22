@@ -230,3 +230,32 @@ fn emit_ir_and_check_reject_opt_instead_of_ignoring_it() {
         assert!(stderr.contains("unknown option `--opt`"), "stderr: {stderr}");
     }
 }
+
+#[test]
+fn repl_accepts_typedef_struct_union_and_function_pointer_items() {
+    let session = "\
+typedef Word = u64;
+struct Token { kind: i32, start: usize }
+union Number { i: i64, f: f64 }
+fn inc(x: i32) -> i32 { return x + 1; }
+fn apply(f: fn(i32) -> i32, x: i32) -> i32 { return f(x); }
+fn main() -> i32 {
+    let mut tokens: vec<Token> = vec_new(1);
+    vec_push(&mut tokens, Token { kind: 7, start: 0 });
+    print(apply(&inc, 41));
+    print(tokens[0].kind);
+    print(sizeof(Token));
+    vec_free(&mut tokens);
+    let n: Number = Number { i: 42 };
+    print(n.i);
+    return 0;
+}
+:quit
+";
+    let out = with_stdin(&["repl"], session);
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    for expected in ["42\n", "7\n", "16\n", "42\n"] {
+        assert!(stdout.contains(expected), "missing {expected:?} in:\n{stdout}");
+    }
+    assert!(stdout.contains("[exit 0]"), "stdout: {stdout}");
+}

@@ -1391,17 +1391,17 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_typedef(&mut self, public: bool) -> Result<TypedefDecl, ()> {
-        self.expect(&TokenKind::Typedef, "start of typedef")?;
+        let kw = self.expect(&TokenKind::Typedef, "start of typedef")?;
         let (name, name_span) = self.expect_ident("type alias name")?;
         self.expect(&TokenKind::Assign, "after type alias name")?;
         let ty = self.parse_type()?;
         let semi = self.expect(&TokenKind::Semi, "after typedef")?;
-        let _ = semi;
         Ok(TypedefDecl {
             name,
             name_span,
             ty,
             public,
+            span: kw.span.merge(semi.span),
         })
     }
 
