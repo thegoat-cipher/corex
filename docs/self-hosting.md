@@ -3,26 +3,36 @@
 **Question:** Is CoreX stable and complete enough to reimplement the CoreX
 compiler in CoreX today?
 
-**Verdict: conditionally yes — not today.** CoreX is expressive enough to write
-a compiler: every Rust construct in `compiler/src` has a CoreX encoding, and a
-compiler-shaped microcosm (arena AST, tagged unions, string-keyed hash table,
-function-pointer dispatch, IR-style text emission) compiled and ran correctly at
-`--opt 0,1,2,3`. It is **not** complete enough to start a full bootstrap now:
-the standard library lacks a map/set and a growable formatter, the language
-cannot express compile-time aggregate tables, and the driver-facing process
-primitives required to invoke LLVM are missing. Those are prerequisites, not
-language design changes.
+**Verdict: conditionally yes — the language and library prerequisites are now
+closed.** CoreX is expressive enough to write a compiler: every Rust construct
+in `compiler/src` has a CoreX encoding, and a compiler-shaped microcosm (arena
+AST, tagged unions, string-keyed hash table, function-pointer dispatch,
+IR-style text emission) compiled and ran correctly at `--opt 0,1,2,3`. The five
+language/library blockers listed in §1.1 (P0-1 … P0-5) are implemented and
+tested on branch `room/corex-p0-blocker-fixes-by6h`: static aggregate
+constants, `const` array lengths, `std_map`/`std_builder`, driver process and
+environment helpers, nested `vec<vec<T>>` syntax, and `switch` divergence.
+What remains before starting the port is process work, not language design: a
+CoreX-native differential test harness (P0-6) and a performance baseline (P0-7).
 
 | Question | Answer |
 |---|---|
 | Can CoreX express a compiler frontend/backend? | Yes — see §4.2 probes and §5.5 microcosm |
-| Is it ready to start the port **today**? | **No** — six blockers in §1.1 |
+| Are the P0 language/library blockers closed? | **Yes** — P0-1 … P0-5 implemented and tested (§1.1, §8.1) |
+| Is it ready to start the port **today**? | Almost — remaining gates are P0-6 (differential harness) and P0-7 (performance baseline) |
 | Is a full self-host realistic after prerequisites? | Yes, at 6–9 engineer-months for one experienced compiler engineer; 3–5 months for a small team |
-| Recommended next step | A 4–6 week spike after the P0 prerequisites in §8, with a go/no-go gate |
+| Recommended next step | Build P0-6/P0-7, then run the 4–6 week spike in §8 with a go/no-go gate |
 
 Assessment baseline: `main` at commit `2b10973` ("docs: sync merged C-class
 test counts and limitations"), 2026-10-22. Worktree branch:
 `room/corex-self-hosting-assessment-xvuu`.
+
+**Update (2026-10-22, branch `room/corex-p0-blocker-fixes-by6h`):** P0-1 … P0-5
+are implemented, tested, and committed; `cargo test` reports **193 passed, 0
+failed** (68 unit, 125 integration), and every example prints identical output
+and exit status at `--opt 0,1,2,3`. The rows below record the new evidence. The
+remaining gates are P0-6 and P0-7 in §8.1, plus B6 if parallel builds are ever
+required.
 
 Toolchain used for every check below: Rust 1.99.1, LLVM 20.1.8, gcc 15.2.0,
 Linux x86-64.
@@ -33,17 +43,17 @@ Linux x86-64.
 
 ### 1.1 Exact blockers
 
-These are things that make a bootstrap start today a bad bet. Each was verified
-against the compiler, not inferred from prose.
+These were the blockers at baseline. Five are now closed; each closed row names
+the test that proves it.
 
-| # | Blocker | Evidence | Impact on a compiler port |
+| # | Blocker | Status and evidence | Remaining impact |
 |---|---|---|---|
-| B1 | **No compile-time aggregate constants.** `static`/`const` initializers accept only scalars, `str`, `&global`, and `[u8; N]` from a string literal. Array/struct/function-pointer tables and `const` array lengths are rejected. | `static TOKENS: [str; 2] = ["a", "b"];` → `E0226`; `static TABLE: [fn(i64) -> i64; 1] = [&a];` → `E0226`; `const N: usize = 4; static A: [u8; N] = ...` → `E0100`; spec §4.2/§4.3 | Keyword tables, token descriptions, diagnostic catalogs, and dispatch tables must be heap-built in `main`, or encoded as functions/ifs. This is the only gap that changes how compiler data is laid out. |
-| B2 | **No map or set in `lib/corex`.** | `lib/corex/*.cx` has no hash table, tree map, or set. | Symbol tables, string interning, module/interface maps, and label maps must be written and duplicated per value type (no generics). A 20-line open-addressing map is feasible (§5.5), but it is not in the library. |
-| B3 | **No growable string builder or owned string.** `str` is a 2-word borrowed slice; `std_fmt::Fmt` takes a fixed caller buffer and reports overflow with a `bool`. `str` has no `==`, concatenation, or formatting. | `lib/corex/std_fmt.cx:7-31`; `str` equality → `E0210`; `std_str::str_eq` is the workaround | IR emission (673 `format!` sites in Rust), diagnostics rendering, and LSP JSON need a growable byte buffer plus manual formatting. Feasible, but it is a new library layer. |
-| B4 | **Driver primitives are missing.** No `getenv` helper (the `envp` vector is reachable only through `main`), no `pipe`/`dup2`, `std_process::spawn3` accepts only two arguments, and `read_file` cannot distinguish an empty file from an error. | `lib/corex/std_process.cx:55-67`; no `getenv`/`pipe`/`dup2` in `lib/corex`; README "File I/O" limitation | Tool discovery (`COREX_LLVM_BIN`, `PATH`), capturing `llvm-as`/`opt`/`llc` stderr, and passing full argument vectors require raw syscalls or new stdlib wrappers. |
-| B5 | **Three small language/semantic gaps** that hit parser and codegen code: nested generic syntax without whitespace (`vec<vec<u8>>`) is rejected; `switch` never satisfies return analysis even with `default`; `switch` falls through by default. | `vec<vec<u8>>` → `E0100` (needs `vec< vec<u8> >`); `switch` with all cases returning → `E0206`; probe prints `1 2 3` | The AST dispatcher needs `break` in every arm and a trailing `return`; nested containers need spaced syntax. Cost and bug surface, not a logical blocker. |
-| B6 | **No thread join and no language-level TLS.** | `lib/corex/std_thread.cx` has spawn/yield/exit/free_stack; `docs/tasks.md` known gaps; `docs/language-spec.md` §13 | The compiler must be single-threaded, or use `fork`/`wait` per unit. Parallel module compilation is possible with processes, not threads. |
+| B1 | **Compile-time aggregate constants.** Baseline: `static`/`const` initializers accepted only scalars, `str`, `&global`, and `[u8; N]` from a string literal; array/struct/function-pointer tables and `const` array lengths were rejected (`E0226`, `E0100`). | **Closed.** `static` arrays, nested arrays, structs (plain C layout), `str` elements, `&global`, and `&fn` elements emit real LLVM global initializers; integer `const` names and constant expressions are valid array lengths. `tests/aggregates.rs` runs the tables at `--opt 0..3` and verifies the IR with `llvm-as`; spec §4.2/§4.3. | None for data layout; static structs still require a plain C layout (unions/bitfields/packed are `E0226`). |
+| B2 | **No map or set in `lib/corex`.** | **Closed.** `lib/corex/std_map.cx` adds an insertion-ordered string-keyed `Map` (u64 values, open-addressed index over a dense entry array, `map_get` with a found flag) and `Set`; keys are borrowed `str`. `tests/collections.rs` covers growth, collisions, missing keys, and iteration order. | No generics: one value type (`u64`) keeps the API small, as intended. |
+| B3 | **No growable string builder or owned string.** | **Closed.** `lib/corex/std_builder.cx` adds `Builder` over `std_alloc::realloc` with reserve, byte/str/char/i64/u64/hex/f64 appends, `len`, `data`, `finish`, and a latched `failed` flag; every push returns `bool`. Number formatting is delegated to `std_fmt`, so there is one implementation. `tests/collections.rs` covers growth and 64-bit/hex/float formatting. | `finish` returns a borrowed `str`; there is still no owned string type, by design. |
+| B4 | **Driver primitives were missing.** | **Closed.** `lib/corex/std_env.cx` scans `envp` (`env_get` with found flag, `env_has`, `env_get_or`, no allocation); `std_io` adds `pipe`, `dup2`, `read_all`; `std_process` adds `spawn_argv`/`run_argv`; `std_fs::read_file` returns `-1` on failure and `0` for an empty file (documented in the module). `tests/driver_helpers.rs` forks `/bin/echo`, captures stdout through a pipe, and checks the exit status. | None for invoking LLVM tools; `exec` still needs a caller-built NULL-terminated vector. |
+| B5 | **Three small language/semantic gaps.** | **Closed.** `vec<vec<u8>>` and `vec<vec<vec<i32>>>` parse without whitespace by splitting `>>` only in type-argument position; `>>`/`>>=` remain shift operators in expressions. A `switch` with `default` diverges when every arm diverges without a `break`; fallthrough semantics are unchanged. Parser and semantic unit tests, `tests/features.rs::nested_generic_types_and_shift_operators`, `tests/extended.rs::switch_with_default_satisfies_return_analysis`, and the E0206 diagnostics test cover it. | None. |
+| B6 | **No thread join and no language-level TLS.** | **Open.** `lib/corex/std_thread.cx` has spawn/yield/exit/free_stack; `docs/tasks.md` known gaps; `docs/language-spec.md` §13. | A compiler port must be single-threaded or use `fork`/`wait` per unit. Parallel compilation with processes works; threads do not. |
 
 ### 1.2 Why the answer is not simply "CoreX is Turing-complete"
 
@@ -80,7 +90,7 @@ Implemented, documented in `docs/language-spec.md` and exercised by the suite:
   `repr(C)`, packed/`align(N)` structs, `sizeof`/`alignof`/`offsetof`;
 - atomics, volatile globals, inline asm, threads/futex/TLS, expression macros,
   DWARF 5 debug info, sanitizers;
-- freestanding stdlib in `lib/corex` (13 modules).
+- freestanding stdlib in `lib/corex` (16 modules).
 
 Not implemented (spec §13, README "Limitations"): tuples; generics beyond
 `vec<T>`; traits; closures; exceptions; `async`; `match`; payload enums;
@@ -89,7 +99,7 @@ thread join; targets other than Linux x86-64.
 
 ### 2.2 Compiler
 
-`compiler/src` is 17,615 lines including inline tests (16,978 non-test lines),
+`compiler/src` is 17,954 lines including inline tests (17,212 non-test lines),
 zero external crates, Rust edition 2021, LLVM 20 textual IR.
 
 | Area | File | Lines | Role |
@@ -97,11 +107,11 @@ zero external crates, Rust edition 2021, LLVM 20 textual IR.
 | Tokens | `token.rs` | 267 | 103 `TokenKind` variants, descriptions |
 | Diagnostics | `diagnostics.rs` | 321 | spans, source map, rendering |
 | Lexer | `lexer.rs` | 787 | byte-oriented, structured errors |
-| AST | `ast.rs` | 840 | `Program`, `Stmt` (13 variants), `ExprKind` (11), `Type` (15), layouts |
-| Parser | `parser.rs` | 2,106 | recursive descent + precedence climbing, recovery, macros, cfg |
-| Semantic | `semantic.rs` | 4,216 | scopes, types, layouts, const eval, mutability, unsafe, return flow |
-| Codegen | `codegen.rs` | 3,953 | textual LLVM IR, ABI, debug metadata, sanitizer mode |
-| Driver | `driver.rs` | 1,352 | units, interfaces, objects, archives, linking, manifest |
+| AST | `ast.rs` | 846 | `Program`, `Stmt` (13 variants), `ExprKind` (11), `Type` (15), layouts |
+| Parser | `parser.rs` | 2,274 | recursive descent + precedence climbing, recovery, macros, cfg |
+| Semantic | `semantic.rs` | 4,330 | scopes, types, layouts, const eval, mutability, unsafe, return flow |
+| Codegen | `codegen.rs` | 4,001 | textual LLVM IR, ABI, debug metadata, sanitizer mode |
+| Driver | `driver.rs` | 1,355 | units, interfaces, objects, archives, linking, manifest |
 | Mangle | `mangle.rs` | 404 | deterministic `module$item` rewriting |
 | Formatter | `format.rs` | 270 | whitespace-only, idempotent |
 | Linter | `lint.rs` | 356 | `W0001`–`W0004` |
@@ -117,24 +127,30 @@ Pipeline: lex → parse → semantic side tables → textual IR → `llvm-as` �
 ### 2.3 Standard library
 
 `lib/corex`: `std_alloc` (malloc/calloc/realloc/free, `Allocator`, arena),
-`std_mem`, `std_str`, `std_io`, `std_fs` (stat, directories, read/write),
-`std_process` (fork/exec/wait), `std_time`, `std_math`, `std_fmt`,
+`std_mem`, `std_str`, `std_io` (including `pipe`, `dup2`, `read_all`),
+`std_fs` (stat, directories, read/write, failure-distinguishing `read_file`),
+`std_process` (fork/exec/wait, `spawn_argv`/`run_argv`), `std_env` (`envp`
+lookup), `std_time`, `std_math`, `std_fmt`, `std_map` (insertion-ordered
+string-keyed map/set), `std_builder` (growable byte builder),
 `std_sync` (futex mutex/condvar/spinlock), `std_thread`, `std_tls`, `std_dl`.
 
-There is no collection library. This is the largest practical gap for a
-compiler port.
+The collection and builder gap is closed: `std_map` stores borrowed `str` keys
+with `u64` values in insertion order and `std_builder` grows with
+`std_alloc::realloc` and reports failure through a return value.
 
 ### 2.4 Tooling, tests, benchmarks, build
 
 - CLI: `build run exec repl emit-ir check fmt lint doc test`; `corex-lsp`.
-- Tests: **174 passed, 0 failed** (61 unit + 113 integration). Per binary:
-  `cli` 14, `compiler_caps` 8, `concurrency` 3, `diagnostics` 29, `extended` 6,
-  `features` 7, `ffi` 2, `ir` 6, `modules` 4, `native` 18, `opt_levels` 5,
-  `robustness` 2, `stdlib` 2, `tooling` 7. Unit tests: `semantic` 26,
-  `parser` 14, `lexer` 9, `diagnostics` 4, `format` 4, `lsp` 3, `docgen` 1.
+- Tests: **193 passed, 0 failed** (68 unit + 125 integration). Per binary:
+  `aggregates` 5, `cli` 14, `collections` 2, `compiler_caps` 8, `concurrency` 3,
+  `diagnostics` 29, `driver_helpers` 2, `extended` 7, `features` 8, `ffi` 2,
+  `ir` 6, `modules` 5, `native` 18, `opt_levels` 5, `robustness` 2,
+  `stdlib` 2, `tooling` 7. Unit tests: `semantic` 29, `parser` 18, `lexer` 9,
+  `diagnostics` 4, `format` 4, `lsp` 3, `docgen` 1.
 - Native coverage: compile → link → execute and assert stdout/exit status;
   `tests/native.rs::repeated_builds_are_byte_identical`; every example is
-  assembled and verified in `tests/ir.rs`.
+  assembled and verified in `tests/ir.rs`; static aggregate tables are executed
+  at `--opt 0..3` and their IR is verified in `tests/aggregates.rs`.
 - Optimization-level parity: `tests/opt_levels.rs` runs fixed cases, all
   examples, and 1,104 generated value assertions at `--opt 0..3`.
 - Benchmark suite: `bench/*.cx` + `bench/*.c`, `scripts/bench.sh`.
@@ -244,26 +260,26 @@ formatting drift in 673 call sites, which differential IR tests catch.
 
 ### 3.5 Driver, subprocesses, and file I/O
 
-The Rust driver does four things CoreX's stdlib does not cover end to end:
+The Rust driver's four jobs now have CoreX counterparts:
 
 1. **Tool discovery** reads `COREX_LLVM_BIN` and `PATH`, then probes
-   `/usr/lib/llvm-N/bin` (`driver.rs:158-190`). CoreX must scan `envp` from
-   `main` and implement path joining/existence checks (`std_fs::exists`).
+   `/usr/lib/llvm-N/bin` (`driver.rs:158-190`). CoreX scans `envp` from `main`
+   with `std_env::env_get`/`env_has` and checks paths with `std_fs::exists`.
 2. **Capturing tool output** uses `Command::output()` for `llvm-as`, `opt`,
-   `llc`, and `cc`. `std_process` only forks/execs with inherited stdio. Add
-   `pipe`/`dup2` wrappers (raw syscalls 22/33 are available via `syscall`) or
-   redirect stderr to a temp file and read it back.
+   `llc`, and `cc`. CoreX uses `std_io::pipe` (syscall 22),
+   `std_io::dup2` (syscall 33), and `std_io::read_all`, then
+   `std_process::wait` for the status.
 3. **Arbitrary argv** is needed for `llc -filetype=obj ...` and `cc -nostdlib
-   ...`. `std_process::spawn3` takes two arguments; `exec(path, argv, envp)`
-   already accepts a full `**u8` array, so a small `spawn_argv` helper is
-   enough.
+   ...`. `std_process::spawn_argv(path, argv, envp)` and `run_argv` take a
+   caller-built NULL-terminated `**u8` array; `exec(path, argv, envp)` still
+   accepts the full array directly.
 4. **Temp directories** need `getpid`, a monotonic timestamp, `mkdir`, and
    cleanup. `std_process::getpid` and `std_time::monotonic_ns` exist;
    `std_fs::mkdir`/`rmdir` exist.
 
-`read_file` returns an empty `vec<u8>` on failure, so the driver must `stat`
-first or use `std_fs::read_file` with an explicit result. This is a documented
-limitation, not a surprise.
+`std_fs::read_file(path, buf, cap)` returns the byte count, `0` for an empty
+file, and `-1` on failure, so the driver does not need to `stat` first. The
+`read_file(path) -> vec<u8>` builtin keeps its empty-vector-on-failure contract.
 
 ### 3.6 CLI, REPL, and tooling
 
@@ -289,14 +305,14 @@ limitation, not a surprise.
 | Generics | Only `vec<T>` (`docs/language-spec.md` §3) | **Friction** | Duplicate containers per type; store `u64` indices in one map |
 | Traits | Not supported | **Friction** | Function-pointer vtables (`fn(*mut u8) -> ...` + context) |
 | Closures | Not supported (closure literal → `E0101`) | **Friction** | Explicit context struct + function pointer; proved in §4.2 |
-| Maps / hash tables | Not in stdlib | **Missing library, not language** | Implement open addressing; proved in §5.5 |
-| String builders / formatting | `std_fmt::Fmt` fixed-capacity; no format strings; `str` no `==`/concat | **Missing library** | `vec<u8>` + `Fmt`; `std_str::str_eq` |
+| Maps / hash tables | `std_map`: insertion-ordered string-keyed `Map` (u64 values) and `Set` | **Library present** | None; borrowed keys mean key storage must outlive the entry |
+| String builders / formatting | `std_builder` grows with `std_alloc::realloc`; `std_fmt` remains a typed fixed-buffer writer | **Library present** | Use `builder_*` for output, `std_fmt` when a caller-owned buffer is enough; `std_str::str_eq` for comparison |
 | Error propagation | No `Result`, `?`, or exceptions; `panic` aborts 101 | **Friction** | Return codes + out-params + diagnostics `vec` |
-| Static aggregate constants | Rejected (`E0226`/`E0231`; `const` length → `E0100`) | **Hard language limit** | Heap-init tables in `main`; encode tables as functions |
+| Static aggregate constants | Supported for `static` arrays/structs/`str`/`&global`/`&fn`; integer `const` names and constant expressions are array lengths | **Good** | Struct literals require a plain C layout (`E0226` otherwise) |
 | Macros / hygiene | Expression macros only, non-hygienic, unit-local (spec §12.10) | **Friction** | Ordinary functions; avoid macros in the port |
 | Thread join / TLS | No join; explicit `std_tls` table (spec §13) | **Hard limit for concurrency** | Single-threaded compiler; `fork`/`wait` for parallel units |
 | ABI / FFI | `extern "C"`, `cstr`, varargs, `main(argc,argv,envp)` all work | **Good** | None needed for the compiler itself |
-| Build / bootstrap | CoreX compiler is built by Rust `cargo`; CoreX can invoke LLVM tools | **Process gap, not language** | Keep Rust as stage0; add `spawn_argv`/pipe helpers |
+| Build / bootstrap | Rust `cargo` builds stage0; CoreX invokes LLVM through `spawn_argv`/`run_argv`, `pipe`/`dup2`, and `read_all` | **Process gap, not language** | Keep Rust as stage0; build the P0-6 differential harness |
 | Performance | Kernels at C parity except fib (~1.4–1.6×); frontend 22 ms / 4,001 lines | **Unvalidated for a CoreX-written compiler** | Measure a spike before committing; budget 2–4× Rust frontend |
 
 ### 4.2 Probes run against the current compiler
@@ -311,43 +327,46 @@ to the project.
 | `match` | error | `match x { ... }` → `E0100: expected ';', found identifier` |
 | Generic function | error | `fn id<T>(x: T) -> T` → `E0100: expected '(', found '<'` |
 | Closure | error | closure literal (`let f = ...`) → `E0101: expected expression` |
-| Static aggregate table | error | `static TOKENS: [str; 2] = ["a","b"];` → `E0226` |
-| Static function-pointer table | error | `static TABLE: [fn(i64)->i64; 1] = [&a];` → `E0226` |
-| `const` as array length | error | `const N: usize = 4; static A: [u8; N] = ...` → `E0100: expected array length` |
+| Static aggregate table | **works** | `static TOKENS: [str; 2] = ["a","b"];` emits `@TOKENS = constant [2 x { ptr, i64 }]`; `tests/aggregates.rs` |
+| Static function-pointer table | **works** | `static TABLE: [fn(i64)->i64; 1] = [&a];` emits `[1 x ptr] [ptr @a]` |
+| `const` as array length | **works** | `const N: usize = 4; static A: [u8; N] = ...` and `[u8; N * 2]` |
 | `str` equality | error | `"a" == "b"` → `E0210`; use `std_str::str_eq` |
-| Nested `vec` without spaces | error | `vec<vec<u8>>` → `E0100: expected '>', found '>>'`; `vec< vec<u8> >` works |
-| `switch` + all cases return | error | still `E0206` without a trailing `return`; the analysis does not treat `switch` as diverging |
+| Nested `vec` without spaces | **works** | `vec<vec<u8>>` and `vec<vec<vec<i32>>>` parse and run; `>>`/`>>=` stay shifts in expressions |
+| `switch` + all cases return | **works** | A `switch` with `default` and diverging arms satisfies return analysis; no trailing `return` needed |
 | `switch` fallthrough | behavior | `case 1: print(1); case 2: print(2);` prints `1 2`; use `break` |
+| `envp` lookup / pipe capture | **works** | `std_env::env_get`, `std_io::pipe`/`dup2`/`read_all`; `tests/driver_helpers.rs` forks `/bin/echo` and checks its status |
 | Tagged union + `switch` | **works** | `struct Node { tag, payload: union }`; prints `42` |
 | Function-pointer context | **works** | `fn apply(f: fn(*mut u8)->i64, ctx: *mut u8)` prints `5` |
 | C varargs (`--hosted`) | **works** | `extern "C" fn snprintf(...);` with `c"%d-%s"` links and runs |
 | `main(argc, argv, envp)` | **works** | `tests/ffi.rs::main_receives_argc_argv_and_envp` |
 | Local aggregate tables | **works** | `let table: [fn(i64)->i64; 2] = [&f, &g];` prints `40` |
 
-### 4.3 The one genuine expressiveness limit
+### 4.3 What remains, and what no longer blocks
 
-Static aggregate data is the only construct whose absence changes the design of
-the compiler rather than just its verbosity. In Rust, tables such as keyword
-names, token descriptions, diagnostic catalogs, LLVM type spellings, and
-function-pointer dispatch maps are compile-time constants. In CoreX they must be
-built at process start:
+Static aggregate data used to be the one construct whose absence changed the
+design of the compiler rather than just its verbosity. It is now supported:
+tables such as keyword names, token descriptions, diagnostic catalogs, LLVM type
+spellings, and function-pointer dispatch maps can be declared directly.
 
 ```corex
-static mut KEYWORDS: *mut vec<str> = null;   // initialized in init_tables()
-
-fn init_tables() {
-    unsafe {
-        KEYWORDS = std_alloc::malloc(sizeof(vec<str>)) as *mut vec<str>;
-        *KEYWORDS = vec_new(64);
-        vec_push(KEYWORDS, "fn");
-        ...
-    }
-}
+const N: usize = 2;
+static NAMES: [str; 2] = ["fn", "let"];
+static OPS: [fn(i64, i64) -> i64; 1] = [&add];
+struct Entry { name: str, code: i32 }
+static TABLE: [Entry; 2] = [Entry { name: "a", code: 1 },
+                           Entry { name: "b", code: 2 }];
 ```
 
-This is exactly how a C compiler would do it, and it is compatible with CoreX's
-no-hidden-allocation philosophy. It is not a fatal blocker, but it means the
-self-hosted compiler has startup work and a global init order to maintain.
+These emit real LLVM global initializers; no `init_tables()` function, no
+startup allocation, and no global initialization order. `tests/aggregates.rs`
+compiles and runs the tables at `--opt 0..3` and verifies the IR with `llvm-as`.
+
+The remaining hard limit is **B6** (no thread join or language-level TLS), which
+affects only parallel compilation. Everything else is C-in-C ergonomics with a
+proven encoding: tagged unions instead of payload enums, `switch` instead of
+`match`, explicit context pointers instead of closures, hand-written containers
+instead of generics. Performance for a CoreX-written compiler is still
+unvalidated (P0-7), and the differential harness (P0-6) does not exist yet.
 
 ---
 
@@ -359,16 +378,19 @@ self-hosted compiler has startup work and a global init order to maintain.
 $ cd compiler
 $ PATH="$HOME/.cargo/bin:$HOME/opt/llvm20/bin:$PATH" cargo test
 ...
-test result: ok. 61 passed; 0 failed   (lib)
+test result: ok. 68 passed; 0 failed   (lib)
+test result: ok. 5 passed;  0 failed   (aggregates)
 test result: ok. 14 passed; 0 failed   (cli)
+test result: ok. 2 passed;  0 failed   (collections)
 test result: ok. 8 passed;  0 failed   (compiler_caps)
 test result: ok. 3 passed;  0 failed   (concurrency)
 test result: ok. 29 passed; 0 failed   (diagnostics)
-test result: ok. 6 passed;  0 failed   (extended)
-test result: ok. 7 passed;  0 failed   (features)
+test result: ok. 2 passed;  0 failed   (driver_helpers)
+test result: ok. 7 passed;  0 failed   (extended)
+test result: ok. 8 passed;  0 failed   (features)
 test result: ok. 2 passed;  0 failed   (ffi)
 test result: ok. 6 passed;  0 failed   (ir)
-test result: ok. 4 passed;  0 failed   (modules)
+test result: ok. 5 passed;  0 failed   (modules)
 test result: ok. 18 passed; 0 failed   (native)
 test result: ok. 5 passed;  0 failed   (opt_levels)
 test result: ok. 2 passed;  0 failed   (robustness)
@@ -376,10 +398,11 @@ test result: ok. 2 passed;  0 failed   (stdlib)
 test result: ok. 7 passed;  0 failed   (tooling)
 ```
 
-Total: **174 passed, 0 failed**. This matches the README and `docs/tasks.md`.
+Total: **193 passed, 0 failed**. This matches the README and `docs/tasks.md`.
 The suite includes native compile/run tests, IR verification, diagnostics,
 modules/archives/shared objects, C ABI in both directions, DWARF inspection,
-sanitizers, an LSP session, and optimization-level equivalence.
+sanitizers, an LSP session, optimization-level equivalence, static aggregate
+tables, collections/builder behavior, and driver process capture.
 
 ### 5.2 Examples at every optimization level
 
@@ -422,8 +445,9 @@ performance, not Rust-class.
   `volatile` globals only; no package manager; no non-x86-64 targets.
 - README "Limitations": no tuples/generics beyond `vec<T>`/traits/closures/
   exceptions/async/labeled break/`match`/operator overloading; vec copies are
-  shallow; arrays cannot be passed/returned by value; `read_file` ambiguity.
-- `docs/tasks.md`: T-001…T-028, T-041…T-046, T-049…T-055, and T-056…T-077
+  shallow; arrays cannot be passed/returned by value; the `read_file` builtin
+  cannot distinguish an empty file from an error (use `std_fs::read_file`).
+- `docs/tasks.md`: T-001…T-028, T-041…T-046, T-049…T-055, and T-056…T-078
   COMPLETED; no IN PROGRESS or BLOCKED items. All roadmap claims are tied to
   named tests.
 - `docs/PRD.md` §7 still lists "Self-hosting: the compiler stays in Rust;
@@ -553,12 +577,12 @@ binary". Self-compilation comes only after codegen and driver parity.
 | AC-1 | Corpus parity: every corpus program produces the same stdout/stderr/exit with both compilers at `--opt 0..3` | differential runner report |
 | AC-2 | Negative parity: every negative input produces the same ordered diagnostic codes and start positions | differential runner report |
 | AC-3 | IR validity: every emitted module passes `llvm-as` | `emit-ir --verify` |
-| AC-4 | Existing behavior tests: the 174-test suite's behavioral cases pass when run against `corexc` | ported/parameterized harness |
+| AC-4 | Existing behavior tests: the 193-test suite's behavioral cases pass when run against `corexc` | ported/parameterized harness |
 | AC-5 | Modules/FFI: separate compilation, archives, shared objects, `dlopen`, C calls both directions work | `tests/modules.rs`, `tests/ffi.rs` equivalents |
 | AC-6 | Determinism: twin builds produce identical artifacts | SHA-256 comparison |
 | AC-7 | Fixed point: stage2 and stage3 agree on the compiler source | normalized IR/ELF diff |
 | AC-8 | Performance: self-compile at `--opt 2` under an agreed budget (suggest ≤ 10 s on the reference machine), frontend within 2× of Rust `corex check` on the same input | timing harness |
-| AC-9 | No regression: Rust `corex` remains the default and all 174 tests pass | CI |
+| AC-9 | No regression: Rust `corex` remains the default and all 193 tests pass | CI |
 
 ### 6.7 Rollback
 
@@ -623,23 +647,24 @@ commitment.
 
 ## 8. Recommendation
 
-### 8.1 Do not start the full port today
+### 8.1 Prerequisites before the full port
 
-Start only after these P0 prerequisites are implemented and tested. They are
-small relative to the port and de-risk it substantially.
+These P0 prerequisites de-risk the port. P0-1 … P0-5 are implemented and tested
+(branch `room/corex-p0-blocker-fixes-by6h`); P0-6 and P0-7 remain.
 
-| # | Prerequisite | Acceptance |
-|---|---|---|
-| P0-1 | Decide and document the static-table story: either support `static` aggregate initializers (arrays/structs/function pointers) or bless the `init_tables()` pattern with an example and a test | Keyword table and dispatch table examples compile and run |
-| P0-2 | Add `lib/corex` collections: string-keyed map/set with deterministic iteration, and a growable byte builder with integer/float/hex append | Unit tests for insert/lookup/grow/iteration order; used by a sample program |
-| P0-3 | Add driver helpers: `getenv`/`envp` scan, `spawn_argv`, `pipe`/`dup2` (or documented temp-file capture), and a `read_file` variant that distinguishes failure | A CoreX program runs `llvm-as` with arguments, captures stderr, and reports failure |
-| P0-4 | Fix nested generic lexing so `vec<vec<u8>>` parses without whitespace | Parser test plus a diagnostic regression |
-| P0-5 | Make `switch` divergence-aware when a `default` is present, or document the trailing-`return` convention in the spec and examples | Semantic test: a `switch` with all cases returning compiles |
-| P0-6 | Add a CoreX-native test runner for the port and a differential runner that compares stdout/exit/diagnostic codes against Rust `corex` | `make check-bootstrap` runs the corpus and fails on divergence |
-| P0-7 | Establish a performance baseline: 10k-line input, `check` and `build --opt 2`, memory ceiling | Numbers recorded in `docs/benchmarks.md` or a bootstrap note |
+| # | Prerequisite | Status | Evidence |
+|---|---|---|---|
+| P0-1 | Static aggregate initializers (arrays/structs/function pointers) and `const` array lengths | **COMPLETED** | `tests/aggregates.rs`: keyword/dispatch/struct tables run at `--opt 0..3`; `llvm-as` verifies the IR |
+| P0-2 | `lib/corex` collections: string-keyed map/set with deterministic iteration, and a growable byte builder with integer/float/hex append | **COMPLETED** | `lib/corex/std_map.cx`, `lib/corex/std_builder.cx`; `tests/collections.rs` covers insert/lookup/grow/collisions/iteration order and 64-bit formatting |
+| P0-3 | Driver helpers: `envp` scan, `spawn_argv`/`run_argv`, `pipe`/`dup2`, and a `read_file` that distinguishes failure | **COMPLETED** | `lib/corex/std_env.cx`, `std_io` `pipe`/`dup2`/`read_all`, `std_process` `spawn_argv`/`run_argv`, documented `std_fs::read_file`; `tests/driver_helpers.rs` forks `/bin/echo`, captures stdout, and reports the status |
+| P0-4 | Nested generic syntax without whitespace | **COMPLETED** | Parser splits `>>` only in type position; parser unit tests, `tests/features.rs::nested_generic_types_and_shift_operators`; `>>`/`>>=` stay shifts |
+| P0-5 | `switch` divergence-aware when a `default` is present | **COMPLETED** | Semantic unit tests, `tests/extended.rs::switch_with_default_satisfies_return_analysis`, E0206 diagnostics test |
+| P0-6 | A CoreX-native test runner for the port and a differential runner that compares stdout/exit/diagnostic codes against Rust `corex` | **NOT STARTED** | `make check-bootstrap` runs the corpus and fails on divergence |
+| P0-7 | A performance baseline: 10k-line input, `check` and `build --opt 2`, memory ceiling | **NOT STARTED** | Numbers recorded in `docs/benchmarks.md` or a bootstrap note |
 
-P0-4 and P0-5 are small compiler changes. They are included because they remove
-daily friction from the port; they do not change the language's philosophy.
+P0-4 and P0-5 were small compiler changes included because they remove daily
+friction from the port; they do not change the language's philosophy. The same
+holds for P0-1 … P0-3: C-like data and explicit allocation, no new runtime.
 
 ### 8.2 Recommended before the semantic/codegen phases
 
@@ -695,17 +720,25 @@ Rust compiler; the language is still usable, and the missing pieces are known.
 
 ## Appendix A — Probe commands
 
+Baseline probes were re-run after the P0 fixes. Still-unsupported constructs are
+language-design choices; the rest are now covered by repository tests.
+
 ```sh
 CX=compiler/target/release/corex
-$CX check /tmp/cxprobe/payload.cx          # E0100
-$CX check /tmp/cxprobe/generic.cx          # E0100
-$CX check /tmp/cxprobe/aggconst.cx         # E0226
-$CX check /tmp/cxprobe/constlen.cx         # E0100
+$CX check /tmp/cxprobe/payload.cx          # E0100 (payload enum, unsupported by design)
+$CX check /tmp/cxprobe/generic.cx          # E0100 (generic function, unsupported by design)
+$CX check /tmp/cxprobe/aggconst.cx         # ok: static aggregate table
+$CX check /tmp/cxprobe/constlen.cx         # ok: `const` array length
+$CX run   /tmp/cxprobe/nested.cx           # ok: `vec<vec<u8>>` without whitespace
 $CX run   /tmp/cxprobe/tagged.cx           # 42
 $CX run   /tmp/cxprobe/fnctx.cx            # 5
 $CX run   /tmp/cxprobe/fall.cx             # 1 2 3
 $CX run   /tmp/cxprobe/cstrvar.cx --hosted # 7
 ```
+
+The fixed cases are also exercised in-repo: `tests/aggregates.rs`,
+`tests/features.rs::nested_generic_types_and_shift_operators`, and
+`tests/extended.rs::switch_with_default_satisfies_return_analysis`.
 
 ## Appendix B — Minimal CoreX encoding used by the microcosm
 
@@ -738,11 +771,11 @@ fn eval(n: *mut Node) -> i64 {
         case Kind::Add: { return eval((*n).lhs) + eval((*n).rhs); }
         default:        { return eval((*n).lhs) * eval((*n).rhs); }
         }
-        return 0;   // switch does not satisfy return analysis
     }
 }
 ```
 
 This pattern is the port's building block: arena allocation, pointer-linked
-nodes, tagged dispatch, and explicit returns. It compiled and ran at `--opt
-0,1,2,3` with output `((6 * 7) + 8)` / `160`.
+nodes, tagged dispatch, and explicit returns. The `switch` has a `default` and
+every arm returns, so it satisfies return analysis without a trailing `return`.
+It compiled and ran at `--opt 0,1,2,3` with output `((6 * 7) + 8)` / `160`.

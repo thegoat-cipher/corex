@@ -204,7 +204,7 @@ cargo test
 Expected result on a correctly installed toolchain:
 
 ```text
-174 passed, 0 failed
+193 passed, 0 failed
 ```
 
 The integration tests invoke `llvm-as`, `llc`, and `cc` for real. If a tool is

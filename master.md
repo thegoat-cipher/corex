@@ -43,8 +43,9 @@ and tested; P2 remains optional and not started.
 | P1: volatile, atomics, threads, mutex/condvar, TLS | COMPLETED | `tests/concurrency.rs` |
 | P1: inline asm, macros, cfg, shared libraries, dlopen | COMPLETED | `tests/concurrency.rs`, `tests/modules.rs` |
 | P1: benchmarks | COMPLETED | `scripts/bench.sh`, `docs/benchmarks.md` |
+| Self-hosting P0 blockers (static aggregates, collections/builder, driver helpers, nested `vec`, `switch` divergence) | COMPLETED | `tests/aggregates.rs`, `tests/collections.rs`, `tests/driver_helpers.rs`; `docs/self-hosting.md` §1.1 |
 
-Test totals: `cargo test` → **174 passed, 0 failed** (61 unit, 113 integration).
+Test totals: `cargo test` → **193 passed, 0 failed** (68 unit, 125 integration).
 
 ---
 

@@ -19,15 +19,17 @@ fn main() -> i32 {
 }
 ```
 
-Status: **C-class systems language implemented and tested** — 174 automated
-tests pass (61 unit, 113 integration), including native compile/run tests at
+Status: **C-class systems language implemented and tested** — 193 automated
+tests pass (68 unit, 125 integration), including native compile/run tests at
 every optimization level, C ABI tests in both directions, separate-compilation
 and manifest builds, DWARF inspection, LSP sessions, and sanitizer aborts.
 
 The language now has function pointers, C control flow, unions/bitfields/packed
 layout, `sizeof`/`alignof`/`offsetof`, C FFI and variadic calls, file modules
-with visibility and separate compilation, `corex.toml` projects, a freestanding
-standard library, atomics/threads/futexes, inline assembly, macros, debug info,
+with visibility and separate compilation, `corex.toml` projects, static
+aggregate constants (`static` arrays/structs/function-pointer tables and `const`
+array lengths), a freestanding standard library with a string map/set and a
+growable builder, atomics/threads/futexes, inline assembly, macros, debug info,
 a formatter, linter, docs generator, test runner, and a language server. It
 still has no garbage collector, hidden allocation, runtime, or libc dependency.
 See [Limitations](#limitations).
@@ -211,13 +213,17 @@ Full normative details: [`docs/language-spec.md`](docs/language-spec.md) and
 
 ```bash
 cd compiler
-cargo test                 # 174 tests: 61 unit + 113 integration
+cargo test                 # 193 tests: 68 unit + 125 integration
 cargo test --lib           # stage unit tests only
 cargo test --test native   # compile → link → execute, asserts stdout/exit codes
 cargo test --test cli      # stdin, exec, REPL, flags and exit codes
 cargo test --test ir       # every example is assembled and verified by llvm-as
 cargo test --test diagnostics  # invalid programs rejected with specific codes
+cargo test --test aggregates   # static array/struct tables, const array lengths
+cargo test --test collections  # std_map/std_builder: order, collisions, growth
+cargo test --test driver_helpers  # envp lookup, pipe/dup2 capture, run_argv
 cargo test --test features     # globals, enums, floats, structs, slices, strings
+                               # nested vec<vec<T>> types, shift operators
 cargo test --test compiler_caps # vec, const, file I/O, imports, panic/assert
 cargo test --test opt_levels   # identical semantics at --opt 0 through 3
                                # (wrapping, shifts, aborts, aliasing, print)
@@ -273,6 +279,9 @@ compiler/
     native.rs           executed binaries
     cli.rs              stdin, exec, and REPL behavior
     opt_levels.rs       same semantics at --opt 0..3 (wrapping, shifts, aborts)
+    aggregates.rs       static array/struct/function-pointer tables, const lengths
+    collections.rs      std_map/std_builder behavior, collisions, growth, order
+    driver_helpers.rs   envp lookup, pipe/dup2 capture, spawn_argv/run_argv
     features.rs         globals/enums/floats/structs/slices/strings end to end
     compiler_caps.rs    vec, const, file I/O, imports, panic/assert
     robustness.rs       malformed/adversarial input never panics
@@ -307,10 +316,17 @@ macros, threads, debug information, and tooling are implemented (see the spec).
 Feature boundaries:
 
 - **Globals.** Constant initializers support integers, `bool`, `char`, floats,
-  enums, string literals, and `&global`. Array and struct aggregate constants are
-  not supported; constant initializers may only read previously declared
-  immutable globals (forward references are rejected with `E0226`). Constant
-  names cannot be used as fixed-array lengths; those are integer literals.
+  enums, string literals, `&global`, and `&function`. Aggregate constants are
+  supported for `static` declarations: arrays (including nested arrays and
+  arrays of structs), structs with a plain C layout, `str` elements, and
+  function-pointer tables are emitted as real LLVM globals with no runtime
+  initializer. Bits of aggregates that still need runtime work are unsupported
+  and rejected with `E0226`: unions, bitfields, packed/`align(N)` structs, and
+  flexible array members in a static struct initializer. Constant initializers
+  may only read previously declared immutable globals (forward references are
+  rejected with `E0226`). Array lengths may be integer literals, previously
+  declared integer `const` names, or constant arithmetic over them; a length
+  that is not constant is `E0100`.
 - **Slices and strings.** `[T]` and `str` are shallow two-word copies and have no
   equality, concatenation, or formatting operators. A slice has no implicit
   conversion to an array; create one with a string literal, `&array` in a slice
@@ -339,9 +355,11 @@ Feature boundaries:
 - **Error handling.** `panic` and `assert` abort with a message and exit 101.
   There are no exceptions, `Result`, `Option`, or `?`; recoverable failures use
   ordinary values.
-- **File I/O.** `read_file` returns an empty `vec<u8>` on failure (it does not
-  distinguish empty files from errors); `write_file` returns `0` or `-1`.
-  Paths are byte strings and are not UTF-8 validated.
+- **File I/O.** The `read_file` builtin returns an empty `vec<u8>` on failure (it
+  does not distinguish empty files from errors). `std_fs::read_file(path, buf,
+  cap)` returns the byte count, `0` for an empty file, and `-1` on failure for
+  callers that need the distinction (such as a driver). `write_file` returns `0`
+  or `-1`. Paths are byte strings and are not UTF-8 validated.
 - **Floats.** `print` uses six fractional digits. Non-finite values print as
   `nan`/`inf`/`-inf`; magnitudes ≥ 1e18 abort with exit 101. There is no decimal
   type and no implicit integer/float conversion.

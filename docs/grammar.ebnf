@@ -60,7 +60,7 @@ field_decl     = IDENT ":" type [ ":" INTEGER ] ;      (* bitfield width *)
 
 type           = primitive
                | "cstr"
-               | "[" type ";" INTEGER "]"
+               | "[" type ";" array_len "]"
                | "[" type "]"
                | "vec" "<" type ">"
                | "*" [ "mut" ] type
@@ -184,6 +184,18 @@ array_compound_literal = "[" type ";" INTEGER "]" "{"
 
 array_literal  = expression [ "," [ expression { "," expression } [ "," ] ] ]
                | expression ";" INTEGER ;
+
+(* Array lengths: an integer literal, a previously declared integer `const`
+   name, or an arithmetic constant expression over both, parsed with the
+   normal expression precedence. `>>` closes nested `vec<>` types as well:
+   `vec<vec<u8>>` needs no whitespace. *)
+array_len      = array_const ;
+array_const    = INTEGER
+               | IDENT { "::" IDENT }
+               | "(" array_const ")"
+               | ("-" | "!") array_const
+               | array_const ("+" | "-" | "*" | "/" | "%" | "<<" | ">>"
+                              | "&" | "|" | "^") array_const ;
 
 (* ----- lexical classes ----- *)
 

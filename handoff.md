@@ -22,7 +22,7 @@ Commits on the branch (oldest → newest):
 
 ## Verification (all run)
 
-- `cargo test` → **174 passed, 0 failed** (61 unit, 113 integration).
+- `cargo test` → **193 passed, 0 failed** (68 unit, 125 integration).
 - Every `examples/*.cx` run at `--opt 0,1,2,3` → identical stdout and exit status.
 - `tests/ffi.rs` compiles a C helper with `cc` and links it both directions
   (including aggregate and variadic calls).

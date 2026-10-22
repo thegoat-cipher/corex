@@ -80,7 +80,7 @@ here is not part of the language.
 | `f32` / `f64` | 4 / 8 | 4 / 8 | IEEE 754 binary32 / binary64 |
 | `*T` | 8 | 8 | read-only raw pointer to `T` |
 | `*mut T` | 8 | 8 | writable raw pointer to `T` |
-| `[T; N]` | `N * size(T)` | `align(T)` | fixed-size inline array, `N > 0` |
+| `[T; N]` | `N * size(T)` | `align(T)` | fixed-size inline array, `N > 0`; `N` is a constant integer expression |
 | `[T]` | 16 | 8 | slice: `{ data: *T, len: usize }` by value |
 | `str` | 16 | 8 | byte slice, layout identical to `[u8]` |
 | `vec<T>` | 24 | 8 | dynamic array: `{ data: *mut T, len: usize, cap: usize }` |
@@ -89,6 +89,10 @@ here is not part of the language.
 
 - Signed integers are two's complement.
 - Arrays are inline values: `[u8; 16]` is 16 bytes of storage, not a pointer.
+- An array length is a constant integer expression: an integer literal, a
+  previously declared integer `const` name, or arithmetic over both
+  (`[u8; N * 2]`). Only previously declared constants are visible, matching the
+  forward-reference rule for constant expressions; anything else is `E0100`.
 - `void` exists only as the absence of a return type; it cannot be written.
 - A stack value larger than 1 MiB, or a type whose size overflows 64-bit
   arithmetic, is rejected with `E0223`.
@@ -156,6 +160,8 @@ const NAME: Type = constant_expression;
   `E0231`.
 - The initializer follows the global constant-expression rules and may read
   previously declared `const` values. Forward references are `E0226`.
+- Integer `const` names, and constant expressions built from them, are accepted
+  as array lengths in types (`[u8; N]`, `[u8; N * 2]`).
 - Constants share the value namespace with functions and globals; duplicates are
   `E0202`. Builtin names are reserved.
 
@@ -170,12 +176,22 @@ static mut NAME: Type = constant_expression;
   `&mut NAME`; the latter requires `static mut` (`E0220`).
 - A `static` is immutable (`E0205` on assignment); `static mut` is mutable.
 - The initializer is required and must be a constant expression: literals,
-  unary `-`/`!`, arithmetic/comparison on constants, casts, and `&GLOBAL`. It may
-  also read a previously declared immutable global. Address-of must name a
-  global. Calls, mutable-global reads, and forward references are `E0226`.
+  unary `-`/`!`, arithmetic/comparison on constants, casts, `&GLOBAL`, and
+  `&FUNCTION`. It may also read a previously declared immutable global.
+  Address-of must name a global or a function. Calls, mutable-global reads, and
+  forward references are `E0226`.
 - Supported constant types are integers, `bool`, `char`, `f32`, `f64`, `str`,
   `[u8; N]` initialized from a string literal, pointers initialized from
-  `&GLOBAL`, and enum variants. Other aggregate constants are `E0226`.
+  `&GLOBAL`, function pointers initialized from `&FUNCTION`, and enum variants.
+- Aggregate constants are emitted as real LLVM globals with no runtime
+  initializer. An array `static` accepts an array literal whose elements are
+  constants, including nested arrays and struct literals; a struct `static`
+  accepts a struct literal whose fields are constants. String elements use the
+  ordinary `str` layout `{ ptr, i64 }`; function-pointer elements are emitted as
+  `ptr @fn`. Struct literals require a plain C layout: unions, bitfields,
+  packed/`align(N)` structs, and flexible array members are `E0226`. Element
+  types that are themselves aggregates (arrays of arrays, arrays of structs,
+  structs containing arrays/structs) are supported.
 - Globals share one value namespace with functions; duplicates are `E0202`.
   Builtin names are reserved.
 
@@ -290,13 +306,17 @@ A body "diverges" when every path ends in one of these:
 - `loop { ... }` containing no `break` that belongs to it;
 - `while true { ... }` containing no `break` that belongs to it;
 - `if`/`else` where both branches diverge;
+- `switch` with a `default` arm where every arm body diverges and no arm
+  contains a `break` that exits the switch (so no arm can fall out);
 - an `unsafe` block or bare block whose body diverges;
 - a call to `syscall` with the constant syscall number 60 (`exit`) or 231
   (`exit_group`) as the last statement — those never return.
 
 Otherwise the compiler reports `E0206`. The analysis is conservative: an
-`if true { ... }` without `else` is not treated as diverging, and an `exit`
-syscall whose number is computed at runtime is not recognized.
+`if true { ... }` without `else` is not treated as diverging, a `switch`
+without `default` never diverges, and an `exit` syscall whose number is
+computed at runtime is not recognized. C fallthrough is unchanged: an arm that
+can fall into the next one means the `switch` does not diverge.
 
 ---
 
@@ -771,7 +791,9 @@ and results match System V AMD64.
   unless `break` is executed. `case` values must be integer constant
   expressions (including enum variants) and are unique; one `default` is
   allowed. `break` inside a switch exits the switch; `continue` targets the
-  enclosing loop.
+  enclosing loop. A `switch` counts as diverging for return analysis only when
+  it has a `default` and every arm diverges without a `break`; fallthrough
+  semantics are unchanged.
 - `for (init; cond; step) { ... }` — any clause may be empty. `init` and `step`
   are statements (including `let` and assignments), `cond` is a `bool`
   expression.
@@ -900,12 +922,15 @@ The language never allocates implicitly. `alloc(bytes)` and
 | `std_alloc` | `malloc`, `calloc`, `realloc`, `free` (C semantics, 16-byte alignment, size headers), `aligned_alloc`, `Allocator` (context + function pointers), `c_allocator`, `Arena` (`arena_new`, `arena_alloc`, `arena_reset`, `arena_free`) |
 | `std_mem` | `memcpy`, `memmove`, `memset`, `memzero`, `memcmp`, `memchr` |
 | `std_str` | `strlen`, `strcmp`, `strncmp`, `strcpy`, `strncpy`, `strcat`, `strchr`, `str_eq`, `str_find`, `str_copy_cstr` |
-| `std_io` | fd constants and flags, `open`, `read`, `write`, `seek`, `close`, `write_all`, `puts`, `eputs`, `getbyte`, `putbyte` |
+| `std_io` | fd constants and flags, `open`, `read`, `write`, `seek`, `close`, `pipe`, `dup2`, `read_all`, `write_all`, `puts`, `eputs`, `getbyte`, `putbyte` |
 | `std_fs` | `Stat`, `stat_path`, `lstat_path`, `file_size`, `exists`, `is_dir`, `is_file`, `mkdir`, `rmdir`, `unlink`, `rename`, `getcwd`, `chdir`, `read_file`, `write_file`, `Dir`/`dir_open`/`dir_next`/`dir_close` |
-| `std_process` | `exit`, `getpid`, `fork`, `exec`, `wait`, `spawn`, `spawn3`, `run`, `env_count` |
+| `std_process` | `exit`, `getpid`, `fork`, `exec`, `wait`, `spawn`, `spawn3`, `spawn_argv`, `run`, `run_argv`, `env_count` |
+| `std_env` | `env_get(envp, name, found)`, `env_has`, `env_get_or`: borrowed, allocation-free lookup over the `envp` vector from `main(argc, argv, envp)`; `found` distinguishes a missing variable from an empty value |
 | `std_time` | `Timespec`, `clock_gettime`, `now_ns`, `monotonic_ns`, `sleep_ns`, `sleep_ms`, `unix_seconds` |
 | `std_math` | integer abs/min/max, `clz64`, `ctz64`, `popcount64`, `is_pow2`, `next_pow2`, `fabs`, `sqrt`, `trunc`, `floor`, `ceil`, `round`, `powi` |
 | `std_fmt` | typed `Fmt` builder: `push_str`, `push_cstr`, `push_i64`, `push_u64`, `push_hex`, `push_bin`, `push_bool`, `push_f64`, `finish`, `finish_cstr` |
+| `std_map` | insertion-ordered string-keyed `Map` with `u64` values: `map_new`, `map_free`, `map_put`, `map_get` (with a found flag), `map_has`, `map_len`, `map_key_at`, `map_value_at`; `Set` with `set_new`, `set_free`, `set_insert`, `set_has`, `set_len`, `set_key_at`. Keys are borrowed `str` slices (never copied) |
+| `std_builder` | growable byte `Builder`: `builder_new`, `builder_with_capacity`, `builder_free`, `builder_reserve`, `builder_push_byte`, `builder_push_str`, `builder_push_char`, `builder_push_i64`, `builder_push_u64`, `builder_push_hex`, `builder_push_f64`, `builder_len`, `builder_data`, `builder_failed`, `builder_finish`. Every push returns `bool`; allocation failure latches the error instead of aborting |
 | `std_sync` | `Mutex`, `mutex_lock`/`try_lock`/`unlock`, `Condvar`, `condvar_wait`/`signal`/`broadcast`, `SpinLock` (futex syscalls 202) |
 | `std_thread` | `Thread`, `spawn(entry, arg, stack_size)`, `gettid`, `yield_now`, `thread_exit` |
 | `std_tls` | explicit thread-local blocks: `tls_alloc`, `tls_get`, `tls_release`, `tls_thread_id` |
@@ -914,6 +939,16 @@ The language never allocates implicitly. `alloc(bytes)` and
 The library is freestanding except `std_dl`, which requires `--hosted`.
 `std_alloc` on `--sanitize` poisons freed payloads, keeps mappings so a second
 `free` is diagnosed, and aborts (exit 101) via direct syscalls.
+
+Two file-reading paths differ on failure: `std_fs::read_file(path, buf, cap)`
+returns the byte count, `0` for an empty file, and `-1` on failure, so a driver
+can tell an empty file from an error. The `read_file(path) -> vec<u8>` builtin
+keeps its contract of returning an empty vector on failure and cannot
+distinguish the two.
+
+`std_map` keys and `std_builder::builder_finish` are borrowed slices, not
+copies: the key storage must outlive the map entry, and builder bytes are valid
+until the next push or `builder_free`.
 
 ### 12.8 Volatile, atomics, threads, TLS
 
