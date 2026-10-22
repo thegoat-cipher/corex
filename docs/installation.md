@@ -1,8 +1,8 @@
 # Installing CoreX
 
-This guide installs the CoreX compiler from source and verifies it by compiling
-and running real freestanding ELF binaries. It also covers the few environment
-variables that control tool discovery.
+This guide installs the CoreX **0.3.0** compiler from source and verifies it by
+compiling and running real freestanding ELF binaries. It also covers the few
+environment variables that control tool discovery.
 
 CoreX is tested with **Rust 1.99.1** and **LLVM 20.1.8** on **Linux x86-64**.
 Other versions may work, but the emitted IR and the integration tests are pinned
@@ -122,7 +122,8 @@ cd compiler
 cargo build --release
 ```
 
-The binary is `compiler/target/release/corex`.
+The binaries are `compiler/target/release/corex` and
+`compiler/target/release/corex-lsp`.
 
 A cold build only compiles the compiler (and its zero external crates); it does
 not need LLVM development headers or `libLLVM`.
@@ -131,6 +132,8 @@ not need LLVM development headers or `libLLVM`.
 
 ```bash
 ./target/release/corex --version
+# corex 0.3.0 (LLVM 20 backend)
+
 ./target/release/corex run ../examples/hello.cx
 # Hello, World!
 ```
@@ -142,7 +145,7 @@ Build a binary and inspect it:
 /tmp/factorial
 # 3628800
 file /tmp/factorial
-# ELF 64-bit LSB executable, x86-64, statically linked
+# ELF 64-bit LSB executable, x86-64, statically linked (abridged)
 ```
 
 `ldd /tmp/factorial` should report that it is not a dynamic executable.
@@ -151,11 +154,11 @@ file /tmp/factorial
 
 ## 4. Put `corex` on your `PATH`
 
-Either copy the release binary:
+Either copy the release binaries:
 
 ```bash
 install -d "$HOME/.local/bin"
-install -m 755 target/release/corex "$HOME/.local/bin/corex"
+install -m 755 target/release/corex target/release/corex-lsp "$HOME/.local/bin/"
 export PATH="$HOME/.local/bin:$PATH"
 ```
 
@@ -163,7 +166,15 @@ or let Cargo install it:
 
 ```bash
 cargo install --path . --locked
-# installs to ~/.cargo/bin/corex
+# installs corex and corex-lsp to ~/.cargo/bin
+```
+
+For an isolated install root (no writes to `~/.cargo/bin`):
+
+```bash
+cargo install --path . --locked --root "$HOME/.local/corex"
+# installs $HOME/.local/corex/bin/corex and corex-lsp
+export PATH="$HOME/.local/corex/bin:$PATH"
 ```
 
 Then run from any directory:
@@ -201,11 +212,8 @@ cd compiler
 cargo test
 ```
 
-Expected result on a correctly installed toolchain:
-
-```text
-205 passed, 0 failed
-```
+Expected result on a correctly installed toolchain: every `test result` line
+reports `0 failed`, totaling **205 passed** (68 unit, 137 integration).
 
 The integration tests invoke `llvm-as`, `llc`, and `cc` for real. If a tool is
 missing, they fail rather than silently skipping.
@@ -330,8 +338,9 @@ cargo build --release
 Uninstall:
 
 ```bash
-rm -f "$HOME/.local/bin/corex"          # manual install
+rm -f "$HOME/.local/bin/corex" "$HOME/.local/bin/corex-lsp"  # manual install
 cargo uninstall corex                    # if installed with cargo install
+rm -rf "$HOME/.local/corex"              # if installed with --root
 rm -rf compiler/target                   # build artifacts
 ```
 
@@ -358,7 +367,7 @@ The compiler now ships two binaries (`corex`, `corex-lsp`) and a freestanding
 standard library. All tools use the same LLVM 20 lookup as the compiler:
 `COREX_LLVM_BIN`, then `PATH`, then `/usr/lib/llvm-N/bin`.
 
-### 10.1 Build and run the newer commands
+### 11.1 Build and run the newer commands
 
 ```bash
 cd compiler && cargo build --release
@@ -367,14 +376,18 @@ cd compiler && cargo build --release
 ./target/release/corex fmt   ../examples/features.cx -w        # rewrite
 ./target/release/corex lint  ../examples/features.cx           # warnings, exit 0
 ./target/release/corex doc   ../examples/features.cx           # Markdown on stdout
-./target/release/corex test  tests/example_tests.cx            # per-test results
+cat > /tmp/corex-tests.cx <<'CX'
+fn test_addition() -> bool { return 1 + 1 == 2; }
+fn test_shift() -> bool { return (1 << 4) == 16; }
+CX
+./target/release/corex test  /tmp/corex-tests.cx               # per-test results
 ./target/release/corex-lsp                                     # stdio LSP server
 ```
 
 `corex test` expects functions named `test_*` returning `bool`; it builds a
 runner, prints `test name ... ok` or `... FAILED`, and exits 1 on any failure.
 
-### 10.2 Compiling with the standard library
+### 11.2 Compiling with the standard library
 
 The library lives in `lib/corex`. Point the module search path at it:
 
@@ -386,7 +399,7 @@ The library lives in `lib/corex`. Point the module search path at it:
 A `corex.toml` project can list `include_paths = ["../lib/corex"]` instead of
 passing `-I`.
 
-### 10.3 Debug and sanitizer builds
+### 11.3 Debug and sanitizer builds
 
 ```bash
 ./target/release/corex build app.cx -g -o app-dbg
@@ -400,7 +413,7 @@ readelf --debug-dump=info app-dbg | grep DW_TAG_subprogram
 adds checked signed arithmetic and allocator double-free detection; overflow
 aborts with exit 101 and `corex: integer overflow` on stderr.
 
-### 10.4 Hosted builds and shared libraries
+### 11.4 Hosted builds and shared libraries
 
 ```bash
 corex build lib.cx --emit shared -o libdemo.so
@@ -410,7 +423,7 @@ corex build app.cx --hosted -I ../lib/corex -o app     # dlopen/dlsym available
 `--hosted` links the C runtime and lets it call `main`; freestanding builds
 remain the default. `--emit staticlib` produces an archive with `llvm-ar`.
 
-### 10.5 Environment additions
+### 11.5 Environment additions
 
 | Variable | Effect |
 |---|---|
@@ -418,7 +431,7 @@ remain the default. `--emit staticlib` produces an archive with `llvm-ar`.
 | `COREX_DUMP_IR=1` | Include generated IR in an `llvm-as` failure note |
 | `COREX_KEEP_TEMP=1` | Keep the build directory with `.ll`, `.bc`, `.o` files |
 
-### 10.6 Troubleshooting additions
+### 11.6 Troubleshooting additions
 
 | Symptom | Cause / fix |
 |---|---|
