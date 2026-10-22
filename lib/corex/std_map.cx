@@ -1,0 +1,270 @@
+//! Deterministic string-keyed map and set for compiler data structures.
+//!
+//! Entries are kept in insertion order. A separate open-addressed index
+//! (`0` = empty slot, otherwise entry index + 1) gives average O(1) lookup
+//! without reordering entries, so iteration is stable and reproducible.
+//!
+//! Keys are **borrowed** `str` slices: the table stores the pointer and length
+//! and never copies the bytes. The key storage must stay alive as long as the
+//! entry (a string literal, a slice of a longer-lived buffer, or an arena).
+//! There are no generics; values are `u64`, which covers record ids and indices.
+//!
+//! Allocation is explicit through `std_alloc`. Every operation that can fail
+//! returns `false` and leaves the map unchanged; nothing aborts.
+
+module std_map;
+mod std_alloc;
+mod std_str;
+
+/// One key/value pair, stored in insertion order.
+pub struct Entry {
+    key: str,
+    value: u64,
+}
+
+/// String-keyed map with `u64` values and insertion-order iteration.
+pub struct Map {
+    entries: *mut Entry,
+    len: usize,
+    cap: usize,
+    slots: *mut u64,
+    slot_count: usize,
+}
+
+/// Returned by the positional lookup helper when a key is absent.
+pub const NOT_FOUND: usize = 18446744073709551615;
+
+const INITIAL_SLOTS: usize = 16;
+const INITIAL_ENTRIES: usize = 8;
+const LOAD_NUM: usize = 3;
+const LOAD_DEN: usize = 4;
+
+/// FNV-1a, chosen for determinism across builds (no seed, no process state).
+fn hash_key(key: str) -> u64 {
+    let mut h: u64 = 14695981039346656037;
+    let mut i: usize = 0;
+    while i < len(key) {
+        h = h ^ (key[i] as u64);
+        h = h * 1099511628211;
+        i += 1;
+    }
+    return h;
+}
+
+fn slot_index(h: u64, slot_count: usize) -> usize {
+    return (h & (slot_count as u64 - 1)) as usize;
+}
+
+/// An empty map allocates nothing.
+pub fn map_new() -> Map {
+    return Map {
+        entries: null,
+        len: 0,
+        cap: 0,
+        slots: null,
+        slot_count: 0,
+    };
+}
+
+pub fn map_free(m: *mut Map) {
+    unsafe {
+        if (*m).entries != null {
+            std_alloc::free((*m).entries as *mut u8);
+        }
+        if (*m).slots != null {
+            std_alloc::free((*m).slots as *mut u8);
+        }
+        (*m).entries = null;
+        (*m).slots = null;
+        (*m).len = 0;
+        (*m).cap = 0;
+        (*m).slot_count = 0;
+    }
+}
+
+/// Rebuild the index at `slot_count` slots (a power of two), keeping entry
+/// order intact. The old index is released only after the new one exists.
+fn rehash(m: *mut Map, slot_count: usize) -> bool {
+    unsafe {
+        let fresh: *mut u64 = std_alloc::calloc(slot_count, sizeof(u64)) as *mut u64;
+        if fresh == null {
+            return false;
+        }
+        let old: *mut u64 = (*m).slots;
+        (*m).slots = fresh;
+        (*m).slot_count = slot_count;
+        let mut i: usize = 0;
+        while i < (*m).len {
+            let entry: *mut Entry = (*m).entries + i;
+            let h: u64 = hash_key((*entry).key);
+            let mut idx: usize = slot_index(h, slot_count);
+            while *(fresh + idx) != 0 {
+                idx = (idx + 1) & (slot_count - 1);
+            }
+            *(fresh + idx) = (i as u64) + 1;
+            i += 1;
+        }
+        if old != null {
+            std_alloc::free(old as *mut u8);
+        }
+        return true;
+    }
+}
+
+/// Entry index for `key`, or `NOT_FOUND`.
+fn find_entry(m: *mut Map, key: str, h: u64) -> usize {
+    unsafe {
+        if (*m).slot_count == 0 {
+            return NOT_FOUND;
+        }
+        let mask: usize = (*m).slot_count - 1;
+        let mut idx: usize = slot_index(h, (*m).slot_count);
+        loop {
+            let stored: u64 = *((*m).slots + idx);
+            if stored == 0 {
+                return NOT_FOUND;
+            }
+            let entry: usize = (stored - 1) as usize;
+            if std_str::str_eq((*((*m).entries + entry)).key, key) {
+                return entry;
+            }
+            idx = (idx + 1) & mask;
+        }
+    }
+}
+
+/// Insert or replace `key`. A replacement keeps the original position and key
+/// bytes; a new key is appended to the insertion order.
+pub fn map_put(m: *mut Map, key: str, value: u64) -> bool {
+    unsafe {
+        if (*m).slot_count == 0 {
+            if !rehash(m, INITIAL_SLOTS) {
+                return false;
+            }
+        } else if ((*m).len + 1) * LOAD_DEN >= (*m).slot_count * LOAD_NUM {
+            if !rehash(m, (*m).slot_count * 2) {
+                return false;
+            }
+        }
+        let h: u64 = hash_key(key);
+        let existing: usize = find_entry(m, key, h);
+        if existing != NOT_FOUND {
+            (*((*m).entries + existing)).value = value;
+            return true;
+        }
+        if (*m).len == (*m).cap {
+            let mut cap: usize = (*m).cap * 2;
+            if cap == 0 {
+                cap = INITIAL_ENTRIES;
+            }
+            let grown: *mut u8 =
+                std_alloc::realloc((*m).entries as *mut u8, cap * sizeof(Entry));
+            if grown == null {
+                return false;
+            }
+            (*m).entries = grown as *mut Entry;
+            (*m).cap = cap;
+        }
+        let slot: *mut Entry = (*m).entries + (*m).len;
+        (*slot).key = key;
+        (*slot).value = value;
+        (*m).len += 1;
+        let mask: usize = (*m).slot_count - 1;
+        let mut idx: usize = slot_index(h, (*m).slot_count);
+        while *((*m).slots + idx) != 0 {
+            idx = (idx + 1) & mask;
+        }
+        // Entry index + 1; the appended entry sits at the old `len`.
+        *((*m).slots + idx) = (*m).len as u64;
+        return true;
+    }
+}
+
+/// Look up `key` and write the found flag. Returns the stored value, or `0`
+/// when absent (always check `*found`). `found` may be `null`.
+pub fn map_get(m: *mut Map, key: str, found: *mut bool) -> u64 {
+    unsafe {
+        let idx: usize = find_entry(m, key, hash_key(key));
+        if idx == NOT_FOUND {
+            if found != null {
+                *found = false;
+            }
+            return 0;
+        }
+        if found != null {
+            *found = true;
+        }
+        return (*((*m).entries + idx)).value;
+    }
+}
+
+pub fn map_has(m: *mut Map, key: str) -> bool {
+    unsafe {
+        return find_entry(m, key, hash_key(key)) != NOT_FOUND;
+    }
+}
+
+pub fn map_len(m: *mut Map) -> usize {
+    unsafe {
+        return (*m).len;
+    }
+}
+
+/// Key at insertion position `i`; empty `str` when out of range.
+pub fn map_key_at(m: *mut Map, i: usize) -> str {
+    unsafe {
+        if i >= (*m).len {
+            return "";
+        }
+        return (*((*m).entries + i)).key;
+    }
+}
+
+/// Value at insertion position `i`; `0` when out of range.
+pub fn map_value_at(m: *mut Map, i: usize) -> u64 {
+    unsafe {
+        if i >= (*m).len {
+            return 0;
+        }
+        return (*((*m).entries + i)).value;
+    }
+}
+
+/// Insertion-order set built on the same table (values are unused).
+pub struct Set {
+    map: Map,
+}
+
+pub fn set_new() -> Set {
+    return Set { map: map_new() };
+}
+
+pub fn set_free(s: *mut Set) {
+    unsafe {
+        map_free(&mut (*s).map);
+    }
+}
+
+pub fn set_insert(s: *mut Set, key: str) -> bool {
+    unsafe {
+        return map_put(&mut (*s).map, key, 0);
+    }
+}
+
+pub fn set_has(s: *mut Set, key: str) -> bool {
+    unsafe {
+        return map_has(&mut (*s).map, key);
+    }
+}
+
+pub fn set_len(s: *mut Set) -> usize {
+    unsafe {
+        return (*s).map.len;
+    }
+}
+
+pub fn set_key_at(s: *mut Set, i: usize) -> str {
+    unsafe {
+        return map_key_at(&mut (*s).map, i);
+    }
+}

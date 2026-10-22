@@ -38,6 +38,21 @@ pub fn close(fd: i32) -> i32 {
     }
 }
 
+/// Create a pipe; `fds[0]` is the read end, `fds[1]` the write end.
+/// Returns 0 or -1.
+pub fn pipe(fds: *mut i32) -> i32 {
+    unsafe {
+        return syscall(22, fds as usize, 0, 0, 0, 0, 0) as i32;
+    }
+}
+
+/// Duplicate `old` onto `new` (closing `new` first). Returns `new` or -1.
+pub fn dup2(old: i32, new: i32) -> i32 {
+    unsafe {
+        return syscall(33, old as usize, new as usize, 0, 0, 0, 0) as i32;
+    }
+}
+
 pub fn seek(fd: i32, offset: i64, whence: i32) -> i64 {
     unsafe {
         return syscall(8, fd as usize, offset as usize, whence as usize, 0, 0, 0) as i64;
@@ -78,6 +93,25 @@ pub fn write_all(fd: i32, data: *u8, n: usize) -> i32 {
         }
     }
     return 0;
+}
+
+/// Read until `n` bytes or end of file. Returns the byte count (0..=n) or -1
+/// on error. Useful for draining a pipe after the writer closes.
+pub fn read_all(fd: i32, data: *mut u8, n: usize) -> isize {
+    let mut off: usize = 0;
+    unsafe {
+        while off < n {
+            let r: isize = read(fd, data + off, n - off);
+            if r < 0 {
+                return -1;
+            }
+            if r == 0 {
+                break;
+            }
+            off += r as usize;
+        }
+    }
+    return off as isize;
 }
 
 pub fn puts(s: str) -> i32 {

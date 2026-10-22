@@ -1,4 +1,11 @@
 //! Files, `stat`, and directory iteration via Linux syscalls.
+//!
+//! Two file-reading paths exist and they differ on failure:
+//! - `read_file(path, buf, cap) -> isize` returns the byte count, `0` for an
+//!   empty file, and `-1` when the file cannot be opened or read. Use it in the
+//!   driver when a failure must be distinguished from an empty file.
+//! - the `read_file(path) -> vec<u8>` builtin returns an empty vector on
+//!   failure and cannot distinguish the two cases.
 
 module std_fs;
 mod std_alloc;
