@@ -1,0 +1,210 @@
+//! Type-checked formatting into a caller-provided buffer. There is no format
+//! string: every method takes a typed value, so mismatches are compile errors
+//! and no variadic runtime is involved.
+
+module std_fmt;
+
+pub struct Fmt {
+    buf: *mut u8,
+    len: usize,
+    cap: usize,
+    full: bool,
+}
+
+pub fn new(buf: *mut u8, cap: usize) -> Fmt {
+    return Fmt { buf: buf, len: 0, cap: cap, full: false };
+}
+
+pub fn push_byte(f: *mut Fmt, b: u8) -> bool {
+    unsafe {
+        if (*f).len >= (*f).cap {
+            (*f).full = true;
+            return false;
+        }
+        let p: *mut u8 = (*f).buf + (*f).len;
+        *p = b;
+        (*f).len += 1;
+    }
+    return true;
+}
+
+pub fn push_char(f: *mut Fmt, c: char) -> bool {
+    return push_byte(f, c as u8);
+}
+
+pub fn push_str(f: *mut Fmt, s: str) -> bool {
+    let p: *u8 = data_ptr(s);
+    let n: usize = len(s);
+    let mut i: usize = 0;
+    while i < n {
+        unsafe {
+            if !push_byte(f, *(p + i)) {
+                return false;
+            }
+        }
+        i += 1;
+    }
+    return true;
+}
+
+pub fn push_cstr(f: *mut Fmt, s: cstr) -> bool {
+    unsafe {
+        let p: *u8 = s as *u8;
+        let mut i: usize = 0;
+        while *(p + i) != 0 {
+            if !push_byte(f, *(p + i)) {
+                return false;
+            }
+            i += 1;
+        }
+    }
+    return true;
+}
+
+fn digit(d: usize) -> u8 {
+    if d < 10 {
+        return (d as u8) + 48;
+    }
+    return (d as u8) + 87;
+}
+
+pub fn push_u64_base(f: *mut Fmt, value: u64, base: u32) -> bool {
+    let b: u64 = base as u64;
+    if b < 2 {
+        return push_str(f, "0");
+    }
+    if value == 0 {
+        return push_byte(f, 48);
+    }
+    let mut buf: [u8; 64] = [0; 64];
+    let mut pos: usize = 64;
+    let mut v: u64 = value;
+    while v != 0 {
+        let d: usize = (v % b) as usize;
+        pos -= 1;
+        buf[pos] = digit(d);
+        v = v / b;
+    }
+    let mut i: usize = pos;
+    while i < 64 {
+        if !push_byte(f, buf[i]) {
+            return false;
+        }
+        i += 1;
+    }
+    return true;
+}
+
+pub fn push_u64(f: *mut Fmt, value: u64) -> bool {
+    return push_u64_base(f, value, 10);
+}
+
+pub fn push_i64(f: *mut Fmt, value: i64) -> bool {
+    if value < 0 {
+        if !push_byte(f, 45) {
+            return false;
+        }
+        return push_u64(f, (0 - value) as u64);
+    }
+    return push_u64(f, value as u64);
+}
+
+pub fn push_hex(f: *mut Fmt, value: u64) -> bool {
+    if !push_str(f, "0x") {
+        return false;
+    }
+    return push_u64_base(f, value, 16);
+}
+
+pub fn push_bin(f: *mut Fmt, value: u64) -> bool {
+    if !push_str(f, "0b") {
+        return false;
+    }
+    return push_u64_base(f, value, 2);
+}
+
+pub fn push_bool(f: *mut Fmt, value: bool) -> bool {
+    if value {
+        return push_str(f, "true");
+    }
+    return push_str(f, "false");
+}
+
+fn push_six(f: *mut Fmt, value: u64) -> bool {
+    let mut div: u64 = 100000;
+    while div > 0 {
+        let d: u8 = ((value / div) % 10) as u8 + 48;
+        if !push_byte(f, d) {
+            return false;
+        }
+        div = div / 10;
+    }
+    return true;
+}
+
+/// Fixed six-decimal formatting with the same rules as the `print` intrinsic.
+pub fn push_f64(f: *mut Fmt, value: f64) -> bool {
+    let mut x: f64 = value;
+    if x < 0.0 {
+        if !push_byte(f, 45) {
+            return false;
+        }
+        x = 0.0 - x;
+    }
+    if x != x {
+        return push_str(f, "nan");
+    }
+    let huge: f64 = 1000000000000000000.0;
+    if x >= huge {
+        return push_str(f, "inf");
+    }
+    let mut int_part: u64 = x as u64;
+    let frac: f64 = (x - (int_part as f64)) * 1000000.0 + 0.5;
+    let mut frac_part: u64 = frac as u64;
+    if frac_part >= 1000000 {
+        frac_part = 0;
+        int_part += 1;
+    }
+    if !push_u64(f, int_part) {
+        return false;
+    }
+    if !push_byte(f, 46) {
+        return false;
+    }
+    return push_six(f, frac_part);
+}
+
+pub fn bytes(f: *mut Fmt) -> usize {
+    unsafe {
+        return (*f).len;
+    }
+}
+
+pub fn failed(f: *mut Fmt) -> bool {
+    unsafe {
+        return (*f).full;
+    }
+}
+
+pub fn data(f: *mut Fmt) -> *mut u8 {
+    unsafe {
+        return (*f).buf;
+    }
+}
+
+/// NUL-terminate the buffer when there is room and return it as a C string.
+pub fn finish_cstr(f: *mut Fmt) -> cstr {
+    unsafe {
+        if (*f).len < (*f).cap {
+            *((*f).buf + (*f).len) = 0;
+            return (*f).buf as cstr;
+        }
+    }
+    return null;
+}
+
+pub fn finish(f: *mut Fmt) -> str {
+    unsafe {
+        return str_from_raw((*f).buf, (*f).len);
+    }
+}

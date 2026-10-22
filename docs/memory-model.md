@@ -298,3 +298,96 @@ a `usize` constant within bounds, `first + 1` is inside the array, the write
 target is `*mut u8`, and `buffer[1]` is within bounds. What is not checked:
 that `second` is still valid at the write (it is, by construction) or that no
 other pointer aliases it.
+
+---
+
+## 8. Allocators (v0.3)
+
+The language still allocates nothing implicitly. Every byte is a stack slot or
+comes from an explicit call.
+
+### 8.1 Raw allocation
+
+`alloc(bytes) -> *mut u8` and `free(ptr, bytes)` remain the primitives: a direct
+`mmap`/`munmap` syscall pair, both gated by `unsafe`. They require the exact byte
+count on free, which is why normal code should use the allocator API below.
+
+### 8.2 C-compatible heap (`std_alloc`)
+
+`malloc`/`calloc`/`realloc`/`free` have C semantics:
+
+- `malloc(n)` returns 16-byte-aligned memory or `null`. The allocator stores a
+  32-byte header immediately before the user pointer: mapping base, mapping
+  length, payload size, and a magic word. The header is outside the user's
+  region, so `free` needs no size argument.
+- `free(null)` is a no-op. `free` of a pointer whose header magic does not match
+  is ignored (and aborts under `--sanitize`).
+- `realloc(p, n)` grows in place when the new size fits the existing payload,
+  otherwise allocates, copies the old payload, and frees the old block.
+- `calloc(n, size)` multiplies (wrapping, as in C) and zeroes.
+- `aligned_alloc(size, align)` supports power-of-two alignments, including
+  alignments above 16, by over-allocating and placing the header before the
+  aligned pointer.
+
+The heap is not thread-safe by itself. `malloc`/`free` may be used from multiple
+threads only when the application serializes them; the language does not add a
+hidden global lock.
+
+### 8.3 Allocator interface
+
+```corex
+struct Allocator {
+    context: *mut u8,
+    alloc: fn(*mut u8, usize, usize) -> *mut u8,   // ctx, size, align
+    realloc: fn(*mut u8, *mut u8, usize, usize) -> *mut u8, // ctx, ptr, size, align
+    free: fn(*mut u8, *mut u8),                    // ctx, ptr
+}
+```
+
+`c_allocator()` returns the malloc-backed implementation; `arena_allocator` binds
+an arena. Passing an `Allocator` by value is a pointer + three function
+pointers; accepting it by pointer avoids a copy.
+
+### 8.4 Arena
+
+`Arena` grows by allocating chunks with `malloc`. A chunk starts with
+`[previous_chunk, capacity]`; allocations are bump-pointer and aligned on
+request. `arena_reset` frees every chunk at once; individual `arena_alloc`
+blocks cannot be freed separately, and `arena_realloc` returns `null` because it
+cannot grow in place. This is the intended shape for compiler passes: allocate
+freely, reset between phases.
+
+### 8.5 Memory sanitizers
+
+- Bounds: array/slice indexing and sub-slicing remain checked; violations print
+  `corex: index out of bounds` / `corex: slice range out of bounds` and exit 101.
+- Division: divide-by-zero and `MIN / -1` abort (already in v0.2).
+- `--sanitize` adds checked signed `i8`/`i16`/`i32`/`i64` add/sub/mul through
+  LLVM overflow intrinsics. On overflow the program prints
+  `corex: integer overflow` to stderr and exits 101. Unsigned arithmetic keeps
+  its defined wrapping semantics; shifts stay masked.
+- Under `--sanitize`, `std_alloc::free` poisons the payload with `0xDE`, keeps
+  the mapping (a deliberate leak) so a second `free` can be diagnosed, and aborts
+  with `free of an invalid or already freed pointer`. Without the flag, double
+  frees are ignored because the memory has already been unmapped.
+- There is no compiler-instrumented use-after-free detector for arbitrary raw
+  pointers: detecting every bad access would require shadow memory and a runtime,
+  which contradicts the freestanding design. The allocator checks above are the
+  practical subset.
+
+## 9. Concurrency and TLS
+
+- Atomics map to LLVM atomic instructions. The default is sequentially
+  consistent; `_relaxed` variants use `monotonic`. `atomic_fence()` is a seq_cst
+  fence. Atomic operations require `unsafe` because they take raw pointers.
+- `volatile` on a global marks every load/store of that global `volatile`.
+  `volatile_load`/`volatile_store` do the same for arbitrary pointers.
+- Threads are created with `clone(2)` and a per-thread stack; they share the
+  address space and file table. The runtime provides no scheduler, no join, and
+  no automatic stack cleanup; `std_thread::free_stack` exists for a thread that
+  has already exited.
+- TLS is explicit: `std_tls` keeps a 64-slot table keyed by `gettid`, protected
+  by a spin lock. `tls_alloc` allocates the block on first use; `tls_release`
+  frees it. There is no hidden per-thread allocation and no destructor.
+- Inline assembly (`asm`) is the escape hatch for instructions the compiler does
+  not model; clobbers and memory barriers are specified in the constraint string.

@@ -732,13 +732,285 @@ program was killed).
 
 ---
 
-## 12. Not in v0.2
+## 12. C-class extensions (v0.3)
 
-Explicitly out of scope, so syntax is not reserved for them: unions, tuples,
-generic parameters beyond the built-in `vec<T>`, traits, closures, function
-pointers, namespaced modules/visibility, `extern`/FFI, increment/decrement,
-labeled break, `match`, macros, attributes, async, threads, `?`, debug info, and
-cross-compilation targets other than Linux x86-64. Imports concatenate files into
-one flat namespace. Strings and slices have no concatenation, formatting, or
-comparison operators; use `len`, indexing, and ranges. Error handling is
-`panic`/`assert` plus ordinary error values, not exceptions or `Result`.
+This section is normative for the C-class features added in v0.3. Everything in
+Parts 1–11 remains in force unless stated otherwise.
+
+### 12.1 Function pointers
+
+`fn(T1, T2) -> R` is a function type; it has pointer size and alignment. A
+function name used as a value, or `&name`, produces a function pointer. Calling
+an expression of function type performs an indirect call:
+
+```corex
+fn add(a: i32, b: i32) -> i32 { return a + b; }
+
+fn apply(f: fn(i32, i32) -> i32, a: i32, b: i32) -> i32 { return f(a, b); }
+
+fn main() -> i32 {
+    let f: fn(i32, i32) -> i32 = &add;   // `add` works too
+    let table: [fn(i32, i32) -> i32; 1] = [f];
+    print(apply(&add, 20, 22));
+    print(table[0](1, 2));
+    let none: fn(i32, i32) -> i32 = null;
+    if none == null { return 0; }
+    return 1;
+}
+```
+
+Function pointers compare with `==`/`!=`, convert to/from integers and other
+pointers with `as` inside `unsafe`, and may be `null`. Function-pointer calls
+use the CoreX internal convention for aggregates (see 12.5); scalar parameters
+and results match System V AMD64.
+
+### 12.2 Control flow
+
+- `switch value { case CONST { ... } ... default { ... } }` evaluates `value`
+  once, branches to the matching arm, and **falls through** into later arms
+  unless `break` is executed. `case` values must be integer constant
+  expressions (including enum variants) and are unique; one `default` is
+  allowed. `break` inside a switch exits the switch; `continue` targets the
+  enclosing loop.
+- `for (init; cond; step) { ... }` — any clause may be empty. `init` and `step`
+  are statements (including `let` and assignments), `cond` is a `bool`
+  expression.
+- `do { ... } while cond;` runs the body at least once.
+- `name: statement` defines a function-local label; `goto name;` branches to it.
+  Labels are function-local and may be forward-referenced. A block interrupted
+  by `goto`, `return`, `break`, or `continue` does not fall through; subsequent
+  statements in that block are unreachable until the next label.
+
+### 12.3 Aggregates: unions, bitfields, flexible arrays
+
+```corex
+union Value { i: i32, f: f32, b: u8 }          // field offsets are all 0
+struct Flags { a: u8: 3, b: u8: 5, valid: u8: 1 } // C bitfields
+struct Blob { len: u64, data: [u8; 0] }        // flexible array member
+```
+
+- A `union` has every field at offset 0; size is the largest member, rounded to
+  the union's alignment. A union literal initializes exactly one field.
+- A bitfield is written `name: IntegerType: WIDTH`, with `1 ≤ WIDTH ≤ bits`.
+  Fields are packed least-significant-bit first into storage units of the
+  declared integer type; a field that does not fit starts a new unit. Reads
+  shift and mask; writes are read-modify-write. `offsetof` rejects bitfields.
+- A zero-length array is allowed only as the last field of a struct; it occupies
+  no bytes, contributes its element alignment, and models a trailing array.
+  `sizeof` excludes it.
+
+### 12.4 Layout and introspection
+
+- `typedef Name = Type;` introduces an alias. Aliases participate in name
+  resolution exactly like the aliased type; recursive aliases are rejected.
+- `packed struct` / `packed union` removes inter-field padding; alignment is 1
+  unless raised with `align(N)`. `align(N)` before `struct`/`union` raises the
+  type's alignment and rounds its size up to `N`; `N` must be a power of two.
+- `repr(C)` is accepted and is the default layout policy; it exists so the
+  intent is explicit in headers and interfaces.
+- `sizeof(T)`, `alignof(T)`, and `offsetof(T, field)` are compile-time
+  `usize` values. `sizeof`/`alignof` take a type, not a value.
+- Natural (non-packed) struct layout is the System V AMD64 C layout: each field
+  at the next offset aligned to its alignment, struct alignment = maximum field
+  alignment, size rounded up to that alignment. Unions follow C.
+
+### 12.5 C ABI and FFI
+
+- `extern "C" fn name(params) -> T;` declares an external C function.
+  `extern "C" fn name(params) -> T { ... }` defines one with its exact C symbol
+  (no mangling), so C can call it.
+- `extern "C" fn name(fixed: T, ...)` declares a variadic C function. Calls may
+  pass extra integer/pointer arguments. C default argument promotions apply:
+  integers narrower than 32 bits promote to `i32` (sign/zero extended by
+  signedness), `bool`/`char` to `i32`, and `f32` to `f64`.
+- C scalar and aggregate values use System V AMD64: natural structs are built
+  as LLVM literal structs and are passed/returned by value; LLVM applies the
+  classification rules. CoreX-internal functions use a pointer/sret convention
+  for aggregates. `extern "corex" fn` declares the internal convention with an
+  exact symbol (used by generated module interfaces).
+- `extern static name: T;` declares a global defined elsewhere.
+- `cstr` is a NUL-terminated C string pointer, distinct from `str` (a
+  pointer/length value). `c"text"` creates a NUL-terminated constant. Use:
+  - `cstr_len(c) -> usize`
+  - `cstr_to_str(c) -> str` (runs `strlen`)
+  - `str_to_cstr(buf, cap, s) -> cstr` (writes NUL; aborts if `cap <= len(s)`;
+    requires `unsafe`)
+  - `c as str`, `c as *u8`; `str` cannot implicitly become `cstr` because that
+    would require hidden allocation.
+- `main` may be `fn main() -> i32` or
+  `fn main(argc: i32, argv: **u8, envp: **u8) -> i32`. The second form is
+  entered through a naked assembler `_start` that forwards the kernel stack;
+  `argv[argc]` is null and `envp` follows the argv null terminator.
+- Extra objects and libraries: `--link obj.o|lib.a`, `-L dir`, `-l name`,
+  `--hosted`, `--emit shared|staticlib|obj`.
+
+### 12.6 Modules and separate compilation
+
+- `module name;` at the top of a file names its module. Items default to private
+  to the module; `pub` exports them.
+- `mod name;` declares a file-module dependency. The driver searches the
+  importing file's directory, then each `-I` directory, for `name.cx` or
+  `name/mod.cx`. The file must declare `module name;`.
+- Cross-module references use `::`: `math::add`, `math::Point`,
+  `math::Kind::Variant`, `math::CONST`.
+- Symbols are mangled deterministically as `module$item`; `extern "C"` items
+  keep their exact symbol. Entry points `main` and `_start` are never mangled.
+- Each unit is compiled independently to an object. For every unit the compiler
+  emits an interface (`module.cxi`, printable with `COREX_DUMP_INTERFACES=1`)
+  containing public structs/unions/enums/typedefs/consts, `extern static`
+  declarations, and `extern "corex" fn` declarations. Dependents are compiled
+  against the concatenation of their transitive interfaces.
+- A public function may not expose a private local type (`E0233`).
+- `corex.toml` manifest (subset of TOML):
+
+```toml
+[package]
+name = "app"
+
+[build]
+kind = "exe"          # exe | shared | staticlib
+sources = ["src/main.cx"]
+include_paths = ["src"]
+libs = ["m"]
+lib_paths = ["/usr/lib"]
+opt = 2
+features = ["fast"]
+debug = true
+sanitize = false
+hosted = false
+output = "build/app"
+```
+
+`corex build <directory>` builds the manifest. `kind = "staticlib"` produces
+`lib<name>.a` with `llvm-ar rcs`; `kind = "shared"` links with `cc -shared`.
+- Conditional compilation: `#[cfg(...)]` before an item. Conditions are
+  `key = "value"`, `not(...)`, `all(...)`, `any(...)`. Keys are supplied with
+  `--cfg name=value` and manifest `features` (as `feature=value`); the driver
+  always defines `target_os=linux`, `target_arch=x86_64`, and
+  `sanitize=true` under `--sanitize`.
+
+### 12.7 Allocators and the standard library
+
+The language never allocates implicitly. `alloc(bytes)` and
+`free(ptr, bytes)` remain the raw mmap/munmap primitives (both require
+`unsafe`). The standard library (`lib/corex`) adds:
+
+| Module | Contents |
+|---|---|
+| `std_alloc` | `malloc`, `calloc`, `realloc`, `free` (C semantics, 16-byte alignment, size headers), `aligned_alloc`, `Allocator` (context + function pointers), `c_allocator`, `Arena` (`arena_new`, `arena_alloc`, `arena_reset`, `arena_free`) |
+| `std_mem` | `memcpy`, `memmove`, `memset`, `memzero`, `memcmp`, `memchr` |
+| `std_str` | `strlen`, `strcmp`, `strncmp`, `strcpy`, `strncpy`, `strcat`, `strchr`, `str_eq`, `str_find`, `str_copy_cstr` |
+| `std_io` | fd constants and flags, `open`, `read`, `write`, `seek`, `close`, `write_all`, `puts`, `eputs`, `getbyte`, `putbyte` |
+| `std_fs` | `Stat`, `stat_path`, `lstat_path`, `file_size`, `exists`, `is_dir`, `is_file`, `mkdir`, `rmdir`, `unlink`, `rename`, `getcwd`, `chdir`, `read_file`, `write_file`, `Dir`/`dir_open`/`dir_next`/`dir_close` |
+| `std_process` | `exit`, `getpid`, `fork`, `exec`, `wait`, `spawn`, `spawn3`, `run`, `env_count` |
+| `std_time` | `Timespec`, `clock_gettime`, `now_ns`, `monotonic_ns`, `sleep_ns`, `sleep_ms`, `unix_seconds` |
+| `std_math` | integer abs/min/max, `clz64`, `ctz64`, `popcount64`, `is_pow2`, `next_pow2`, `fabs`, `sqrt`, `trunc`, `floor`, `ceil`, `round`, `powi` |
+| `std_fmt` | typed `Fmt` builder: `push_str`, `push_cstr`, `push_i64`, `push_u64`, `push_hex`, `push_bin`, `push_bool`, `push_f64`, `finish`, `finish_cstr` |
+| `std_sync` | `Mutex`, `mutex_lock`/`try_lock`/`unlock`, `Condvar`, `condvar_wait`/`signal`/`broadcast`, `SpinLock` (futex syscalls 202) |
+| `std_thread` | `Thread`, `spawn(entry, arg, stack_size)`, `gettid`, `yield_now`, `thread_exit` |
+| `std_tls` | explicit thread-local blocks: `tls_alloc`, `tls_get`, `tls_release`, `tls_thread_id` |
+| `std_dl` | hosted `dlopen`/`dlsym`/`dlclose`/`dlerror` wrappers (`open`, `sym`, `close`, `error`) |
+
+The library is freestanding except `std_dl`, which requires `--hosted`.
+`std_alloc` on `--sanitize` poisons freed payloads, keeps mappings so a second
+`free` is diagnosed, and aborts (exit 101) via direct syscalls.
+
+### 12.8 Volatile, atomics, threads, TLS
+
+- `volatile` qualifies a global declaration: `static mut volatile FLAG: u32 = 0;`.
+  Every load and store of that global in generated IR is marked `volatile`.
+  For arbitrary pointers use `volatile_load(ptr)` / `volatile_store(ptr, value)`
+  (require `unsafe`).
+- Atomic builtins (sequential consistency unless suffixed `_relaxed`):
+  `atomic_load`, `atomic_load_relaxed`, `atomic_store`,
+  `atomic_store_relaxed`, `atomic_fetch_add/sub/and/or/xor`, `atomic_xchg`,
+  `atomic_cas(ptr, expected, new) -> bool`, `atomic_fence()`. The pointer's
+  pointee must be an integer or pointer type; fetch operations return the
+  previous value.
+- `std_thread::spawn` uses `clone(2)` with a small inline-assembly trampoline.
+  Threads share the address space and file table. Threads exit with `exit(2)`
+  (syscall 60), which terminates only the calling thread. There is no `join`;
+  synchronize with `std_sync` or sleep.
+- TLS is explicit (`std_tls`): the runtime keeps a fixed 64-slot table keyed by
+  `gettid`; the first allocation on a thread allocates a block. There is no
+  language-level `thread_local` and no hidden destructor.
+
+### 12.9 Inline assembly
+
+`asm(template)` and `asm(template, constraints, operands...)` (require `unsafe`):
+
+- `template` and `constraints` must be string literals. `constraints` is passed
+  verbatim to LLVM (`"=r,r,~{memory}"`); if any output constraint starts with
+  `=`, the expression has type `usize`, otherwise `void`.
+- Operands are integers or pointers, numbered `$0`, `$1`, … in the template.
+  A literal `$` in assembly must be written `$$` (LLVM syntax).
+- `asm("", "~{memory}")` is a compiler barrier; `asm("pause", "")` is a CPU
+  pause.
+
+### 12.10 Declarative macros
+
+`macro name(p1, p2) = expression;` defines a compile-time expression macro. A
+call `name(args)` is replaced by the body with parameter identifiers substituted
+by the argument expression trees; node ids are renumbered, so expansion cannot
+alias semantic state. Expansion happens during parsing, before type checking;
+macro arguments are type-checked after substitution. Macros are non-hygienic
+(like C): a body identifier that is not a parameter is resolved at the call site,
+parameters are duplicated if used twice, and recursion deeper than 64 is an
+error. Macros are unit-local and are not exported by module interfaces.
+
+### 12.11 Sanitizer/debug modes
+
+- `-g` / `--debug` emits DWARF 5 line tables, `DW_TAG_subprogram` entries, and
+  `DILocalVariable`/`llvm.dbg.declare` records for every named local.
+  `readelf --debug-dump=decodedline` and `--debug-dump=info` show them.
+- `--sanitize` enables checked signed `i8/i16/i32/i64` add/sub/mul
+  (`llvm.*.with.overflow`, abort message `corex: integer overflow`), keeps
+  existing bounds/division checks, and activates allocator double-free
+  detection and payload poisoning via `#[cfg(sanitize = "true")]`.
+  Unsigned arithmetic keeps its defined wrapping semantics.
+
+### 12.12 Tooling
+
+- `corex fmt <file> [-w|--check]` — indentation/spacing formatter that preserves
+  line structure, comments, and literals; idempotent.
+- `corex lint <file> [--deny-warnings]` — warnings `W0001` unused variable,
+  `W0002` unreachable statement, `W0003` unused private item, `W0004` constant
+  condition.
+- `corex doc <file> [-o out.md]` — Markdown from `///` doc comments.
+- `corex test <file>` — builds `fn test_*() -> bool` functions into a runner;
+  prints `test name ... ok|FAILED`; exits 0 only if all pass.
+- `corex-lsp` — LSP over stdio: diagnostics, completion, definition,
+  references, rename, hover, document formatting.
+- `corex emit-ir --verify` — prints IR and runs `llvm-as` as a verifier.
+- `COREX_DUMP_INTERFACES=1` prints generated module interfaces during a build;
+  `COREX_KEEP_TEMP=1` keeps the build directory; `COREX_DUMP_IR=1` includes the
+  IR in a verifier failure note.
+
+### 12.13 New diagnostics
+
+| Code | Meaning |
+|---|---|
+| `E0233` | public interface exposes a private local type |
+| `E0234` | manifest missing/unreadable/invalid |
+| `E0235` | no tests found, or a `test_*` function does not return `bool` |
+| `W0001` | unused variable |
+| `W0002` | unreachable statement |
+| `W0003` | unused private item |
+| `W0004` | constant condition |
+
+`E0224` additionally covers zero-length arrays outside a struct's last field,
+flexible arrays in unions, and recursive typedefs. `E0209` covers all raw
+pointer/atomic/asm operations outside `unsafe`.
+
+---
+
+## 13. Out of scope (current release)
+
+Still out of scope: tuples, generic parameters beyond `vec<T>`, traits,
+closures, exceptions, `async`, increment/decrement operators, labeled `break`,
+`match`, operator overloading, destructors, a package registry, and targets
+other than Linux x86-64. `str`/slices have no concatenation or comparison
+operators; use `std_str::str_eq`. CoreX `volatile` applies to globals; use the
+pointer builtins elsewhere. There is no language-level `thread_local`, no
+thread join, and inline assembly uses LLVM's constraint syntax rather than a
+CoreX-specific one.

@@ -1,0 +1,57 @@
+//! Clocks and sleeping through Linux syscalls.
+
+module std_time;
+
+pub struct Timespec {
+    sec: i64,
+    nsec: i64,
+}
+
+pub const CLOCK_REALTIME: i32 = 0;
+pub const CLOCK_MONOTONIC: i32 = 1;
+
+pub const NANOS_PER_SEC: i64 = 1000000000;
+
+pub fn clock_gettime(clock: i32) -> Timespec {
+    let mut ts: Timespec = Timespec { sec: 0, nsec: 0 };
+    unsafe {
+        let r: i64 = syscall(228, clock as usize, &mut ts as usize) as i64;
+        if r < 0 {
+            return Timespec { sec: 0, nsec: 0 };
+        }
+    }
+    return ts;
+}
+
+pub fn now_ns() -> i64 {
+    let ts: Timespec = clock_gettime(CLOCK_REALTIME);
+    return ts.sec * NANOS_PER_SEC + ts.nsec;
+}
+
+pub fn monotonic_ns() -> i64 {
+    let ts: Timespec = clock_gettime(CLOCK_MONOTONIC);
+    return ts.sec * NANOS_PER_SEC + ts.nsec;
+}
+
+pub fn sleep_ns(ns: i64) {
+    if ns <= 0 {
+        return;
+    }
+    let req: Timespec = Timespec {
+        sec: ns / NANOS_PER_SEC,
+        nsec: ns % NANOS_PER_SEC,
+    };
+    unsafe {
+        let _ = syscall(35, &req as usize, 0);
+    }
+}
+
+pub fn sleep_ms(ms: i64) {
+    sleep_ns(ms * 1000000);
+}
+
+pub fn unix_seconds() -> i64 {
+    unsafe {
+        return syscall(201) as i64;
+    }
+}

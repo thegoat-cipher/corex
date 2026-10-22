@@ -823,3 +823,141 @@ libc. The costs are explicit: flat module names, shallow vector copies, unchecke
 vector-capacity overflow, whole-file I/O rather than streaming handles, and
 `panic`-based fatal errors. These limits are documented in the spec, memory
 model, README, and tests.
+
+## ADR-0025 — Modules are file units with generated source interfaces
+
+**Status:** accepted (v0.3).
+
+**Context.** V0.2 expanded `import "path"` into one flat translation unit. The
+roadmap requires namespaced modules, visibility, and independent compilation
+without adding a binary metadata format or a Rust dependency.
+
+**Decision.**
+
+1. A file declares `module name;`; `mod name;` declares a dependency. Each unit
+   is parsed and analyzed on its own.
+2. Before analysis, unit-local item names and references are rewritten to
+   `name$item`. Qualified references `mod::item` become `mod$item`. `main`,
+   `_start`, and `extern "C"` symbols are never mangled.
+3. For every unit the compiler generates an interface as CoreX source:
+   public types with full layout, `extern static` globals, and
+   `extern "corex" fn` declarations. Dependents parse the concatenation of
+   their transitive interfaces plus their own source into one AST.
+4. Interfaces are an inspectable artifact (`COREX_DUMP_INTERFACES=1`) and the
+   only cross-unit contract. Private items are absent, so access fails during
+   normal name/type resolution.
+
+**Consequences.** No global symbol table, no binary format, and interfaces can
+be diffed. Costs: interface text is re-parsed per dependent, field visibility is
+type-level only, and public signatures may not expose private local types
+(`E0233`).
+
+## ADR-0026 — Non-plain aggregates use opaque byte layout in LLVM
+
+**Status:** accepted (v0.3).
+
+**Context.** LLVM's literal struct type cannot express overlapping union fields,
+packed bitfields, `align(N)` rounding, or flexible array members. Emitting the
+natural LLVM struct would make `sizeof`/field offsets disagree with the C layout
+the language promises.
+
+**Decision.** A struct/union gets the literal LLVM form `{ fields... }` only when
+its layout is plain C (not a union, not packed, no explicit alignment, no
+bitfields, no flexible array member). Otherwise its LLVM type is `[size x i8]`.
+Field access always uses a byte GEP with the offset computed by semantic
+analysis; loads/stores use the declared field type and explicit alignment.
+C-ABI values still use literal structs when plain so System V classification
+applies; aggregate C ABI for non-plain types is best-effort.
+
+**Consequences.** `sizeof`, `offsetof`, and packed/union behavior are exact, and
+the backend does not need a custom data-layout pass. Costs: less readable IR for
+those types and a documented ABI limitation for passing unions/packed structs by
+value to C.
+
+## ADR-0027 — Two aggregate conventions: CoreX internal and C ABI
+
+**Status:** accepted (v0.3).
+
+**Context.** CoreX functions return aggregates through a hidden `sret` pointer
+and pass them by pointer; this is simple and avoids large copies. C requires
+System V classification, where small aggregates go in registers.
+
+**Decision.** `FnSig` records `c_abi`. `extern "C"` functions use LLVM literal
+struct values for plain aggregates (LLVM applies SysV rules); CoreX functions and
+`extern "corex"` declarations use `ptr`/`sret`. Function-pointer calls use the
+CoreX convention. Variadic calls promote arguments per C rules.
+
+**Consequences.** C interop works for scalars and plain structs in both
+directions (`tests/ffi.rs`). Calling a C function through a CoreX function
+pointer with aggregate parameters is not ABI-compatible; declare and call it
+directly instead.
+
+## ADR-0028 — Sanitizers are opt-in codegen and allocator modes
+
+**Status:** accepted (v0.3).
+
+**Decision.**
+
+- `--sanitize` checks signed `i8/i16/i32/i64` add/sub/mul with LLVM overflow
+  intrinsics and aborts with exit 101. Unsigned arithmetic keeps defined
+  wrapping, because pointer arithmetic and hashing rely on it.
+- The allocator's sanitizer mode poisons payloads, retains mappings, and aborts
+  on a second free.
+- Bounds and division checks are always on; they are language semantics, not
+  optional sanitizers.
+
+**Consequences.** The sanitizer adds branches only where requested and needs no
+shadow memory or runtime. It cannot detect arbitrary use-after-free through raw
+pointers; that limitation is documented rather than papered over.
+
+## ADR-0029 — Macros expand during parsing with AST substitution
+
+**Status:** accepted (v0.3).
+
+**Decision.** `macro name(p) = expr;` is parsed into an AST expression.
+A call substitutes argument expression trees for parameter identifiers, cloning
+each use with fresh node ids. Expansion is depth-limited to 64 and happens before
+semantic analysis.
+
+**Consequences.** No token-level rewriting, no new IR, and no runtime cost.
+Macros are non-hygienic and unit-local; they are not exported through interfaces.
+
+## ADR-0030 — The standard library is ordinary CoreX source
+
+**Status:** accepted (v0.3).
+
+**Decision.** `lib/corex` contains modules written in CoreX: allocator, memory,
+strings, I/O, files, process, time, math, formatting, synchronization, threads,
+TLS, dynamic loading. Only `std_dl` requires `--hosted`. Builtins stay narrow
+(`syscall`, `alloc`/`free`, `print`, C-string helpers, atomics, volatile, asm,
+data pointers).
+
+**Consequences.** The library is auditable, testable with the same toolchain, and
+freestanding by default. Costs: no libc compatibility layer, no hidden global
+allocator lock, and users must opt into each module with `mod`.
+
+## ADR-0031 — Threads and TLS are explicit runtime services
+
+**Status:** accepted (v0.3).
+
+**Decision.** Thread creation uses `clone(2)` with a caller-supplied stack and an
+inline-assembly trampoline. Synchronization is built on futex syscalls plus
+atomics. TLS is a fixed table keyed by `gettid` with an explicit alloc/release
+API. There is no join and no destructor.
+
+**Consequences.** No hidden scheduler, runtime initialization, or per-thread GC
+roots. Programs must manage stacks and lifetimes explicitly; the limitations are
+documented in the spec and tasks tracker.
+
+## ADR-0032 — Debug info is opt-in
+
+**Status:** accepted (v0.3).
+
+**Decision.** `-g`/`--debug` makes codegen emit DWARF 5 compile-unit flags, a
+`DIFile`, one `DISubprogram` per function, a `DILocation` per instruction,
+`DILocalVariable` plus `llvm.dbg.declare` per named local, and a line table.
+Release builds omit it.
+
+**Consequences.** Normal objects stay small and fast to link; debugging builds
+carry source paths (as with any compiler). `llvm-as` verifies the metadata on
+every build, so malformed debug info fails loudly.

@@ -14,20 +14,32 @@ const USAGE: &str = "\
 CoreX compiler (corex 0.1.0)
 
 Usage:
-  corex build   <file.cx | -> [-o <output>] [--opt <0-3>]
-  corex run     <file.cx | -> [--opt <0-3>] [-- <program args>...]
+  corex build   <file.cx | -> [-o <output>] [--opt <0-3>] [--link <obj|a>]...
+                [-L <dir>]... [-l <lib>]... [--hosted] [--shared]
+                [--cfg name=value]... [-I <dir>]... [--emit obj|shared|staticlib]
+                [-g] [--sanitize]
+  corex run     <file.cx | -> [--opt <0-3>] [--link ...] [--hosted] [-- <program args>...]
   corex exec    '<source>' [--opt <0-3>] [-- <program args>...]
   corex repl    [--opt <0-3>]
   corex emit-ir <file.cx | -> [--verify]
   corex check   <file.cx | ->
+  corex fmt     <file.cx | -> [-w | --check]
+  corex lint    <file.cx | -> [--deny-warnings]
+  corex doc     <file.cx | -> [-o <out.md>]
+  corex test    <file.cx | -> [--opt <0-3>] [--cfg name=value]... [-I <dir>]...
 
 Commands:
-  build    Compile to a freestanding Linux x86-64 ELF executable.
+  build    Compile to a freestanding Linux x86-64 ELF executable. Pass a
+           directory containing corex.toml to build a project.
   run      Compile, then run; exits with the program's status.
   exec     Run source given directly on the command line (no file).
   repl     Interactive session: type code, finish a block with a blank line.
   emit-ir  Print the generated LLVM 20 IR (--verify assembles it).
   check    Run the frontend only (lex, parse, semantic).
+  fmt      Format whitespace; `-w` writes in place, `--check` fails if unformatted.
+  lint     Report unused variables/items, unreachable code, constant conditions.
+  doc      Generate Markdown documentation from `///` comments.
+  test     Build and run `fn test_name() -> bool` functions.
 
 Reading source:
   A file argument of `-` reads the source from stdin, e.g.
@@ -62,6 +74,10 @@ fn real_main() -> i32 {
         "repl" => cmd_repl(&args[1..]),
         "emit-ir" => cmd_emit_ir(&args[1..]),
         "check" => cmd_check(&args[1..]),
+        "fmt" => cmd_fmt(&args[1..]),
+        "lint" => cmd_lint(&args[1..]),
+        "doc" => cmd_doc(&args[1..]),
+        "test" => cmd_test(&args[1..]),
         other => {
             eprintln!("error: unknown command `{other}`\n");
             eprint!("{USAGE}");
@@ -76,6 +92,12 @@ struct CommonArgs {
     opt: u8,
     verify: bool,
     program_args: Vec<String>,
+    link: driver::LinkInputs,
+    cfg: Vec<String>,
+    include_paths: Vec<PathBuf>,
+    emit: Option<String>,
+    debug_info: bool,
+    sanitize: bool,
 }
 
 fn parse_opt(value: Option<&String>) -> Result<u8, String> {
@@ -94,6 +116,12 @@ fn parse_common(args: &[String], allow_output: bool, allow_opt: bool) -> Result<
         opt: 2,
         verify: false,
         program_args: Vec::new(),
+        link: driver::LinkInputs::default(),
+        cfg: Vec::new(),
+        include_paths: Vec::new(),
+        emit: None,
+        debug_info: false,
+        sanitize: false,
     };
     let mut i = 0;
     while i < args.len() {
@@ -110,6 +138,52 @@ fn parse_common(args: &[String], allow_output: bool, allow_opt: bool) -> Result<
             "-o" if allow_output => {
                 let v = args.get(i + 1).ok_or("`-o` requires a path")?;
                 out.output = Some(PathBuf::from(v));
+                i += 2;
+            }
+            "--link" => {
+                let v = args.get(i + 1).ok_or("`--link` requires a path")?;
+                out.link.objects.push(PathBuf::from(v));
+                i += 2;
+            }
+            "-L" => {
+                let v = args.get(i + 1).ok_or("`-L` requires a directory")?;
+                out.link.lib_paths.push(PathBuf::from(v));
+                i += 2;
+            }
+            "-l" => {
+                let v = args.get(i + 1).ok_or("`-l` requires a library name")?;
+                out.link.libs.push(v.clone());
+                i += 2;
+            }
+            "--hosted" => {
+                out.link.hosted = true;
+                i += 1;
+            }
+            "--shared" => {
+                out.link.shared = true;
+                i += 1;
+            }
+            "--cfg" => {
+                let v = args.get(i + 1).ok_or("`--cfg` requires `name=value`")?;
+                out.cfg.push(v.clone());
+                i += 2;
+            }
+            "-I" | "--include" => {
+                let v = args.get(i + 1).ok_or("`-I` requires a directory")?;
+                out.include_paths.push(PathBuf::from(v));
+                i += 2;
+            }
+            "-g" | "--debug" => {
+                out.debug_info = true;
+                i += 1;
+            }
+            "--sanitize" => {
+                out.sanitize = true;
+                i += 1;
+            }
+            "--emit" => {
+                let v = args.get(i + 1).ok_or("`--emit` requires obj, shared, or staticlib")?;
+                out.emit = Some(v.clone());
                 i += 2;
             }
             "--" => {
@@ -174,11 +248,22 @@ fn load(file: &Path) -> Result<SourceFile, i32> {
 
 fn report(file: &SourceFile, diags: &[Diagnostic]) {
     eprint!("{}", file.render_all(diags));
-    eprintln!(
-        "\n{} error{} generated",
-        diags.len(),
-        if diags.len() == 1 { "" } else { "s" }
-    );
+    let errors = diags.iter().filter(|d| !d.is_warning()).count();
+    let warnings = diags.len() - errors;
+    if warnings > 0 && errors > 0 {
+        eprintln!("\n{errors} error(s), {warnings} warning(s) generated");
+    } else if warnings > 0 {
+        eprintln!(
+            "\n{warnings} warning{} generated",
+            if warnings == 1 { "" } else { "s" }
+        );
+    } else {
+        eprintln!(
+            "\n{} error{} generated",
+            errors,
+            if errors == 1 { "" } else { "s" }
+        );
+    }
 }
 
 fn exit_code_for(diags: &[Diagnostic]) -> i32 {
@@ -201,7 +286,13 @@ fn default_output(file: &Path) -> PathBuf {
 }
 
 /// Build `file` into a temp directory, run it, and return its exit status.
-fn run_source(file: &SourceFile, opt: u8, program_args: &[String]) -> i32 {
+fn run_source(
+    file: &SourceFile,
+    opt: u8,
+    program_args: &[String],
+    link: &driver::LinkInputs,
+    config: &driver::BuildConfig,
+) -> i32 {
     let work = driver::temp_dir("corex-run");
     if let Err(e) = std::fs::create_dir_all(&work) {
         eprintln!("error: cannot create {}: {e}", work.display());
@@ -209,7 +300,7 @@ fn run_source(file: &SourceFile, opt: u8, program_args: &[String]) -> i32 {
     }
     let exe = work.join("program");
 
-    let artifacts = match driver::build(file, &exe, opt, false) {
+    let artifacts = match driver::build_with_config(file, &exe, opt, false, link, config) {
         Ok(a) => a,
         Err(diags) => {
             report(file, &diags);
@@ -255,6 +346,28 @@ fn cmd_build(args: &[String]) -> i32 {
         }
     };
     let input = parsed.file.unwrap();
+    if input.is_dir() || input.file_name().map(|n| n == "corex.toml").unwrap_or(false) {
+        return match driver::build_manifest(
+            &input,
+            Some(parsed.opt),
+            parsed.output.as_deref(),
+            &parsed.cfg,
+        ) {
+            Ok(path) => {
+                println!("built {} -> {}", input.display(), path.display());
+                0
+            }
+            Err(diags) => {
+                for d in &diags {
+                    eprintln!("error[{}]: {}", d.code, d.message);
+                    if let Some(note) = &d.note {
+                        eprintln!("  = note: {note}");
+                    }
+                }
+                exit_code_for(&diags)
+            }
+        };
+    }
     let file = match load(&input) {
         Ok(f) => f,
         Err(code) => return code,
@@ -262,8 +375,75 @@ fn cmd_build(args: &[String]) -> i32 {
     let output = parsed
         .output
         .unwrap_or_else(|| default_output(&input));
+    let config = driver::BuildConfig {
+        cfg: parsed.cfg.clone(),
+        include_paths: parsed.include_paths.clone(),
+        require_entry: true,
+        test_mode: false,
+        debug_info: parsed.debug_info,
+        sanitize: parsed.sanitize,
+        hosted: parsed.link.hosted,
+    };
 
-    match driver::build(&file, &output, parsed.opt, false) {
+    if let Some(emit) = &parsed.emit {
+        if emit == "obj" {
+            let work = driver::temp_dir("corex-obj");
+            let result = driver::compile_units(std::slice::from_ref(&file), &work, parsed.opt, &config);
+            return match result {
+                Ok((objects, _)) if objects.len() == 1 => {
+                    match std::fs::copy(&objects[0], &output) {
+                        Ok(_) => {
+                            println!("compiled {} -> {}", input.display(), output.display());
+                            let _ = std::fs::remove_dir_all(&work);
+                            0
+                        }
+                        Err(e) => {
+                            eprintln!("error: cannot write {}: {e}", output.display());
+                            2
+                        }
+                    }
+                }
+                Ok(_) => {
+                    eprintln!("error: project has multiple objects; use --emit staticlib");
+                    2
+                }
+                Err(diags) => {
+                    report(&file, &diags);
+                    exit_code_for(&diags)
+                }
+            };
+        }
+        if let Some(kind) = driver::OutputKind::parse(emit) {
+            if kind == driver::OutputKind::Executable {
+                // Fall through to the normal build path.
+            } else {
+                let mut project_config = config.clone();
+                project_config.require_entry = kind == driver::OutputKind::Executable;
+                return match driver::build_project(
+                    std::slice::from_ref(&file),
+                    &output,
+                    parsed.opt,
+                    &parsed.link,
+                    &project_config,
+                    kind,
+                ) {
+                    Ok(art) => {
+                        println!("compiled {} -> {}", input.display(), art.executable.display());
+                        0
+                    }
+                    Err(diags) => {
+                        report(&file, &diags);
+                        exit_code_for(&diags)
+                    }
+                };
+            }
+        } else {
+            eprintln!("error: unknown --emit value `{emit}` (expected obj, shared, or staticlib)");
+            return 2;
+        }
+    }
+
+    match driver::build_with_config(&file, &output, parsed.opt, false, &parsed.link, &config) {
         Ok(art) => {
             println!(
                 "compiled {} -> {}",
@@ -292,7 +472,21 @@ fn cmd_run(args: &[String]) -> i32 {
         Ok(f) => f,
         Err(code) => return code,
     };
-    run_source(&file, parsed.opt, &parsed.program_args)
+    run_source(
+        &file,
+        parsed.opt,
+        &parsed.program_args,
+        &parsed.link,
+        &driver::BuildConfig {
+            cfg: parsed.cfg.clone(),
+            include_paths: parsed.include_paths.clone(),
+            require_entry: true,
+            test_mode: false,
+            debug_info: parsed.debug_info,
+            sanitize: parsed.sanitize,
+            hosted: parsed.link.hosted,
+        },
+    )
 }
 
 fn cmd_exec(args: &[String]) -> i32 {
@@ -342,7 +536,13 @@ fn cmd_exec(args: &[String]) -> i32 {
         SourceFile::new("<exec>", source)
     };
 
-    run_source(&file, opt, &program_args)
+    run_source(
+        &file,
+        opt,
+        &program_args,
+        &driver::LinkInputs::default(),
+        &driver::BuildConfig::default(),
+    )
 }
 
 fn cmd_repl(args: &[String]) -> i32 {
@@ -430,6 +630,213 @@ fn cmd_check(args: &[String]) -> i32 {
             1
         }
     }
+}
+
+fn read_source(path: &Path) -> Result<(String, String), i32> {
+    if is_stdin(path) {
+        let mut text = String::new();
+        if let Err(e) = std::io::stdin().read_to_string(&mut text) {
+            eprintln!("error: cannot read stdin: {e}");
+            return Err(2);
+        }
+        return Ok(("<stdin>".to_string(), text));
+    }
+    match std::fs::read_to_string(path) {
+        Ok(text) => Ok((path.display().to_string(), text)),
+        Err(e) => {
+            eprintln!("error: cannot read {}: {e}", path.display());
+            Err(2)
+        }
+    }
+}
+
+fn cmd_fmt(args: &[String]) -> i32 {
+    let mut file: Option<PathBuf> = None;
+    let mut write = false;
+    let mut check = false;
+    for arg in args {
+        match arg.as_str() {
+            "-w" | "--write" => write = true,
+            "--check" => check = true,
+            other if other.starts_with('-') && other != "-" => {
+                eprintln!("error: unknown option `{other}`");
+                return 2;
+            }
+            path => {
+                if file.is_some() {
+                    eprintln!("error: unexpected extra argument `{path}`");
+                    return 2;
+                }
+                file = Some(PathBuf::from(path));
+            }
+        }
+    }
+    let Some(file) = file else {
+        eprintln!("error: `fmt` needs a file (or `-` for stdin)");
+        return 2;
+    };
+    let (name, text) = match read_source(&file) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let formatted = corex::format::format_source(&text);
+    if check {
+        if formatted == text {
+            return 0;
+        }
+        eprintln!("{name}: not formatted");
+        return 1;
+    }
+    if write {
+        if is_stdin(&file) {
+            print!("{formatted}");
+            return 0;
+        }
+        return match std::fs::write(&file, formatted) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("error: cannot write {}: {e}", file.display());
+                2
+            }
+        };
+    }
+    print!("{formatted}");
+    0
+}
+
+fn cmd_lint(args: &[String]) -> i32 {
+    let mut file: Option<PathBuf> = None;
+    let mut deny = false;
+    for arg in args {
+        match arg.as_str() {
+            "--deny-warnings" => deny = true,
+            other if other.starts_with('-') && other != "-" => {
+                eprintln!("error: unknown option `{other}`");
+                return 2;
+            }
+            path => {
+                if file.is_some() {
+                    eprintln!("error: unexpected extra argument `{path}`");
+                    return 2;
+                }
+                file = Some(PathBuf::from(path));
+            }
+        }
+    }
+    let Some(file) = file else {
+        eprintln!("error: `lint` needs a file (or `-` for stdin)");
+        return 2;
+    };
+    let (_name, text) = match read_source(&file) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let diagnostics = match driver::lint_source(&text) {
+        Ok(diags) => diags,
+        Err(diags) => {
+            let source = SourceFile::new(file.display().to_string(), text);
+            report(&source, &diags);
+            return 1;
+        }
+    };
+    if diagnostics.is_empty() {
+        return 0;
+    }
+    let source = SourceFile::new(file.display().to_string(), text);
+    report(&source, &diagnostics);
+    if deny {
+        1
+    } else {
+        0
+    }
+}
+
+fn cmd_doc(args: &[String]) -> i32 {
+    let mut file: Option<PathBuf> = None;
+    let mut output: Option<PathBuf> = None;
+    let mut i = 0;
+    while i < args.len() {
+        match args[i].as_str() {
+            "-o" => {
+                let Some(path) = args.get(i + 1) else {
+                    eprintln!("error: `-o` requires a path");
+                    return 2;
+                };
+                output = Some(PathBuf::from(path));
+                i += 2;
+            }
+            other if other.starts_with('-') && other != "-" => {
+                eprintln!("error: unknown option `{other}`");
+                return 2;
+            }
+            path => {
+                if file.is_some() {
+                    eprintln!("error: unexpected extra argument `{path}`");
+                    return 2;
+                }
+                file = Some(PathBuf::from(path));
+                i += 1;
+            }
+        }
+    }
+    let Some(file) = file else {
+        eprintln!("error: `doc` needs a file (or `-` for stdin)");
+        return 2;
+    };
+    let (name, text) = match read_source(&file) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+    let source = SourceFile::new(name, text);
+    let program = match corex::lexer::lex(&source.text)
+        .map_err(|d| d)
+        .and_then(|tokens| corex::parser::parse(&tokens))
+    {
+        Ok(p) => p,
+        Err(diags) => {
+            report(&source, &diags);
+            return 1;
+        }
+    };
+    let markdown = corex::docgen::generate(&source, &program);
+    match output {
+        Some(path) => match std::fs::write(&path, markdown) {
+            Ok(()) => 0,
+            Err(e) => {
+                eprintln!("error: cannot write {}: {e}", path.display());
+                2
+            }
+        },
+        None => {
+            print!("{markdown}");
+            0
+        }
+    }
+}
+
+fn cmd_test(args: &[String]) -> i32 {
+    let parsed = match parse_common(args, false, true) {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("error: {e}\n\n{USAGE}");
+            return 2;
+        }
+    };
+    let input = parsed.file.unwrap();
+    let file = match load(&input) {
+        Ok(f) => f,
+        Err(code) => return code,
+    };
+    let config = driver::BuildConfig {
+        cfg: parsed.cfg.clone(),
+        include_paths: parsed.include_paths.clone(),
+        require_entry: false,
+        test_mode: true,
+        debug_info: false,
+        sanitize: false,
+        hosted: false,
+    };
+    run_source(&file, parsed.opt, &[], &parsed.link, &config)
 }
 
 fn verify(ir: &str) -> Result<(), String> {

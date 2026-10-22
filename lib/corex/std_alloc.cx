@@ -1,0 +1,275 @@
+//! Explicit allocators: C-compatible `malloc`/`calloc`/`realloc`/`free` with
+//! headers, an allocator interface as function pointers, and a chunked arena.
+
+module std_alloc;
+mod std_mem;
+
+/// True only when the compiler passes `--sanitize` (cfg `sanitize=true`).
+#[cfg(sanitize = "true")]
+fn sanitizing() -> bool { return true; }
+
+#[cfg(not(sanitize = "true"))]
+fn sanitizing() -> bool { return false; }
+
+fn sanitize_abort(msg: cstr) {
+    unsafe {
+        let p: *u8 = msg as *u8;
+        let mut n: usize = 0;
+        while *(p + n) != 0 {
+            n += 1;
+        }
+        let _ = syscall(1, 2, p as usize, n);
+        let _ = syscall(60, 101);
+    }
+}
+
+const HEADER: usize = 32;
+const MAGIC: u64 = 1375996858349269571;
+
+struct Header {
+    base: u64,
+    total: u64,
+    size: u64,
+    magic: u64,
+}
+
+fn align_up(value: usize, alignment: usize) -> usize {
+    if alignment <= 1 {
+        return value;
+    }
+    return (value + alignment - 1) & (0 - alignment);
+}
+
+/// Allocate `size` bytes aligned to `alignment` (a power of two).
+pub fn aligned_alloc(size: usize, alignment: usize) -> *mut u8 {
+    let mut a: usize = alignment;
+    if a < 16 {
+        a = 16;
+    }
+    let total: usize = size + HEADER + a;
+    unsafe {
+        let base: *mut u8 = alloc(total);
+        if base == null {
+            return null;
+        }
+        let raw: usize = base as usize;
+        let user: usize = align_up(raw + HEADER, a);
+        let header: *mut Header = (user - HEADER) as *mut Header;
+        (*header).base = raw as u64;
+        (*header).total = total as u64;
+        (*header).size = size as u64;
+        (*header).magic = MAGIC;
+        return user as *mut u8;
+    }
+}
+
+pub fn malloc(size: usize) -> *mut u8 {
+    return aligned_alloc(size, 16);
+}
+
+pub fn calloc(count: usize, size: usize) -> *mut u8 {
+    let total: usize = count * size;
+    let p: *mut u8 = malloc(total);
+    if p != null {
+        std_mem::memzero(p, total);
+    }
+    return p;
+}
+
+pub fn realloc(ptr: *mut u8, size: usize) -> *mut u8 {
+    if ptr == null {
+        return malloc(size);
+    }
+    unsafe {
+        let header: *mut Header = (ptr as usize - HEADER) as *mut Header;
+        if (*header).magic != MAGIC {
+            return null;
+        }
+        let old: usize = (*header).size as usize;
+        if size <= old {
+            (*header).size = size as u64;
+            return ptr;
+        }
+        let out: *mut u8 = malloc(size);
+        if out == null {
+            return null;
+        }
+        let mut n: usize = size;
+        if old < n {
+            n = old;
+        }
+        std_mem::memcpy(out, ptr, n);
+        free(ptr);
+        return out;
+    }
+}
+
+pub fn free(ptr: *mut u8) {
+    if ptr == null {
+        return;
+    }
+    unsafe {
+        let header: *mut Header = (ptr as usize - HEADER) as *mut Header;
+        if (*header).magic != MAGIC {
+            if sanitizing() {
+                sanitize_abort(c"corex: free of an invalid or already freed pointer\n");
+            }
+            return;
+        }
+        let base: *mut u8 = ((*header).base) as *mut u8;
+        let total: usize = (*header).total as usize;
+        let size: usize = (*header).size as usize;
+        if sanitizing() {
+            // Poison the payload. Under `--sanitize` the mapping is kept (and
+            // leaked) so a second free is diagnosed instead of faulting.
+            std_mem::memset(ptr, 222, size);
+        }
+        (*header).magic = 0;
+        (*header).size = 0;
+        if !sanitizing() {
+            let _ = syscall(11, base as usize, total, 0, 0, 0, 0);
+        }
+    }
+}
+
+/// Allocator interface: explicit context plus function pointers. No hidden
+/// global state and no automatic growth.
+pub struct Allocator {
+    context: *mut u8,
+    alloc: fn(*mut u8, usize, usize) -> *mut u8,
+    realloc: fn(*mut u8, *mut u8, usize, usize) -> *mut u8,
+    free: fn(*mut u8, *mut u8),
+}
+
+fn c_alloc_impl(_ctx: *mut u8, size: usize, alignment: usize) -> *mut u8 {
+    return aligned_alloc(size, alignment);
+}
+
+fn c_realloc_impl(_ctx: *mut u8, ptr: *mut u8, size: usize, _align: usize) -> *mut u8 {
+    return realloc(ptr, size);
+}
+
+fn c_free_impl(_ctx: *mut u8, ptr: *mut u8) {
+    free(ptr);
+}
+
+pub fn c_allocator() -> Allocator {
+    return Allocator {
+        context: null,
+        alloc: &c_alloc_impl,
+        realloc: &c_realloc_impl,
+        free: &c_free_impl,
+    };
+}
+
+/// Chunked bump arena. Each chunk starts with `[prev, capacity]`; `arena_reset`
+/// releases every chunk at once.
+pub struct Arena {
+    head: *mut u8,
+    used: usize,
+    cap: usize,
+    chunk: usize,
+}
+
+pub fn arena_new(chunk_size: usize) -> Arena {
+    let mut size: usize = chunk_size;
+    if size == 0 {
+        size = 4096;
+    }
+    return Arena {
+        head: null,
+        used: 0,
+        cap: 0,
+        chunk: size,
+    };
+}
+
+fn arena_grow(a: *mut Arena, need: usize) {
+    unsafe {
+        let mut want: usize = (*a).chunk;
+        if need + 16 > want {
+            want = need + 16;
+        }
+        let block: *mut u8 = malloc(want);
+        if block == null {
+            return;
+        }
+        *((block as usize) as *mut *mut u8) = (*a).head;
+        *((block as usize + 8) as *mut usize) = want;
+        (*a).head = block;
+        (*a).used = 0;
+        (*a).cap = want - 16;
+    }
+}
+
+pub fn arena_alloc(a: *mut Arena, size: usize, alignment: usize) -> *mut u8 {
+    unsafe {
+        let mut a_align: usize = alignment;
+        if a_align < 8 {
+            a_align = 8;
+        }
+        let mut start: usize = 0;
+        if (*a).head != null {
+            start = (*a).head as usize + 16 + (*a).used;
+        }
+        let user: usize = align_up(start, a_align);
+        let need: usize = user - start + size;
+        if (*a).head == null || (*a).used + need > (*a).cap {
+            arena_grow(a, size + a_align);
+            if (*a).head == null {
+                return null;
+            }
+            let start2: usize = (*a).head as usize + 16;
+            let user2: usize = align_up(start2, a_align);
+            (*a).used = user2 - start2 + size;
+            return user2 as *mut u8;
+        }
+        (*a).used += need;
+        return user as *mut u8;
+    }
+}
+
+pub fn arena_reset(a: *mut Arena) {
+    unsafe {
+        let mut p: *mut u8 = (*a).head;
+        while p != null {
+            let prev: *mut u8 = *((p as usize) as *mut *mut u8);
+            free(p);
+            p = prev;
+        }
+        (*a).head = null;
+        (*a).used = 0;
+        (*a).cap = 0;
+    }
+}
+
+pub fn arena_free(a: *mut Arena) {
+    arena_reset(a);
+}
+
+/// Arena-backed allocator interface (reset frees everything).
+fn arena_alloc_impl(ctx: *mut u8, size: usize, alignment: usize) -> *mut u8 {
+    return arena_alloc(ctx as *mut Arena, size, alignment);
+}
+
+fn arena_realloc_impl(_ctx: *mut u8, ptr: *mut u8, size: usize, alignment: usize) -> *mut u8 {
+    // Arenas cannot grow a block in place; callers that need reliable growth
+    // should allocate a new block and copy.
+    let _ = ptr;
+    let _ = size;
+    let _ = alignment;
+    return null;
+}
+
+fn arena_free_impl(_ctx: *mut u8, _ptr: *mut u8) {
+    // Individual arena allocations are freed by `arena_reset`.
+}
+
+pub fn arena_allocator(a: *mut Arena) -> Allocator {
+    return Allocator {
+        context: a as *mut u8,
+        alloc: &arena_alloc_impl,
+        realloc: &arena_realloc_impl,
+        free: &arena_free_impl,
+    };
+}

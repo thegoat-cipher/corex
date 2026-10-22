@@ -4,7 +4,8 @@ Status values: NOT STARTED, IN PROGRESS, BLOCKED, COMPLETED. Validated status
 changed only after the acceptance criteria passed. Evidence names the command or
 test that proves completion; counts are from the run on 2026-10-21.
 
-Test totals: `cargo test` → **142 passed, 0 failed** (53 unit, 89 integration).
+Test totals (v0.3, 2026-10-22): `cargo test` → **174 passed, 0 failed**
+(61 unit, 113 integration).
 
 | ID | Description | Workstream | Priority | Depends on | Status | Acceptance criteria | Validation evidence |
 |---|---|---|---|---|---|---|---|
@@ -50,21 +51,68 @@ Test totals: `cargo test` → **142 passed, 0 failed** (53 unit, 89 integration)
 | T-054 | Compiler-data capability example and docs | Documentation (isolated workstream) | P0 | T-049…T-053 | COMPLETED | Tokenizer example using enums/structs/const/vec/strings/slices/assert; docs and grammar updated | `examples/compiler_data.cx`; `tests/compiler_caps.rs::compiler_data_example_tokenizes`; README/spec/grammar/memory/architecture/PRD updated |
 | T-055 | Installation guide and curated resource index | Documentation (isolated workstream) | P0 | T-054 | COMPLETED | Reproducible install/build/verify/troubleshooting guide; project, source, test, example, and external reference map | `docs/installation.md`, `docs/resources.md`, README documentation index |
 
-## Backlog (NOT STARTED)
+## Backlog disposition (v0.3)
 
-| ID | Description | Priority | Blocked by |
-|---|---|---|---|
-| T-033 | Module system and multi-object linking | P2 | name mangling policy |
-| T-034 | `extern` declarations and C FFI | P1 | ABI policy, header story |
-| T-035 | Debug information (DWARF) | P1 | source map through AST → IR metadata |
-| T-036 | Checked-arithmetic mode (`--checked-arithmetic`) | P2 | cost/benefit benchmark |
-| T-037 | Opt-in owned heap handles (memory model C) | P3 | type system design |
-| T-038 | ARM64 and freestanding targets | P2 | target abstraction in codegen |
-| T-039 | Property/fuzz testing for the lexer, parser, and IR emitter | P1 | — |
-| T-040 | Golden IR snapshots per construct | P2 | LLVM version policy |
+The v0.2 backlog is fully dispositioned:
+
+| ID | Was | Now |
+|---|---|---|
+| T-033 | modules + multi-object linking | T-061, T-062 |
+| T-034 | `extern` declarations and C FFI | T-060 |
+| T-035 | DWARF debug information | T-065 |
+| T-036 | checked-arithmetic mode | T-071 (`--sanitize`, signed types) |
+| T-037 | opt-in owned heap handles | superseded by explicit `Allocator`/arena (T-063); no hidden ownership model added |
+| T-038 | ARM64/freestanding targets | still out of scope (Linux x86-64 only) |
+| T-039 | property/fuzz testing | existing robustness/fuzz-style tests; parser nesting limits remain |
+| T-040 | golden IR snapshots | `tests/ir.rs` + `emit-ir --verify`; no version-pinned corpus |
 
 ## Status summary
 
 - COMPLETED: T-001 … T-028, T-041 … T-046, and T-049 … T-055 (41 tasks).
+- IN PROGRESS: none.
+- BLOCKED: none.
+
+## C-class roadmap (v0.3)
+
+All tasks below are COMPLETED and validated by the named test or command on
+2026-10-22. Test totals are in the status summary at the end.
+
+| ID | Description | Workstream | Priority | Status | Validation evidence |
+|---|---|---|---|---|---|
+| T-056 | Function types, addresses, indirect calls, null function pointers, dispatch tables | Language + Backend | P0 | COMPLETED | `tests/extended.rs::function_pointers_are_values_and_dispatch_indirectly`; `examples/dispatch.cx` runs at `--opt 0..3` |
+| T-057 | `switch`/`case`/`default` with C fallthrough, `for`, `do while`, labels and `goto` | Language + Backend | P0 | COMPLETED | `tests/extended.rs::switch_fallthrough_for_do_while_and_goto`, `switch_works_at_every_optimization_level` |
+| T-058 | Unions, bitfields, flexible array members, designated/partial initializers, compound literals | Language + Layout | P0 | COMPLETED | `tests/extended.rs::layout_introspection_unions_bitfields_and_compound_literals` |
+| T-059 | `typedef`, `repr(C)`, packed and `align(N)` structs, `sizeof`/`alignof`/`offsetof`, C layout | Language + Layout | P0 | COMPLETED | same test (sizes/offsets); `docs/language-spec.md` §12.4 |
+| T-060 | `extern "C"` declarations and exports, C strings, variadic calls, `main(argc, argv, envp)` | ABI + Backend | P0 | COMPLETED | `tests/ffi.rs::extern_c_calls_exports_aggregates_and_varargs`, `main_receives_argc_argv_and_envp` |
+| T-061 | File modules, `pub`/private interfaces, deterministic `module$item` mangling | Modules | P0 | COMPLETED | `tests/modules.rs::file_modules_export_public_items_and_hide_private_ones`; `nm` symbol assertions |
+| T-062 | Per-unit object compilation, object/archive/shared linking, `corex.toml`, `#[cfg]` | Modules + Driver | P0 | COMPLETED | `tests/modules.rs` (manifest exe, static archive, shared + dlopen), `cfg_attributes_select_items_and_target_keys` |
+| T-063 | `malloc`/`calloc`/`realloc`/`free`, `Allocator` interface, arena allocator | Runtime | P0 | COMPLETED | `tests/stdlib.rs::allocator_memory_and_string_library` |
+| T-064 | Freestanding memory, string, I/O, file, directory, process, time, math, formatting libraries | Runtime | P0 | COMPLETED | `tests/stdlib.rs::file_io_formatting_time_and_directories`; `lib/corex/*.cx` |
+| T-065 | DWARF 5 line tables, subprograms, local variables | Backend | P0 | COMPLETED | `tests/tooling.rs::debug_info_has_line_tables_and_subprograms`; `readelf --debug-dump=decodedline/info` |
+| T-066 | Formatter (`corex fmt`, `-w`, `--check`), idempotent | Tooling | P0 | COMPLETED | `format::tests::*`; `tests/tooling.rs::formatter_is_idempotent_and_semantics_preserving` |
+| T-067 | Linter (`W0001`–`W0004`, `--deny-warnings`) | Tooling | P0 | COMPLETED | `tests/tooling.rs::linter_reports_unused_and_unreachable` |
+| T-068 | Language server: diagnostics, completion, definition, references, rename, hover, formatting | Tooling | P0 | COMPLETED | `tests/tooling.rs::language_server_reports_diagnostics_and_edits`; manual framed session |
+| T-069 | Markdown documentation generator from `///` comments | Tooling | P0 | COMPLETED | `docgen::tests::generates_docs_for_items`; `corex doc examples/features.cx` |
+| T-070 | Test runner for `fn test_*() -> bool` with pass/fail reporting | Tooling | P0 | COMPLETED | `tests/tooling.rs::test_runner_reports_pass_and_failure` |
+| T-071 | Sanitizers: checked signed arithmetic, allocator poisoning and double-free detection | Tooling + Backend | P0 | COMPLETED | `tests/tooling.rs::sanitizer_aborts_on_signed_overflow_and_double_free` |
+| T-072 | Volatile globals/pointers, atomic load/store/RMW/cmpxchg/fence builtins | Language + Backend | P1 | COMPLETED | `tests/concurrency.rs::atomics_volatile_and_inline_asm` |
+| T-073 | Threads (`clone`), futex mutex/condvar/spinlock, explicit TLS | Runtime | P1 | COMPLETED | `tests/concurrency.rs::threads_share_memory_and_a_futex_mutex`, `explicit_thread_local_storage_round_trips` |
+| T-074 | Inline assembly with constraints, clobbers, and barriers | Language + Backend | P1 | COMPLETED | `tests/concurrency.rs::atomics_volatile_and_inline_asm`; `std_thread` trampoline |
+| T-075 | Declarative expression macros | Language | P1 | COMPLETED | `tests/extended.rs::declarative_macros_expand_at_compile_time` |
+| T-076 | Shared libraries and `dlopen` | Runtime + Driver | P1 | COMPLETED | `tests/modules.rs::shared_library_can_be_loaded_with_dlopen` |
+| T-077 | Benchmark suite and measured results | Performance | P1 | COMPLETED | `scripts/bench.sh`; `docs/benchmarks.md` (5 kernels + compiler throughput) |
+
+### Known gaps (explicit)
+
+- No thread join; `std_thread` exposes spawn/yield/exit and stack cleanup only.
+- TLS is an explicit table keyed by thread id, not a compiler `thread_local`.
+- The `fib` benchmark remains ~1.6× slower than GCC; documented in
+  `docs/benchmarks.md`, not hidden.
+- `volatile` applies to global declarations; pointers use the builtin pair.
+- Macros are expression macros, unit-local and non-hygienic.
+
+## Status summary (v0.3)
+
+- COMPLETED: T-001 … T-028, T-041 … T-046, T-049 … T-055, T-056 … T-077.
 - IN PROGRESS: none.
 - BLOCKED: none.
