@@ -1,0 +1,72 @@
+//! Environment lookup over the `envp` vector passed to `main(argc, argv, envp)`.
+//!
+//! `envp` is a NULL-terminated array of `NAME=value` NUL-terminated strings, as
+//! delivered by the kernel. Lookups are exact byte comparisons on `NAME` and
+//! allocate nothing: the returned `str` is a borrowed slice of the process
+//! environment and stays valid for the life of the process.
+//!
+//! A missing variable is reported through the `found` out-parameter rather than
+//! an empty value, because an empty value (`NAME=`) is a valid entry.
+
+module std_env;
+
+/// Look up `name` and write the found flag. Returns the value as a borrowed
+/// `str`, or an empty slice when absent. `found` may be `null`.
+pub fn env_get(envp: **u8, name: str, found: *mut bool) -> str {
+    unsafe {
+        if found != null {
+            *found = false;
+        }
+        if envp == null {
+            return "";
+        }
+        let n: usize = len(name);
+        let mut i: usize = 0;
+        loop {
+            let entry: *u8 = *(envp + i);
+            if entry == null {
+                return "";
+            }
+            let mut j: usize = 0;
+            let mut same: bool = true;
+            while j < n {
+                if *(entry + j) != name[j] {
+                    same = false;
+                    break;
+                }
+                j += 1;
+            }
+            // `61` is '=': the name must be followed by the separator, so
+            // `PATHX` does not match `PATH`.
+            if same && *(entry + n) == 61 {
+                let value: *u8 = entry + n + 1;
+                let mut vlen: usize = 0;
+                while *(value + vlen) != 0 {
+                    vlen += 1;
+                }
+                if found != null {
+                    *found = true;
+                }
+                return str_from_raw(value, vlen);
+            }
+            i += 1;
+        }
+    }
+}
+
+/// True when `name` is present, even with an empty value.
+pub fn env_has(envp: **u8, name: str) -> bool {
+    let mut found: bool = false;
+    let _ = env_get(envp, name, &mut found);
+    return found;
+}
+
+/// Value of `name`, or `fallback` when the variable is absent.
+pub fn env_get_or(envp: **u8, name: str, fallback: str) -> str {
+    let mut found: bool = false;
+    let value: str = env_get(envp, name, &mut found);
+    if found {
+        return value;
+    }
+    return fallback;
+}

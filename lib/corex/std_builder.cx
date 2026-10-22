@@ -1,0 +1,214 @@
+//! Growable byte builder for IR, diagnostics, and JSON emission.
+//!
+//! `Builder` owns a heap block grown with `std_alloc::realloc`. Formatting of
+//! integers, hex, and floats is delegated to `std_fmt`, so there is exactly one
+//! number-formatting implementation in the library. Every push returns `bool`;
+//! on allocation failure the builder records `failed`, stops writing, and later
+//! pushes return `false` instead of aborting.
+//!
+//! `builder_finish` is a **borrowed** `str` over the buffer: it is valid until
+//! the next push or `builder_free`. The bytes are not NUL-terminated; push a
+//! zero byte first if a `cstr` is needed.
+
+module std_builder;
+mod std_alloc;
+mod std_mem;
+mod std_fmt;
+
+pub struct Builder {
+    data: *mut u8,
+    len: usize,
+    cap: usize,
+    failed: bool,
+}
+
+const INITIAL_CAPACITY: usize = 64;
+/// Enough room for the widest fixed-width number `std_fmt` produces
+/// (`i64`/`u64`: 20 digits, hex: 18, `f64`: sign + 19 + '.' + 6).
+const NUMBER_ROOM: usize = 64;
+
+/// An empty builder allocates nothing; the first push grows it.
+pub fn builder_new() -> Builder {
+    return Builder { data: null, len: 0, cap: 0, failed: false };
+}
+
+pub fn builder_with_capacity(cap: usize) -> Builder {
+    let mut b: Builder = Builder { data: null, len: 0, cap: 0, failed: false };
+    if cap == 0 {
+        return b;
+    }
+    let data: *mut u8 = std_alloc::malloc(cap);
+    if data == null {
+        b.failed = true;
+        return b;
+    }
+    b.data = data;
+    b.cap = cap;
+    return b;
+}
+
+pub fn builder_free(b: *mut Builder) {
+    unsafe {
+        if (*b).data != null {
+            std_alloc::free((*b).data);
+        }
+        (*b).data = null;
+        (*b).len = 0;
+        (*b).cap = 0;
+    }
+}
+
+/// Ensure `extra` more bytes fit. Returns `false` (and latches `failed`) when
+/// the allocation fails or the capacity computation would overflow.
+pub fn builder_reserve(b: *mut Builder, extra: usize) -> bool {
+    unsafe {
+        if (*b).failed {
+            return false;
+        }
+        let need: usize = (*b).len + extra;
+        if need < (*b).len {
+            (*b).failed = true;
+            return false;
+        }
+        if need <= (*b).cap {
+            return true;
+        }
+        let mut cap: usize = (*b).cap;
+        if cap == 0 {
+            cap = INITIAL_CAPACITY;
+        }
+        while cap < need {
+            let next: usize = cap * 2;
+            if next <= cap {
+                (*b).failed = true;
+                return false;
+            }
+            cap = next;
+        }
+        let grown: *mut u8 = std_alloc::realloc((*b).data, cap);
+        if grown == null {
+            (*b).failed = true;
+            return false;
+        }
+        (*b).data = grown;
+        (*b).cap = cap;
+        return true;
+    }
+}
+
+pub fn builder_push_byte(b: *mut Builder, value: u8) -> bool {
+    if !builder_reserve(b, 1) {
+        return false;
+    }
+    unsafe {
+        *((*b).data + (*b).len) = value;
+        (*b).len += 1;
+    }
+    return true;
+}
+
+pub fn builder_push_str(b: *mut Builder, s: str) -> bool {
+    let n: usize = len(s);
+    if n == 0 {
+        unsafe {
+            return !(*b).failed;
+        }
+    }
+    if !builder_reserve(b, n) {
+        return false;
+    }
+    unsafe {
+        std_mem::memcpy((*b).data + (*b).len, data_ptr(s), n);
+        (*b).len += n;
+    }
+    return true;
+}
+
+pub fn builder_push_char(b: *mut Builder, c: char) -> bool {
+    return builder_push_byte(b, c as u8);
+}
+
+/// Adopt the bytes written by a `std_fmt` call into the tail of the buffer.
+fn absorb(b: *mut Builder, f: *mut std_fmt::Fmt, ok: bool) -> bool {
+    unsafe {
+        (*b).len += std_fmt::bytes(f);
+        if !ok || std_fmt::failed(f) {
+            (*b).failed = true;
+            return false;
+        }
+    }
+    return true;
+}
+
+fn tail(b: *mut Builder) -> std_fmt::Fmt {
+    unsafe {
+        return std_fmt::new((*b).data + (*b).len, NUMBER_ROOM);
+    }
+}
+
+pub fn builder_push_i64(b: *mut Builder, value: i64) -> bool {
+    if !builder_reserve(b, NUMBER_ROOM) {
+        return false;
+    }
+    let mut f: std_fmt::Fmt = tail(b);
+    let ok: bool = std_fmt::push_i64(&mut f, value);
+    return absorb(b, &mut f, ok);
+}
+
+pub fn builder_push_u64(b: *mut Builder, value: u64) -> bool {
+    if !builder_reserve(b, NUMBER_ROOM) {
+        return false;
+    }
+    let mut f: std_fmt::Fmt = tail(b);
+    let ok: bool = std_fmt::push_u64(&mut f, value);
+    return absorb(b, &mut f, ok);
+}
+
+/// Lowercase `0x`-prefixed hexadecimal.
+pub fn builder_push_hex(b: *mut Builder, value: u64) -> bool {
+    if !builder_reserve(b, NUMBER_ROOM) {
+        return false;
+    }
+    let mut f: std_fmt::Fmt = tail(b);
+    let ok: bool = std_fmt::push_hex(&mut f, value);
+    return absorb(b, &mut f, ok);
+}
+
+/// Fixed six-decimal formatting, identical to the `print` intrinsic.
+pub fn builder_push_f64(b: *mut Builder, value: f64) -> bool {
+    if !builder_reserve(b, NUMBER_ROOM) {
+        return false;
+    }
+    let mut f: std_fmt::Fmt = tail(b);
+    let ok: bool = std_fmt::push_f64(&mut f, value);
+    return absorb(b, &mut f, ok);
+}
+
+pub fn builder_len(b: *mut Builder) -> usize {
+    unsafe {
+        return (*b).len;
+    }
+}
+
+pub fn builder_data(b: *mut Builder) -> *mut u8 {
+    unsafe {
+        return (*b).data;
+    }
+}
+
+/// True once an allocation has failed; the builder then rejects further pushes.
+pub fn builder_failed(b: *mut Builder) -> bool {
+    unsafe {
+        return (*b).failed;
+    }
+}
+
+/// Borrowed view of the bytes written so far (not NUL-terminated).
+pub fn builder_finish(b: *mut Builder) -> str {
+    unsafe {
+        if (*b).data == null {
+            return "";
+        }
+        return str_from_raw((*b).data, (*b).len);
+    }
+}

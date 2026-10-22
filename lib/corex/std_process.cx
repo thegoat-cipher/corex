@@ -65,6 +65,32 @@ pub fn spawn3(path: cstr, a0: cstr, a1: cstr, envp: **u8) -> i32 {
     return pid;
 }
 
+/// Fork and exec with an explicit, caller-built NULL-terminated argument
+/// vector. Returns the child pid in the parent; the child never returns (it
+/// exits 127 if exec fails).
+pub fn spawn_argv(path: cstr, argv: **u8, envp: **u8) -> i32 {
+    let pid: i32 = fork();
+    if pid == 0 {
+        exec(path, argv, envp);
+        exit(127);
+    }
+    return pid;
+}
+
+/// Run an explicit argument vector and wait; returns the child's exit status
+/// byte, or -1 when the fork or wait fails.
+pub fn run_argv(path: cstr, argv: **u8, envp: **u8) -> i32 {
+    let pid: i32 = spawn_argv(path, argv, envp);
+    if pid < 0 {
+        return -1;
+    }
+    let status: i32 = wait(pid);
+    if status < 0 {
+        return -1;
+    }
+    return (status >> 8) & 255;
+}
+
 /// Run a command and wait for it; returns the child's exit status byte.
 pub fn run(path: cstr, envp: **u8) -> i32 {
     let pid: i32 = spawn(path, envp);
