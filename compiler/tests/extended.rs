@@ -280,3 +280,65 @@ fn c_strings_convert_in_both_directions() {
     assert_eq!(r.stdout, "world\n5\nhello\nworld\nabc\n3\n5\n");
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
 }
+
+/// A signed bitfield is stored in its low `width` bits and must be
+/// sign-extended on read; zero-extension turned `-1` in four bits into `15`.
+#[test]
+fn signed_bitfield_reads_sign_extend() {
+    let r = build_and_run(
+        r#"
+        struct Signed { a: i32: 4, b: i32: 5, u: u32: 4 }
+        fn main() -> i32 {
+            let mut s: Signed = Signed { a: -1, b: -16, u: 15 };
+            print(s.a);
+            print(s.b);
+            print(s.u);
+            s.a = -8;
+            s.b = 7;
+            print(s.a);
+            print(s.b);
+            print(s.a + 8);
+            return 0;
+        }
+        "#,
+    );
+    assert_eq!(r.stdout, "-1\n-16\n15\n-8\n7\n0\n", "stderr: {}", r.stderr);
+    assert_eq!(r.code, 0);
+}
+
+/// Labels name a statement; they do not create a breakable scope. A labeled
+/// `break` still exits the enclosing `while true` (so the function can fall
+/// through and must be rejected), and a labeled `return` still diverges.
+#[test]
+fn labeled_break_and_labeled_return_follow_control_flow() {
+    for source in [
+        "fn main() -> i32 { while true { l: break; } }",
+        "fn main() -> i32 { while true { if true { l: break; } } }",
+    ] {
+        let file = SourceFile::new("label-break.cx", source);
+        match driver::check(&file) {
+            Ok(_) => panic!("labeled break was not seen by the return analysis:\n{source}"),
+            Err(diags) => assert!(
+                diags.iter().any(|d| d.code == "E0206"),
+                "expected E0206 for:\n{source}\ngot {diags:?}"
+            ),
+        }
+    }
+
+    // A labeled `continue` does not leave the loop, so the loop still diverges.
+    let file = SourceFile::new(
+        "label-continue.cx",
+        "fn main() -> i32 { l: while true { continue; } }",
+    );
+    driver::check(&file)
+        .unwrap_or_else(|diags| panic!("labeled continue rejected: {}", file.render_all(&diags)));
+
+    for source in [
+        "fn main() -> i32 { done: return 7; }",
+        "fn main() -> i32 { done: { return 7; } }",
+        "fn main() -> i32 { done: if true { return 7; } else { return 8; } }",
+    ] {
+        let r = build_and_run(source);
+        assert_eq!(r.code, 7, "source:\n{source}\nstderr: {}", r.stderr);
+    }
+}

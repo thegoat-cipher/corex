@@ -220,9 +220,11 @@ are unchanged.
   this implementation, not a general claim; the benchmark harness exists now
   (`scripts/bench.sh`).
 - **L2 (nesting must be diagnosed, not crash):** now enforced. The parser caps
-  nesting at 256 levels and reports `E0111`; tests cover 10,000 nested
-  parentheses, unary chains, and pointer types. Long diagnostic lines are cropped
-  around the caret so the message stays readable.
+  recursion at 128 levels and the semantic expression walk at 64 levels, both
+  reporting `E0111`; tests cover 10,000 nested parentheses, unary chains,
+  pointer types, and 4,500-term flat `+`, `-`, `*`, and `as` chains that
+  previously overflowed the stack. Long diagnostic lines are cropped around the
+  caret so the message stays readable.
 - **D1-D4 (determinism):** IR is byte-identical for identical input (per-function
   counters, no hash-order iteration); enforced by construction, not by a test.
 - **R1/R3/R4/R5 (reproducibility):** the compiler has no external crates; the

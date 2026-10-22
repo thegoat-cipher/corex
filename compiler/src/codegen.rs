@@ -3201,8 +3201,20 @@ ok:
                         arg_strs.push(format!("{} {}", v.ty.llvm(), v.ssa));
                     }
                 }
-                let mut type_parts: Vec<String> =
-                    sig.params.iter().map(|t| t.llvm()).collect();
+                // The function type must match the definition's lowered
+                // signature: aggregates are passed as `ptr` and an aggregate
+                // return adds a leading `sret` pointer.
+                let mut type_parts: Vec<String> = Vec::new();
+                if sig.ret.is_aggregate() {
+                    type_parts.push("ptr".to_string());
+                }
+                for t in &sig.params {
+                    type_parts.push(if t.is_aggregate() {
+                        "ptr".to_string()
+                    } else {
+                        t.llvm()
+                    });
+                }
                 if sig.variadic {
                     type_parts.push("...".to_string());
                 }
@@ -3585,6 +3597,16 @@ ok:
                 int_const(&field.ty, mask)
             ));
             value = masked;
+            // The field is stored as its low `bit_width` bits; a signed field
+            // must be sign-extended from the field width to the full type.
+            if field.ty.int_ty().map(|t| t.signed()) == Some(true) {
+                let shift = bits - field.bit_width;
+                let wide = self.fresh_val();
+                let back = self.fresh_val();
+                self.inst(format!("{wide} = shl {ty} {value}, {shift}"));
+                self.inst(format!("{back} = ashr {ty} {wide}, {shift}"));
+                value = back;
+            }
         }
         Val {
             ssa: value,

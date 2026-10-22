@@ -293,18 +293,17 @@ fn run_source(
     link: &driver::LinkInputs,
     config: &driver::BuildConfig,
 ) -> i32 {
-    let work = driver::temp_dir("corex-run");
-    if let Err(e) = std::fs::create_dir_all(&work) {
-        eprintln!("error: cannot create {}: {e}", work.display());
+    let work = driver::TempDir::new("corex-run");
+    if let Err(e) = std::fs::create_dir_all(work.path()) {
+        eprintln!("error: cannot create {}: {e}", work.path().display());
         return 2;
     }
-    let exe = work.join("program");
+    let exe = work.path().join("program");
 
     let artifacts = match driver::build_with_config(file, &exe, opt, false, link, config) {
         Ok(a) => a,
         Err(diags) => {
             report(file, &diags);
-            let _ = std::fs::remove_dir_all(&work);
             return exit_code_for(&diags);
         }
     };
@@ -313,12 +312,9 @@ fn run_source(
         Ok(s) => s,
         Err(e) => {
             eprintln!("error: {e}");
-            let _ = std::fs::remove_dir_all(&work);
             return 2;
         }
     };
-
-    let _ = std::fs::remove_dir_all(&work);
 
     #[cfg(unix)]
     {
@@ -387,14 +383,19 @@ fn cmd_build(args: &[String]) -> i32 {
 
     if let Some(emit) = &parsed.emit {
         if emit == "obj" {
-            let work = driver::temp_dir("corex-obj");
-            let result = driver::compile_units(std::slice::from_ref(&file), &work, parsed.opt, &config);
+            let work = driver::TempDir::new("corex-obj");
+            let result = driver::compile_units(
+                std::slice::from_ref(&file),
+                work.path(),
+                parsed.opt,
+                &config,
+                false,
+            );
             return match result {
                 Ok((objects, _)) if objects.len() == 1 => {
                     match std::fs::copy(&objects[0], &output) {
                         Ok(_) => {
                             println!("compiled {} -> {}", input.display(), output.display());
-                            let _ = std::fs::remove_dir_all(&work);
                             0
                         }
                         Err(e) => {

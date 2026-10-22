@@ -16,7 +16,7 @@ pub const RTLD_GLOBAL: i32 = 256;
 pub const RTLD_LOCAL: i32 = 0;
 
 pub fn open(path: cstr) -> *mut u8 {
-    return dlopen(path, RTLD_NOW | RTLD_LOCAL);
+    return dlopen(path, RTLD_LAZY | RTLD_LOCAL);
 }
 
 pub fn open_now(path: cstr) -> *mut u8 {

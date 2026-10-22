@@ -19,8 +19,8 @@ fn main() -> i32 {
 }
 ```
 
-Status: **C-class systems language implemented and tested** — 194 automated
-tests pass (68 unit, 126 integration), including native compile/run tests at
+Status: **C-class systems language implemented and tested** — 205 automated
+tests pass (68 unit, 137 integration), including native compile/run tests at
 every optimization level, C ABI tests in both directions, separate-compilation
 and manifest builds, DWARF inspection, LSP sessions, and sanitizer aborts.
 
@@ -214,7 +214,7 @@ Full normative details: [`docs/language-spec.md`](docs/language-spec.md) and
 
 ```bash
 cd compiler
-cargo test                 # 194 tests: 68 unit + 126 integration
+cargo test                 # 205 tests: 68 unit + 137 integration
 cargo test --lib           # stage unit tests only
 cargo test --test native   # compile → link → execute, asserts stdout/exit codes
 cargo test --test cli      # stdin, exec, REPL, flags and exit codes
@@ -361,7 +361,8 @@ Feature boundaries:
   cap)` returns the byte count, `0` for an empty file, and `-1` on failure for
   callers that need the distinction (such as a driver). `write_file` returns `0`
   or `-1`. Paths are byte strings and are not UTF-8 validated.
-- **Floats.** `print` uses six fractional digits. Non-finite values print as
+- **Floats.** `print` uses six fractional digits, truncated toward zero (not
+  rounded). Non-finite values print as
   `nan`/`inf`/`-inf`; magnitudes ≥ 1e18 abort with exit 101. There is no decimal
   type and no implicit integer/float conversion.
 - **Strings.** A string literal is `str` by default; assigning it to `[u8; N]`

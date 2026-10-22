@@ -146,3 +146,38 @@ fn file_io_formatting_time_and_directories() {
     );
     assert_eq!(code, 0, "stderr: {stderr}");
 }
+
+/// `aligned_alloc`/`calloc` must report overflow instead of wrapping the size
+/// arithmetic and returning a block smaller than the caller asked for.
+#[test]
+fn allocator_returns_null_when_size_arithmetic_overflows() {
+    let (stdout, stderr, code) = build_and_run(
+        r#"
+        mod std_alloc;
+
+        fn main() -> i32 {
+            let huge: usize = 0 - 1;
+            unsafe {
+                print(std_alloc::aligned_alloc(huge, 16) == null);
+                print(std_alloc::malloc(huge) == null);
+                print(std_alloc::calloc(1 << 40, 1 << 40) == null);
+                print(std_alloc::calloc(huge, 2) == null);
+                // A zero count must not divide by zero inside the guard.
+                let zero: *mut u8 = std_alloc::calloc(0, 4);
+                if zero != null { std_alloc::free(zero); }
+                // Ordinary allocations still succeed and stay zero-filled.
+                let p: *mut u8 = std_alloc::calloc(4, 8);
+                print(p != null);
+                print(*(p + 31) as i32);
+                std_alloc::free(p);
+            }
+            return 0;
+        }
+        "#,
+    );
+    assert_eq!(
+        stdout, "true\ntrue\ntrue\ntrue\ntrue\n0\n",
+        "stderr: {stderr}"
+    );
+    assert_eq!(code, 0);
+}

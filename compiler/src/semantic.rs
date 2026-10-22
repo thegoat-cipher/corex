@@ -34,6 +34,15 @@ pub const BUILTINS: [&str; 33] = [
     "volatile_load", "volatile_store", "asm",
 ];
 
+/// Maximum expression nesting depth the semantic walk recurses into.
+///
+/// The parser caps *its* recursion at 128 syntactic levels, but an expression
+/// tree is walked recursively with much larger stack frames (the checker's
+/// state lives on the stack), so a flat left-deep chain that the parser accepts
+/// iteratively would abort a 2 MiB thread well before 128 levels. 64 keeps a
+/// two-fold margin on the smallest common stack.
+const MAX_EXPR_DEPTH: usize = 64;
+
 /// Maximum size of a stack-allocated value. Keeps `alloca` within a sane
 /// fraction of the default 8 MiB process stack and prevents overflow in size
 /// arithmetic.
@@ -208,6 +217,7 @@ pub fn analyze_with(
         switch_depth: 0,
         labels: HashMap::new(),
         diags: Vec::new(),
+        depth: 0,
         scopes: Vec::new(),
         slot_types: Vec::new(),
         slot_names: Vec::new(),
@@ -313,6 +323,8 @@ struct Analyzer {
     switch_depth: u32,
     labels: HashMap<String, String>,
     diags: Vec<Diagnostic>,
+    /// Current expression/place recursion depth, bounded by `MAX_EXPR_DEPTH`.
+    depth: usize,
 
     scopes: Vec<HashMap<String, LocalRef>>,
     slot_types: Vec<Type>,
@@ -346,6 +358,18 @@ impl Analyzer {
     }
 
     // ----- top level ---------------------------------------------------
+
+    /// Reject expressions nested deeper than `MAX_EXPR_DEPTH`. Flat left-deep
+    /// operator chains parse iteratively, so the parser's guard never sees
+    /// them; this is the only bound on semantic recursion for those inputs.
+    fn too_deep<T>(&mut self, span: Span) -> Result<T, ()> {
+        self.error(
+            "E0111",
+            span,
+            format!("expression nesting depth exceeds the limit of {MAX_EXPR_DEPTH}"),
+        );
+        Err(())
+    }
 
     fn collect_enums(&mut self, program: &Program) {
         for ed in &program.enums {
@@ -1800,6 +1824,16 @@ impl Analyzer {
     // ----- expressions -------------------------------------------------
 
     fn check_expr(&mut self, e: &Expr, expected: Option<&Type>) -> Result<Type, ()> {
+        if self.depth >= MAX_EXPR_DEPTH {
+            return self.too_deep(e.span);
+        }
+        self.depth += 1;
+        let out = self.check_expr_inner(e, expected);
+        self.depth -= 1;
+        out
+    }
+
+    fn check_expr_inner(&mut self, e: &Expr, expected: Option<&Type>) -> Result<Type, ()> {
         let ty = match &e.kind {
             ExprKind::Int(v) => {
                 let t = match expected {
@@ -2562,38 +2596,39 @@ impl Analyzer {
         }
 
         // Pointer arithmetic: `*T + usize` / `*T - usize`.
-        if matches!(op, BinOp::Add | BinOp::Sub) {
-            let lhs_is_literal = is_int_literal(lhs);
-            if !lhs_is_literal {
-                let lt = self.check_expr(lhs, None)?;
-                if lt.is_pointer() {
-                    let ut = Type::Int(IntTy::Usize);
-                    if let Ok(rt) = self.check_expr(rhs, Some(&ut)) {
-                        if rt != ut {
-                            self.error(
-                                "E0203",
-                                rhs.span,
-                                format!(
-                                    "pointer arithmetic offset must be `usize`, found `{}`",
-                                    rt.display()
-                                ),
-                            );
-                        }
-                    }
-                    if self.unsafe_depth == 0 {
+        // The left operand is checked once here; its type is passed on to
+        // `unify_operands` so a left-deep `+`/`-` chain is walked once per node
+        // instead of once per node per level (exponential blowup).
+        let mut pre_lhs = None;
+        if matches!(op, BinOp::Add | BinOp::Sub) && !is_int_literal(lhs) {
+            let lt = self.check_expr(lhs, None)?;
+            if lt.is_pointer() {
+                let ut = Type::Int(IntTy::Usize);
+                if let Ok(rt) = self.check_expr(rhs, Some(&ut)) {
+                    if rt != ut {
                         self.error(
-                            "E0209",
-                            e.span,
-                            "pointer arithmetic is only allowed inside an `unsafe` block",
+                            "E0203",
+                            rhs.span,
+                            format!(
+                                "pointer arithmetic offset must be `usize`, found `{}`",
+                                rt.display()
+                            ),
                         );
                     }
-                    // Re-check lhs under no expectation already stored.
-                    return Ok(lt);
                 }
+                if self.unsafe_depth == 0 {
+                    self.error(
+                        "E0209",
+                        e.span,
+                        "pointer arithmetic is only allowed inside an `unsafe` block",
+                    );
+                }
+                return Ok(lt);
             }
+            pre_lhs = Some(lt);
         }
 
-        let decided = self.unify_operands(lhs, rhs, expected)?;
+        let decided = self.unify_operands(lhs, rhs, expected, pre_lhs)?;
 
         if op.is_comparison() {
             match &decided {
@@ -2659,16 +2694,24 @@ impl Analyzer {
     /// Resolve operand types, letting untyped integer literals adopt the type of
     /// the other operand or the expected type. No implicit conversion happens
     /// between non-literal operands.
+    ///
+    /// `pre_lhs` is the already-computed type of `lhs` for callers that had to
+    /// inspect it (pointer arithmetic); passing it avoids walking the left
+    /// subtree a second time.
     fn unify_operands(
         &mut self,
         lhs: &Expr,
         rhs: &Expr,
         expected: Option<&Type>,
+        pre_lhs: Option<Type>,
     ) -> Result<Type, ()> {
         let lhs_lit = is_int_literal(lhs);
         let rhs_lit = is_int_literal(rhs);
 
-        let (lt, rt) = if lhs_lit && !rhs_lit {
+        let (lt, rt) = if let (false, Some(lt)) = (lhs_lit, pre_lhs) {
+            let rt = self.check_expr(rhs, Some(&lt))?;
+            (lt, rt)
+        } else if lhs_lit && !rhs_lit {
             let rt = self.check_expr(rhs, expected)?;
             let lt = self.check_expr(lhs, Some(&rt))?;
             (lt, rt)
@@ -3551,6 +3594,16 @@ impl Analyzer {
     }
 
     fn check_place(&mut self, e: &Expr) -> Result<(Type, bool), ()> {
+        if self.depth >= MAX_EXPR_DEPTH {
+            return self.too_deep(e.span);
+        }
+        self.depth += 1;
+        let out = self.check_place_inner(e);
+        self.depth -= 1;
+        out
+    }
+
+    fn check_place_inner(&mut self, e: &Expr) -> Result<(Type, bool), ()> {
         match &e.kind {
             ExprKind::Path(segments) => {
                 let full = segments.join("$");
@@ -3775,6 +3828,8 @@ fn stmt_diverges(stmt: &Stmt) -> bool {
         }
         Stmt::Unsafe { body, .. } => block_diverges(body),
         Stmt::Block(body) => block_diverges(body),
+        // A label does not change control flow.
+        Stmt::Label { stmt, .. } => stmt_diverges(stmt),
         // A `switch` diverges only with a `default` and when every arm body
         // diverges. Any `break` (which exits the switch) or an arm that can
         // fall through means control can reach the end of the statement.
@@ -3845,6 +3900,9 @@ fn stmt_contains_break(stmt: &Stmt) -> bool {
         }
         Stmt::Unsafe { body, .. } => block_contains_break(body),
         Stmt::Block(body) => block_contains_break(body),
+        // A labeled `break` inside the current loop still exits that loop;
+        // labels only name statements, they do not add a breakable scope.
+        Stmt::Label { stmt, .. } => stmt_contains_break(stmt),
         Stmt::While { .. } | Stmt::Loop { .. } => false,
         _ => false,
     }

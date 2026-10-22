@@ -150,3 +150,36 @@ fn fork_exec_pipe_capture_and_run_argv() {
     );
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
 }
+
+/// Scratch directories use an unpredictable name and are removed on drop, so
+/// no build path can leak them.
+#[test]
+fn scratch_directories_are_private_and_self_removing() {
+    let first_guard = driver::TempDir::new("corex-guard");
+    let first = first_guard.path().to_path_buf();
+    assert!(first.is_dir(), "TempDir did not create {}", first.display());
+
+    let second_guard = driver::TempDir::new("corex-guard");
+    assert_ne!(
+        first,
+        second_guard.path(),
+        "two scratch directories shared a name"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&first)
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "scratch directory mode is {mode:o}");
+    }
+
+    drop(first_guard);
+    if std::env::var("COREX_KEEP_TEMP").is_err() {
+        assert!(!first.exists(), "{} survived the guard", first.display());
+    }
+    drop(second_guard);
+}

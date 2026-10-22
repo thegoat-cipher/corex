@@ -397,9 +397,9 @@ cargo test --test robustness  # malformed input never panics
 10. No golden IR snapshots; IR tests assert structure and verifier acceptance.
 11. Only Linux x86-64 is targeted; no cross-compilation, ARM64, or bare-metal
     variants.
-12. Parser nesting is capped at 256 recursion levels (`E0111`) to bound
-    recursion; deeply nested generated code is rejected rather than overflowing
-    the stack.
+12. Parser recursion is capped at 128 levels and semantic expression nesting at
+    64 levels (`E0111`); deeply nested or flat-but-huge generated code is
+    rejected rather than overflowing the stack.
 13. Function pointers, unions, namespaced modules, C FFI, macros, threads, and
     tooling are implemented. Remaining language gaps: tuples, general generics,
     traits, closures, exceptions, async, labeled `break`, `match`, operator
