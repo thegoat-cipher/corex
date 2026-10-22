@@ -45,7 +45,7 @@ and tested; P2 remains optional and not started.
 | P1: benchmarks | COMPLETED | `scripts/bench.sh`, `docs/benchmarks.md` |
 | Self-hosting P0 blockers (static aggregates, collections/builder, driver helpers, nested `vec`, `switch` divergence) | COMPLETED | `tests/aggregates.rs`, `tests/collections.rs`, `tests/driver_helpers.rs`; `docs/self-hosting.md` §1.1 |
 
-Test totals: `cargo test` → **194 passed, 0 failed** (68 unit, 126 integration).
+Test totals: `cargo test` → **205 passed, 0 failed** (68 unit, 137 integration).
 
 ---
 
