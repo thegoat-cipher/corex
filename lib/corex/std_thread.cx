@@ -1,0 +1,94 @@
+//! Kernel threads (`clone`) with a small inline-assembly trampoline.
+//!
+//! The trampoline runs on the child stack, calls the entry function with the
+//! given argument, and exits the thread with `exit(2)`. Threads share the
+//! address space and file table of their creator. There is no JOIN support in
+//! this release; use a mutex/condition variable or `sleep_ms` to coordinate.
+
+module std_thread;
+mod std_alloc;
+
+pub struct Thread {
+    tid: i32,
+    stack: *mut u8,
+    size: usize,
+}
+
+pub fn gettid() -> i32 {
+    unsafe {
+        return syscall(186) as i32;
+    }
+}
+
+pub fn yield_now() {
+    unsafe {
+        let _ = syscall(24);
+    }
+}
+
+pub fn thread_exit() {
+    unsafe {
+        let _ = syscall(60, 0);
+    }
+}
+
+/// Spawn `entry(arg)` on a fresh stack. Returns a thread handle with a negative
+/// tid if the clone failed. The stack is owned by the thread and leaked until
+/// process exit.
+pub fn spawn(entry: fn(i64) -> i32, arg: i64, stack_size: usize) -> Thread {
+    let mut size: usize = stack_size;
+    if size < 16384 {
+        size = 16384;
+    }
+    let stack: *mut u8 = std_alloc::malloc(size);
+    if stack == null {
+        return Thread { tid: -1, stack: null, size: 0 };
+    }
+    // CLONE_VM | CLONE_FS | CLONE_FILES | CLONE_SIGHAND | CLONE_THREAD | CLONE_SYSVSEM
+    let flags: usize = 331520;
+    unsafe {
+        let top: usize = (stack as usize + size) & (0 - 16);
+        let result: usize = asm(
+            "movq $1, %rdi\nmovq $2, %rsi\nxorq %rdx, %rdx\nxorq %r10, %r10\nxorq %r8, %r8\nmovq $$56, %rax\nsyscall\ntestq %rax, %rax\njne 1f\nmovq $4, %rdi\ncall *$3\nmovq $$60, %rax\nxorq %rdi, %rdi\nsyscall\n1:\n",
+            "={rax},r,r,r,r,~{rdi},~{rsi},~{rdx},~{r10},~{r8},~{rcx},~{r11},~{memory}",
+            flags,
+            top,
+            entry,
+            arg as usize,
+        );
+        return Thread {
+            tid: result as i32,
+            stack: stack,
+            size: size,
+        };
+    }
+}
+
+pub fn tid(t: *mut Thread) -> i32 {
+    unsafe {
+        return (*t).tid;
+    }
+}
+
+pub fn stack(t: *mut Thread) -> *mut u8 {
+    unsafe {
+        return (*t).stack;
+    }
+}
+
+pub fn stack_size(t: *mut Thread) -> usize {
+    unsafe {
+        return (*t).size;
+    }
+}
+
+pub fn free_stack(t: *mut Thread) {
+    unsafe {
+        if (*t).stack != null {
+            std_alloc::free((*t).stack);
+            (*t).stack = null;
+            (*t).size = 0;
+            (*t).tid = -1;
+        }
+    }
+}

@@ -23,12 +23,17 @@ pub fn mangle_unit(program: &mut Program, unit_start: usize, prefix: &str) {
 
     let mut locals = HashSet::new();
     for f in &program.fns {
-        if f.span.start >= unit_start && f.name != "main" && f.name != "_start" {
+        // C-ABI functions keep their exact symbol; it is the interface to C.
+        if f.span.start >= unit_start
+            && f.name != "main"
+            && f.name != "_start"
+            && f.extern_abi.as_deref() != Some("C")
+        {
             locals.insert(f.name.clone());
         }
     }
     for g in &program.globals {
-        if g.span.start >= unit_start {
+        if g.span.start >= unit_start && !g.is_extern {
             locals.insert(g.name.clone());
         }
     }
@@ -59,7 +64,7 @@ pub fn mangle_unit(program: &mut Program, unit_start: usize, prefix: &str) {
         .collect();
 
     for f in program.fns.iter_mut() {
-        if f.span.start < unit_start {
+        if f.span.start < unit_start || f.extern_abi.as_deref() == Some("C") {
             continue;
         }
         if let Some(mangled) = map.get(&f.name) {
@@ -67,7 +72,7 @@ pub fn mangle_unit(program: &mut Program, unit_start: usize, prefix: &str) {
         }
     }
     for g in program.globals.iter_mut() {
-        if g.span.start < unit_start {
+        if g.span.start < unit_start || g.is_extern {
             continue;
         }
         if let Some(mangled) = map.get(&g.name) {

@@ -1,0 +1,131 @@
+//! Explicit thread-local storage keyed by kernel thread id.
+//!
+//! CoreX has no hidden per-thread runtime, so TLS is an explicit table: the
+//! first `tls_alloc` on a thread allocates a block, later calls reuse it, and
+//! `tls_release` frees it. Slots are protected by a spin lock.
+
+module std_tls;
+mod std_alloc;
+mod std_mem;
+
+pub const SLOTS: usize = 64;
+
+struct Slot {
+    tid: i64,
+    ptr: *mut u8,
+    size: usize,
+}
+
+static mut TABLE: *mut u8 = null;
+static mut LOCK: u32 = 0;
+
+fn tid() -> i64 {
+    unsafe {
+        return syscall(186) as i64;
+    }
+}
+
+fn lock() {
+    unsafe {
+        while !atomic_cas(&mut LOCK, 0, 1) {
+            let _ = asm("pause", "");
+        }
+    }
+}
+
+fn unlock() {
+    unsafe {
+        atomic_store(&mut LOCK, 0);
+    }
+}
+
+fn table() -> *mut Slot {
+    unsafe {
+        if TABLE == null {
+            let bytes: usize = SLOTS * 24;
+            let raw: *mut u8 = std_alloc::malloc(bytes);
+            if raw == null {
+                return null;
+            }
+            std_mem::memzero(raw, bytes);
+            TABLE = raw;
+        }
+        return TABLE as *mut Slot;
+    }
+}
+
+pub fn tls_alloc(size: usize) -> *mut u8 {
+    lock();
+    let slots: *mut Slot = table();
+    if slots == null {
+        unlock();
+        return null;
+    }
+    let me: i64 = tid();
+    let mut i: usize = 0;
+    unsafe {
+        while i < SLOTS {
+            let slot: *mut Slot = slots + i;
+            if (*slot).tid == me {
+                if (*slot).size >= size {
+                    let p: *mut u8 = (*slot).ptr;
+                    unlock();
+                    return p;
+                }
+                std_alloc::free((*slot).ptr);
+                (*slot).ptr = std_alloc::malloc(size);
+                (*slot).size = size;
+                let p: *mut u8 = (*slot).ptr;
+                unlock();
+                return p;
+            }
+            i += 1;
+        }
+        i = 0;
+        while i < SLOTS {
+            let slot: *mut Slot = slots + i;
+            if (*slot).tid == 0 {
+                (*slot).tid = me;
+                (*slot).ptr = std_alloc::malloc(size);
+                (*slot).size = size;
+                let p: *mut u8 = (*slot).ptr;
+                unlock();
+                return p;
+            }
+            i += 1;
+        }
+    }
+    unlock();
+    return null;
+}
+
+pub fn tls_get() -> *mut u8 {
+    return tls_alloc(0);
+}
+
+pub fn tls_release(ptr: *mut u8) {
+    lock();
+    let slots: *mut Slot = table();
+    if slots != null {
+        let me: i64 = tid();
+        let mut i: usize = 0;
+        unsafe {
+            while i < SLOTS {
+                let slot: *mut Slot = slots + i;
+                if (*slot).tid == me && (*slot).ptr == ptr {
+                    std_alloc::free((*slot).ptr);
+                    (*slot).tid = 0;
+                    (*slot).ptr = null;
+                    (*slot).size = 0;
+                    break;
+                }
+                i += 1;
+            }
+        }
+    }
+    unlock();
+}
+
+pub fn tls_thread_id() -> i64 {
+    return tid();
+}

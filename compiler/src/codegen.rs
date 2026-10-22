@@ -16,9 +16,197 @@
 use std::collections::HashMap;
 
 use crate::ast::*;
+use crate::diagnostics::{SourceFile, Span};
 use crate::semantic::{Analysis, Callee, FnSig, GlobalDef};
 
+struct DebugCtx {
+    file: SourceFile,
+    nodes: Vec<String>,
+    next: u32,
+    file_id: u32,
+    unit_id: u32,
+    scope: u32,
+    locs: HashMap<(u32, u32, u32), u32>,
+    type_cache: HashMap<Type, u32>,
+}
+
+impl DebugCtx {
+    fn new(file: SourceFile) -> DebugCtx {
+        let mut d = DebugCtx {
+            file: file.clone(),
+            nodes: Vec::new(),
+            next: 0,
+            file_id: 0,
+            unit_id: 0,
+            scope: 0,
+            locs: HashMap::new(),
+            type_cache: HashMap::new(),
+        };
+        let path = std::path::Path::new(&file.name);
+        let name = path
+            .file_name()
+            .map(|s| s.to_string_lossy().to_string())
+            .unwrap_or_else(|| file.name.clone());
+        let dir = path
+            .parent()
+            .map(|p| p.display().to_string())
+            .unwrap_or_else(|| ".".to_string());
+        d.file_id = d.add(format!(
+            "!DIFile(filename: {name:?}, directory: {dir:?})"
+        ));
+        d.unit_id = d.add(format!(
+            "distinct !DICompileUnit(language: DW_LANG_C99, file: !{}, producer: \"corex\", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug)",
+            d.file_id
+        ));
+        d
+    }
+
+    fn add(&mut self, text: String) -> u32 {
+        let id = self.next;
+        self.next += 1;
+        self.nodes.push(format!("!{id} = {text}"));
+        id
+    }
+
+    fn line_col(&self, span: Span) -> (u32, u32) {
+        let (_, line, col) = self.file.source_location(span.start);
+        (line as u32, col as u32)
+    }
+
+    fn loc(&mut self, span: Span, scope: u32) -> u32 {
+        let (line, col) = self.line_col(span);
+        let key = (line, col, scope);
+        if let Some(id) = self.locs.get(&key) {
+            return *id;
+        }
+        let id = self.add(format!(
+            "!DILocation(line: {line}, column: {col}, scope: !{scope})"
+        ));
+        self.locs.insert(key, id);
+        id
+    }
+
+    fn type_meta(&mut self, ty: &Type) -> u32 {
+        if let Some(id) = self.type_cache.get(ty) {
+            return *id;
+        }
+        let text = match ty {
+            Type::Unit => "!DIBasicType(name: \"void\", size: 0, encoding: DW_ATE_unsigned)".to_string(),
+            Type::Bool => "!DIBasicType(name: \"bool\", size: 8, encoding: DW_ATE_boolean)".to_string(),
+            Type::Char => "!DIBasicType(name: \"char\", size: 8, encoding: DW_ATE_unsigned_char)".to_string(),
+            Type::Float(f) => format!(
+                "!DIBasicType(name: \"{}\", size: {}, encoding: DW_ATE_float)",
+                f.name(),
+                f.bits()
+            ),
+            Type::Int(t) => format!(
+                "!DIBasicType(name: \"{}\", size: {}, encoding: {})",
+                t.name(),
+                t.bits(),
+                if t.signed() { "DW_ATE_signed" } else { "DW_ATE_unsigned" }
+            ),
+            Type::Enum(name) => format!(
+                "!DIBasicType(name: \"{name}\", size: 32, encoding: DW_ATE_signed)"
+            ),
+            Type::Ptr { pointee, .. } => {
+                let base = self.type_meta(pointee);
+                format!(
+                    "!DIDerivedType(tag: DW_TAG_pointer_type, baseType: !{base}, size: 64)"
+                )
+            }
+            Type::Fn(_) | Type::CStr => {
+                "!DIDerivedType(tag: DW_TAG_pointer_type, size: 64)".to_string()
+            }
+            Type::Slice(_) | Type::Str => format!(
+                "!DIBasicType(name: \"{}\", size: 128, encoding: DW_ATE_unsigned)",
+                ty.display()
+            ),
+            Type::Vec(_) => format!(
+                "!DIBasicType(name: \"{}\", size: 192, encoding: DW_ATE_unsigned)",
+                ty.display()
+            ),
+            Type::Array { elem, len } => {
+                let base = self.type_meta(elem);
+                format!(
+                    "!DICompositeType(tag: DW_TAG_array_type, baseType: !{base}, size: {})",
+                    elem.size_bytes() * len * 8
+                )
+            }
+            Type::Struct(info) => format!(
+                "!DIBasicType(name: \"{}\", size: {}, encoding: DW_ATE_unsigned)",
+                info.name,
+                info.size.get() * 8
+            ),
+            Type::Named(name) => format!(
+                "!DIBasicType(name: \"{name}\", size: 64, encoding: DW_ATE_unsigned)"
+            ),
+        };
+        let id = self.add(text);
+        self.type_cache.insert(ty.clone(), id);
+        id
+    }
+
+    fn module_text(&mut self) -> String {
+        let dwarf = self.add("!{i32 7, !\"Dwarf Version\", i32 5}".to_string());
+        let version = self.add("!{i32 2, !\"Debug Info Version\", i32 3}".to_string());
+        let mut out = format!(
+            "!llvm.dbg.cu = !{{!{}}}\n!llvm.module.flags = !{{!{dwarf}, !{version}}}\n",
+            self.unit_id
+        );
+        for node in &self.nodes {
+            out.push_str(node);
+            out.push('\n');
+        }
+        out
+    }
+}
+
 pub fn generate(program: &Program, analysis: &Analysis, module_name: &str) -> String {
+    generate_with_mode(program, analysis, module_name, None, None, false, false)
+}
+
+/// Generate a module with DWARF line tables, function, and local-variable
+/// metadata derived from `file`'s source spans.
+pub fn generate_debug(
+    program: &Program,
+    analysis: &Analysis,
+    module_name: &str,
+    file: &SourceFile,
+) -> String {
+    generate_with_mode(program, analysis, module_name, None, Some(file), false, false)
+}
+
+/// Generate a module with optional debug info and checked integer arithmetic.
+pub fn generate_full(
+    program: &Program,
+    analysis: &Analysis,
+    module_name: &str,
+    file: Option<&SourceFile>,
+    sanitize: bool,
+    hosted: bool,
+) -> String {
+    generate_with_mode(program, analysis, module_name, None, file, sanitize, hosted)
+}
+
+/// Generate a module whose entry point runs `tests` and reports results.
+pub fn generate_tests(
+    program: &Program,
+    analysis: &Analysis,
+    module_name: &str,
+    tests: &[String],
+) -> String {
+    generate_with_mode(program, analysis, module_name, Some(tests), None, false, false)
+}
+
+fn generate_with_mode(
+    program: &Program,
+    analysis: &Analysis,
+    module_name: &str,
+    tests: Option<&[String]>,
+    debug_file: Option<&SourceFile>,
+    sanitize: bool,
+    hosted: bool,
+) -> String {
     let mut cg = CodeGen {
         analysis,
         out: String::new(),
@@ -35,6 +223,10 @@ pub fn generate(program: &Program, analysis: &Analysis, module_name: &str) -> St
         continue_stack: Vec::new(),
         label_map: HashMap::new(),
         current_fn: String::new(),
+        debug: debug_file.map(|f| DebugCtx::new(f.clone())),
+        sanitize,
+        current_scope: 0,
+        current_span: Span::new(0, 0),
         used_syscall: false,
         used_alloc: false,
         used_free: false,
@@ -79,7 +271,37 @@ pub fn generate(program: &Program, analysis: &Analysis, module_name: &str) -> St
     // globals, and function bodies are assembled.
     let mut start_def = String::new();
     let mut module_asm = String::new();
-    if analysis.entry == "main" {
+    if hosted && tests.is_none() {
+        // The C runtime provides `_start` and calls `main`.
+    } else if let Some(tests) = tests {
+        cg.used_syscall = true;
+        let mut body = String::new();
+        body.push_str("define void @_start() #0 {\nentry:\n  %failures = alloca i32, align 4\n  store i32 0, ptr %failures, align 4\n");
+        for (index, name) in tests.iter().enumerate() {
+            let ok_msg = format!("test {name} ... ok\n");
+            let fail_msg = format!("test {name} ... FAILED\n");
+            let ok_global = cg.add_string(ok_msg.as_bytes());
+            let fail_global = cg.add_string(fail_msg.as_bytes());
+            body.push_str(&format!(
+                "  %r{index} = call i8 @{name}()\n  %ok{index} = icmp ne i8 %r{index}, 0\n  br i1 %ok{index}, label %pass{index}, label %fail{index}\n"
+            ));
+            body.push_str(&format!("pass{index}:\n"));
+            body.push_str(&format!(
+                "  %pok{index} = ptrtoint ptr {ok_global} to i64\n  %pw{index} = call i64 @__corex_syscall(i64 1, i64 1, i64 %pok{index}, i64 {}, i64 0, i64 0, i64 0)\n  br label %next{index}\n",
+                ok_msg.len()
+            ));
+            body.push_str(&format!("fail{index}:\n"));
+            body.push_str(&format!(
+                "  %fp{index} = ptrtoint ptr {fail_global} to i64\n  %fw{index} = call i64 @__corex_syscall(i64 1, i64 1, i64 %fp{index}, i64 {}, i64 0, i64 0, i64 0)\n  %fc{index} = load i32, ptr %failures, align 4\n  %fn{index} = add i32 %fc{index}, 1\n  store i32 %fn{index}, ptr %failures, align 4\n  br label %next{index}\n",
+                fail_msg.len()
+            ));
+            body.push_str(&format!("next{index}:\n"));
+        }
+        body.push_str(
+            "  %fc = load i32, ptr %failures, align 4\n  %bad = icmp ne i32 %fc, 0\n  %code = select i1 %bad, i32 1, i32 0\n  %ext = sext i32 %code to i64\n  %exit = call i64 @__corex_syscall(i64 60, i64 %ext, i64 0, i64 0, i64 0, i64 0, i64 0)\n  unreachable\n}\n\n",
+        );
+        start_def = body;
+    } else if analysis.entry == "main" && !hosted {
         cg.used_syscall = true;
         if analysis.entry_params == 3 {
             for line in [
@@ -112,6 +334,16 @@ pub fn generate(program: &Program, analysis: &Analysis, module_name: &str) -> St
         module.push('\n');
     }
     module.push_str(&declares);
+    if sanitize {
+        for bits in [8u32, 16, 32, 64] {
+            for op in ["sadd", "ssub", "smul", "uadd", "usub", "umul"] {
+                module.push_str(&format!(
+                    "declare {{i{bits}, i1}} @llvm.{op}.with.overflow.i{bits}(i{bits}, i{bits})\n"
+                ));
+            }
+        }
+        module.push('\n');
+    }
 
     for g in &cg.globals {
         module.push_str(g);
@@ -128,6 +360,9 @@ pub fn generate(program: &Program, analysis: &Analysis, module_name: &str) -> St
 
     module.push_str(&start_def);
     module.push_str(&helpers);
+    if let Some(debug) = &mut cg.debug {
+        module.push_str(&debug.module_text());
+    }
     module.push_str("\nattributes #0 = { alignstack=16 }\n");
     module
 }
@@ -170,6 +405,10 @@ struct CodeGen<'a> {
     continue_stack: Vec<String>,
     label_map: HashMap<String, String>,
     current_fn: String,
+    debug: Option<DebugCtx>,
+    sanitize: bool,
+    current_scope: u32,
+    current_span: Span,
 }
 
 impl<'a> CodeGen<'a> {
@@ -185,6 +424,7 @@ impl<'a> CodeGen<'a> {
 
     fn inst(&mut self, line: String) {
         debug_assert!(!self.terminated);
+        let line = self.with_debug_location(line);
         self.out.push_str("  ");
         self.out.push_str(&line);
         self.out.push('\n');
@@ -192,10 +432,25 @@ impl<'a> CodeGen<'a> {
 
     fn terminate(&mut self, line: String) {
         debug_assert!(!self.terminated);
+        let line = self.with_debug_location(line);
         self.out.push_str("  ");
         self.out.push_str(&line);
         self.out.push('\n');
         self.terminated = true;
+    }
+
+    fn with_debug_location(&mut self, line: String) -> String {
+        if line.contains('\n') {
+            return line;
+        }
+        let Some(debug) = &mut self.debug else {
+            return line;
+        };
+        if self.current_span.start == 0 {
+            return line;
+        }
+        let loc = debug.loc(self.current_span, self.current_scope);
+        format!("{line}, !dbg !{loc}")
     }
 
     /// Begin a new basic block, closing the current one with a fallthrough edge.
@@ -601,6 +856,7 @@ ok:
                 ConstValue::Bool(b) => if *b { "1" } else { "0" }.to_string(),
                 ConstValue::Char(c) => (*c as u64).to_string(),
                 ConstValue::GlobalAddr(target) => format!("@{target}"),
+                ConstValue::Int(v) if *v == 0 && g.ty.is_pointer_like() => "null".to_string(),
                 ConstValue::Int(v) => int_const(&g.ty, *v),
                 ConstValue::Float(v) => float_const(&g.ty, *v),
             };
@@ -628,6 +884,21 @@ ok:
         self.terminated = false;
         self.current_label = "entry".to_string();
         self.current_fn = f.name.clone();
+        self.current_span = f.span;
+        self.current_scope = 0;
+        if let Some(debug) = &mut self.debug {
+            let (line, _) = debug.line_col(f.span);
+            let null_types = debug.add("!{null}".to_string());
+            let sub_type = debug.add(format!("!DISubroutineType(types: !{null_types})"));
+            let file_id = debug.file_id;
+            let unit = debug.unit_id;
+            let scope = debug.add(format!(
+                "distinct !DISubprogram(name: {:?}, scope: !{file_id}, file: !{file_id}, line: {line}, type: !{sub_type}, scopeLine: {line}, spFlags: DISPFlagDefinition, unit: !{unit})",
+                f.name
+            ));
+            debug.scope = scope;
+            self.current_scope = scope;
+        }
         self.break_stack.clear();
         self.continue_stack.clear();
         self.label_map.clear();
@@ -655,12 +926,40 @@ ok:
             .unwrap_or_default();
 
         for (i, ty) in layout.slot_types.iter().enumerate() {
+            let (llvm_ty, align) = if *ty == Type::Unit {
+                ("i8".to_string(), 1)
+            } else {
+                (ty.llvm(), ty.align_bytes())
+            };
             self.entry.push_str(&format!(
-                "  %slot{i} = alloca {}, align {}\n",
-                ty.llvm(),
-                ty.align_bytes()
+                "  %slot{i} = alloca {llvm_ty}, align {align}\n"
             ));
             self.slot_ptrs.push(format!("%slot{i}"));
+        }
+        if self.debug.is_some() {
+            for (i, ty) in layout.slot_types.iter().enumerate() {
+                let name = layout
+                    .slot_names
+                    .get(i)
+                    .cloned()
+                    .flatten();
+                let Some((name, span)) = name else {
+                    continue;
+                };
+                let debug = self.debug.as_mut().unwrap();
+                let (line, _) = debug.line_col(span);
+                let ty_id = debug.type_meta(ty);
+                let file_id = debug.file_id;
+                let scope = self.current_scope;
+                let var = debug.add(format!(
+                    "!DILocalVariable(name: {name:?}, scope: !{scope}, file: !{file_id}, line: {line}, type: !{ty_id})"
+                ));
+                let expr = debug.add("!DIExpression()".to_string());
+                let loc = debug.loc(span, scope);
+                self.entry.push_str(&format!(
+                    "  call void @llvm.dbg.declare(metadata ptr %slot{i}, metadata !{var}, metadata !{expr}), !dbg !{loc}\n"
+                ));
+            }
         }
 
         let mut params = Vec::new();
@@ -730,8 +1029,13 @@ ok:
         } else {
             sig.ret.llvm()
         };
+        let dbg_attr = if self.debug.is_some() {
+            format!(" !dbg !{}", self.current_scope)
+        } else {
+            String::new()
+        };
         def.push_str(&format!(
-            "define {ret_llvm} @{}({}){attrs} {{\nentry:\n",
+            "define {ret_llvm} @{}({}){attrs} nounwind{dbg_attr} {{\nentry:\n",
             f.name,
             params.join(", ")
         ));
@@ -752,6 +1056,7 @@ ok:
     }
 
     fn gen_stmt(&mut self, stmt: &Stmt) {
+        self.current_span = stmt.span();
         match stmt {
             Stmt::Let { init, ty, .. } => {
                 let val = self.gen_expr(init);
@@ -783,7 +1088,11 @@ ok:
                 let (ptr, ty) = self.gen_place(target);
                 let val = self.gen_expr(value);
                 debug_assert_eq!(val.ty, ty);
-                self.store_value(&ptr, &val);
+                if self.analysis.volatile_places.contains(&target.id) {
+                    self.store_volatile(&ptr, &val);
+                } else {
+                    self.store_value(&ptr, &val);
+                }
             }
             Stmt::CompoundAssign {
                 target,
@@ -806,14 +1115,22 @@ ok:
                     return;
                 }
                 let (ptr, ty) = self.gen_place(target);
-                let cur = self.load(&ptr, &ty);
+                let cur = if self.analysis.volatile_places.contains(&target.id) {
+                    self.load_volatile(&ptr, &ty)
+                } else {
+                    self.load(&ptr, &ty)
+                };
                 let rhs = self.gen_expr(value);
                 let result = if ty.is_float() {
                     self.emit_float_arith(*op, &cur, &rhs, &ty)
                 } else {
                     self.emit_int_arith(*op, &cur, &rhs, &ty)
                 };
-                self.store_value(&ptr, &result);
+                if self.analysis.volatile_places.contains(&target.id) {
+                    self.store_volatile(&ptr, &result);
+                } else {
+                    self.store_value(&ptr, &result);
+                }
             }
             Stmt::Expr(e) => {
                 self.gen_expr(e);
@@ -1113,6 +1430,28 @@ ok:
         }
     }
 
+    fn load_volatile(&mut self, ptr: &str, ty: &Type) -> Val {
+        let t = self.fresh_val();
+        self.inst(format!(
+            "{t} = load volatile {}, ptr {ptr}, align {}",
+            ty.llvm(),
+            ty.align_bytes()
+        ));
+        Val {
+            ssa: t,
+            ty: ty.clone(),
+        }
+    }
+
+    fn store_volatile(&mut self, dest: &str, val: &Val) {
+        self.inst(format!(
+            "store volatile {} {}, ptr {dest}, align {}",
+            val.ty.llvm(),
+            val.ssa,
+            val.ty.align_bytes()
+        ));
+    }
+
     fn store_value(&mut self, dest: &str, val: &Val) {
         match val.ty {
             Type::Unit => {}
@@ -1146,6 +1485,7 @@ ok:
     }
 
     fn gen_expr(&mut self, e: &Expr) -> Val {
+        self.current_span = e.span;
         let ty = self
             .analysis
             .expr_types
@@ -1290,6 +1630,8 @@ ok:
                 let (ptr, t) = self.gen_place(e);
                 if t.is_aggregate() {
                     Val { ssa: ptr, ty: t }
+                } else if self.analysis.volatile_places.contains(&e.id) {
+                    self.load_volatile(&ptr, &t)
                 } else {
                     self.load(&ptr, &t)
                 }
@@ -1309,6 +1651,8 @@ ok:
                 let (ptr, ty) = self.gen_place(e);
                 if ty.is_aggregate() {
                     Val { ssa: ptr, ty }
+                } else if self.analysis.volatile_places.contains(&e.id) {
+                    self.load_volatile(&ptr, &ty)
                 } else {
                     self.load(&ptr, &ty)
                 }
@@ -1408,6 +1752,8 @@ ok:
                 let (ptr, ty) = self.gen_place(e);
                 if ty.is_aggregate() {
                     Val { ssa: ptr, ty }
+                } else if self.analysis.volatile_places.contains(&e.id) {
+                    self.load_volatile(&ptr, &ty)
                 } else {
                     self.load(&ptr, &ty)
                 }
@@ -1626,6 +1972,12 @@ ok:
 
     /// Integer arithmetic shared by binary expressions and compound assignments.
     fn emit_int_arith(&mut self, op: BinOp, l: &Val, r: &Val, ty: &Type) -> Val {
+        if self.sanitize
+            && signed_checked_int(ty)
+            && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul)
+        {
+            return self.emit_checked_arith(op, l, r, ty);
+        }
         let t = self.fresh_val();
         let signed = ty.is_integer() && ty.int_ty().map(|i| i.signed()).unwrap_or(false);
         match op {
@@ -1667,6 +2019,46 @@ ok:
         }
     }
 
+    fn emit_checked_arith(&mut self, op: BinOp, l: &Val, r: &Val, ty: &Type) -> Val {
+        let bits = ty.int_ty().map(|t| t.bits()).unwrap_or(64);
+        let signed = ty.int_ty().map(|t| t.signed()).unwrap_or(false);
+        let intrinsic = match (op, signed) {
+            (BinOp::Add, true) => "sadd",
+            (BinOp::Sub, true) => "ssub",
+            (BinOp::Mul, true) => "smul",
+            (BinOp::Add, false) => "uadd",
+            (BinOp::Sub, false) => "usub",
+            (BinOp::Mul, false) => "umul",
+            _ => unreachable!(),
+        };
+        let pair_ty = format!("{{i{bits}, i1}}");
+        let pair = self.fresh_val();
+        self.inst(format!(
+            "{pair} = call {pair_ty} @llvm.{intrinsic}.with.overflow.i{bits}(i{bits} {}, i{bits} {})",
+            l.ssa, r.ssa
+        ));
+        let result = self.fresh_val();
+        self.inst(format!(
+            "{result} = extractvalue {pair_ty} {pair}, 0"
+        ));
+        let overflow = self.fresh_val();
+        self.inst(format!(
+            "{overflow} = extractvalue {pair_ty} {pair}, 1"
+        ));
+        let fail_l = self.fresh_label();
+        let ok_l = self.fresh_label();
+        self.terminate(format!(
+            "br i1 {overflow}, label %{fail_l}, label %{ok_l}"
+        ));
+        self.label(&fail_l);
+        self.fatal("corex: integer overflow\n");
+        self.label(&ok_l);
+        Val {
+            ssa: result,
+            ty: ty.clone(),
+        }
+    }
+
     fn gen_binary(
         &mut self,
         _e: &Expr,
@@ -1693,6 +2085,13 @@ ok:
             ty.clone()
         };
         let ty = &operand_ty;
+
+        if self.sanitize
+            && signed_checked_int(ty)
+            && matches!(op, BinOp::Add | BinOp::Sub | BinOp::Mul)
+        {
+            return self.emit_checked_arith(op, &l, &r, ty);
+        }
 
         if ty.is_float() {
             if let BinOp::Eq | BinOp::Ne | BinOp::Lt | BinOp::Le | BinOp::Gt | BinOp::Ge = op {
@@ -2047,6 +2446,174 @@ ok:
                         // Rejected by semantic analysis; keep IR valid.
                     }
                 }
+                Val {
+                    ssa: String::new(),
+                    ty: Type::Unit,
+                }
+            }
+            Callee::Asm => {
+                let (template, constraints) = self
+                    .analysis
+                    .asm_specs
+                    .get(&_e.id)
+                    .cloned()
+                    .unwrap_or_default();
+                let skip = if matches!(
+                    args.get(1).map(|a| &a.kind),
+                    Some(ExprKind::Str(_)) | Some(ExprKind::CStr(_))
+                ) {
+                    2
+                } else {
+                    1
+                };
+                let mut arg_strs = Vec::new();
+                for arg in args.iter().skip(skip) {
+                    let v = self.gen_expr(arg);
+                    arg_strs.push(format!("{} {}", v.ty.llvm(), v.ssa));
+                }
+                let escaped_template = escape_string(template.as_bytes());
+                let escaped_constraints = escape_string(constraints.as_bytes());
+                if *ty == Type::Unit {
+                    self.inst(format!(
+                        "call void asm sideeffect \"{escaped_template}\", \"{escaped_constraints}\"({})",
+                        arg_strs.join(", ")
+                    ));
+                    Val {
+                        ssa: String::new(),
+                        ty: Type::Unit,
+                    }
+                } else {
+                    let t = self.fresh_val();
+                    self.inst(format!(
+                        "{t} = call {} asm sideeffect \"{escaped_template}\", \"{escaped_constraints}\"({})",
+                        ty.llvm(),
+                        arg_strs.join(", ")
+                    ));
+                    Val {
+                        ssa: t,
+                        ty: ty.clone(),
+                    }
+                }
+            }
+            Callee::AtomicLoad
+            | Callee::AtomicLoadRelaxed
+            | Callee::VolatileLoad => {
+                let v = self.gen_expr(&args[0]);
+                let pointee = self
+                    .analysis
+                    .expr_types
+                    .get(&args[0].id)
+                    .and_then(|t| t.pointee().cloned())
+                    .unwrap_or(Type::Int(IntTy::I32));
+                let t = self.fresh_val();
+                if matches!(kind, Callee::VolatileLoad) {
+                    self.inst(format!(
+                        "{t} = load volatile {}, ptr {}, align {}",
+                        pointee.llvm(),
+                        v.ssa,
+                        pointee.align_bytes()
+                    ));
+                } else {
+                    let order = if matches!(kind, Callee::AtomicLoadRelaxed) {
+                        "monotonic"
+                    } else {
+                        "seq_cst"
+                    };
+                    self.inst(format!(
+                        "{t} = load atomic {}, ptr {} {order}, align {}",
+                        pointee.llvm(),
+                        v.ssa,
+                        pointee.align_bytes()
+                    ));
+                }
+                Val { ssa: t, ty: pointee }
+            }
+            Callee::AtomicStore
+            | Callee::AtomicStoreRelaxed
+            | Callee::VolatileStore => {
+                let p = self.gen_expr(&args[0]);
+                let value = self.gen_expr(&args[1]);
+                let pointee = value.ty.clone();
+                if matches!(kind, Callee::VolatileStore) {
+                    self.inst(format!(
+                        "store volatile {} {}, ptr {}, align {}",
+                        pointee.llvm(),
+                        value.ssa,
+                        p.ssa,
+                        pointee.align_bytes()
+                    ));
+                } else {
+                    let order = if matches!(kind, Callee::AtomicStoreRelaxed) {
+                        "monotonic"
+                    } else {
+                        "seq_cst"
+                    };
+                    self.inst(format!(
+                        "store atomic {} {}, ptr {} {order}, align {}",
+                        pointee.llvm(),
+                        value.ssa,
+                        p.ssa,
+                        pointee.align_bytes()
+                    ));
+                }
+                Val {
+                    ssa: String::new(),
+                    ty: Type::Unit,
+                }
+            }
+            Callee::AtomicFetchAdd
+            | Callee::AtomicFetchSub
+            | Callee::AtomicFetchAnd
+            | Callee::AtomicFetchOr
+            | Callee::AtomicFetchXor
+            | Callee::AtomicXchg => {
+                let p = self.gen_expr(&args[0]);
+                let value = self.gen_expr(&args[1]);
+                let pointee = value.ty.clone();
+                let op = match kind {
+                    Callee::AtomicFetchAdd => "add",
+                    Callee::AtomicFetchSub => "sub",
+                    Callee::AtomicFetchAnd => "and",
+                    Callee::AtomicFetchOr => "or",
+                    Callee::AtomicFetchXor => "xor",
+                    Callee::AtomicXchg => "xchg",
+                    _ => unreachable!(),
+                };
+                let t = self.fresh_val();
+                self.inst(format!(
+                    "{t} = atomicrmw {op} ptr {}, {} {} seq_cst",
+                    p.ssa,
+                    pointee.llvm(),
+                    value.ssa
+                ));
+                Val { ssa: t, ty: pointee }
+            }
+            Callee::AtomicCas => {
+                let p = self.gen_expr(&args[0]);
+                let expected = self.gen_expr(&args[1]);
+                let new = self.gen_expr(&args[2]);
+                let pointee = expected.ty.clone();
+                let pair_ty = format!("{{ {}, i1 }}", pointee.llvm());
+                let pair = self.fresh_val();
+                self.inst(format!(
+                    "{pair} = cmpxchg ptr {}, {} {}, {} {} seq_cst seq_cst",
+                    p.ssa,
+                    pointee.llvm(),
+                    expected.ssa,
+                    pointee.llvm(),
+                    new.ssa
+                ));
+                let success = self.fresh_val();
+                self.inst(format!("{success} = extractvalue {pair_ty} {pair}, 1"));
+                let out = self.fresh_val();
+                self.inst(format!("{out} = zext i1 {success} to i8"));
+                Val {
+                    ssa: out,
+                    ty: Type::Bool,
+                }
+            }
+            Callee::AtomicFence => {
+                self.inst("fence seq_cst".to_string());
                 Val {
                     ssa: String::new(),
                     ty: Type::Unit,
@@ -3295,6 +3862,15 @@ fn collect_goto_labels_stmt(stmt: &Stmt, map: &mut HashMap<String, String>) {
         }
         _ => {}
     }
+}
+
+/// Overflow checks apply to the signed integer types used for arithmetic;
+/// unsigned and pointer-sized types keep their defined wrapping behavior.
+fn signed_checked_int(ty: &Type) -> bool {
+    matches!(
+        ty,
+        Type::Int(IntTy::I8 | IntTy::I16 | IntTy::I32 | IntTy::I64)
+    )
 }
 
 fn llvm_params(sig: &FnSig, c_abi: bool) -> String {

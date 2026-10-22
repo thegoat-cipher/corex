@@ -10,8 +10,12 @@
 pub mod ast;
 pub mod codegen;
 pub mod diagnostics;
+pub mod format;
+pub mod docgen;
 pub mod driver;
 pub mod lexer;
+pub mod lint;
+pub mod lsp;
 pub mod lineedit;
 pub mod mangle;
 pub mod parser;

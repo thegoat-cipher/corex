@@ -26,6 +26,8 @@ pub fn parse_with_cfg(tokens: &[Token], cfg: &[String]) -> Result<Program, Vec<D
         next_id: 0,
         depth: 0,
         cfg: cfg.to_vec(),
+        macros: std::collections::HashMap::new(),
+        macro_depth: 0,
     };
     let mut program = Program {
         module_name: None,
@@ -33,6 +35,7 @@ pub fn parse_with_cfg(tokens: &[Token], cfg: &[String]) -> Result<Program, Vec<D
         imports: Vec::new(),
         fns: Vec::new(),
         typedefs: Vec::new(),
+        macros: Vec::new(),
         globals: Vec::new(),
         consts: Vec::new(),
         enums: Vec::new(),
@@ -62,6 +65,8 @@ struct Parser<'a> {
     next_id: NodeId,
     depth: usize,
     cfg: Vec<String>,
+    macros: std::collections::HashMap<String, MacroDecl>,
+    macro_depth: usize,
 }
 
 #[derive(Default, Clone, Copy)]
@@ -115,6 +120,7 @@ impl<'a> Parser<'a> {
                 imports: Vec::new(),
                 fns: Vec::new(),
                 typedefs: Vec::new(),
+                macros: Vec::new(),
                 globals: Vec::new(),
                 consts: Vec::new(),
                 enums: Vec::new(),
@@ -269,6 +275,37 @@ impl<'a> Parser<'a> {
         }
 
         match self.peek().clone() {
+            TokenKind::Macro => {
+                if public {
+                    return self.error("E0100", start_span, "`pub` does not apply to `macro`");
+                }
+                let kw = self.advance();
+                let (name, _name_span) = self.expect_ident("macro name")?;
+                self.expect(&TokenKind::LParen, "after macro name")?;
+                let mut params = Vec::new();
+                while !self.at(&TokenKind::RParen) {
+                    let (param, _) = self.expect_ident("macro parameter")?;
+                    params.push(param);
+                    if self.at(&TokenKind::Comma) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.expect(&TokenKind::RParen, "after macro parameters")?;
+                self.expect(&TokenKind::Assign, "before macro body")?;
+                let body = self.parse_expr()?;
+                let semi = self.expect(&TokenKind::Semi, "after macro body")?;
+                let decl = MacroDecl {
+                    name: name.clone(),
+                    params,
+                    body,
+                    span: kw.span.merge(semi.span),
+                };
+                self.macros.insert(name, decl.clone());
+                program.macros.push(decl);
+                Ok(())
+            }
             TokenKind::Module => {
                 if public {
                     return self.error("E0100", start_span, "`pub` does not apply to `module`");
@@ -449,6 +486,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::Pub
                 | TokenKind::Mod
                 | TokenKind::Module
+                | TokenKind::Macro
                 | TokenKind::Hash
                 | TokenKind::Repr
                 | TokenKind::Packed
@@ -1088,6 +1126,12 @@ impl<'a> Parser<'a> {
         } else {
             false
         };
+        let volatile = if self.at(&TokenKind::Volatile) {
+            self.advance();
+            true
+        } else {
+            false
+        };
         let (name, name_span) = self.expect_ident("global name")?;
         self.expect(&TokenKind::Colon, "after global name")?;
         let ty = self.parse_type()?;
@@ -1116,6 +1160,7 @@ impl<'a> Parser<'a> {
             span: Span::new(kw.span.start, end),
             is_extern,
             public,
+            volatile,
         })
     }
 
@@ -1283,6 +1328,122 @@ impl<'a> Parser<'a> {
             ty,
             public,
         })
+    }
+
+    fn expand_macro(
+        &mut self,
+        mac: &MacroDecl,
+        args: Vec<Expr>,
+        span: Span,
+    ) -> Result<Expr, ()> {
+        if args.len() != mac.params.len() {
+            return self.error(
+                "E0204",
+                span,
+                format!(
+                    "macro `{}` takes {} argument(s), found {}",
+                    mac.name,
+                    mac.params.len(),
+                    args.len()
+                ),
+            );
+        }
+        if self.macro_depth >= 64 {
+            return self.error("E0111", span, "macro expansion depth exceeds 64");
+        }
+        let subs: std::collections::HashMap<String, Expr> = mac
+            .params
+            .iter()
+            .cloned()
+            .zip(args)
+            .collect();
+        self.macro_depth += 1;
+        let result = self.subst_expr(&mac.body, &subs);
+        self.macro_depth -= 1;
+        let mut out = result;
+        out.span = span;
+        Ok(out)
+    }
+
+    /// Clone `e` with fresh node ids, replacing macro parameters.
+    fn subst_expr(
+        &mut self,
+        e: &Expr,
+        subs: &std::collections::HashMap<String, Expr>,
+    ) -> Expr {
+        let kind = match &e.kind {
+            ExprKind::Ident(name) => {
+                if let Some(arg) = subs.get(name) {
+                    return self.subst_expr(arg, &std::collections::HashMap::new());
+                }
+                ExprKind::Ident(name.clone())
+            }
+            ExprKind::Path(segments) => ExprKind::Path(segments.clone()),
+            ExprKind::EnumVariant {
+                enum_name,
+                variant,
+            } => ExprKind::EnumVariant {
+                enum_name: enum_name.clone(),
+                variant: variant.clone(),
+            },
+            ExprKind::StructLit { name, fields } => ExprKind::StructLit {
+                name: name.clone(),
+                fields: fields
+                    .iter()
+                    .map(|(name, value)| (name.clone(), self.subst_expr(value, subs)))
+                    .collect(),
+            },
+            ExprKind::Field { base, name } => ExprKind::Field {
+                base: Box::new(self.subst_expr(base, subs)),
+                name: name.clone(),
+            },
+            ExprKind::Unary { op, expr } => ExprKind::Unary {
+                op: *op,
+                expr: Box::new(self.subst_expr(expr, subs)),
+            },
+            ExprKind::Binary { op, lhs, rhs } => ExprKind::Binary {
+                op: *op,
+                lhs: Box::new(self.subst_expr(lhs, subs)),
+                rhs: Box::new(self.subst_expr(rhs, subs)),
+            },
+            ExprKind::Call { callee, args } => ExprKind::Call {
+                callee: Box::new(self.subst_expr(callee, subs)),
+                args: args.iter().map(|a| self.subst_expr(a, subs)).collect(),
+            },
+            ExprKind::Index { base, index } => ExprKind::Index {
+                base: Box::new(self.subst_expr(base, subs)),
+                index: Box::new(self.subst_expr(index, subs)),
+            },
+            ExprKind::SliceRange { base, start, end } => ExprKind::SliceRange {
+                base: Box::new(self.subst_expr(base, subs)),
+                start: start
+                    .as_ref()
+                    .map(|e| Box::new(self.subst_expr(e, subs))),
+                end: end
+                    .as_ref()
+                    .map(|e| Box::new(self.subst_expr(e, subs))),
+            },
+            ExprKind::Cast { expr, ty } => ExprKind::Cast {
+                expr: Box::new(self.subst_expr(expr, subs)),
+                ty: ty.clone(),
+            },
+            ExprKind::Array(elems) => {
+                ExprKind::Array(elems.iter().map(|e| self.subst_expr(e, subs)).collect())
+            }
+            ExprKind::ArrayRepeat { value, count } => ExprKind::ArrayRepeat {
+                value: Box::new(self.subst_expr(value, subs)),
+                count: *count,
+            },
+            ExprKind::CompoundLit { ty, fields } => ExprKind::CompoundLit {
+                ty: ty.clone(),
+                fields: fields
+                    .iter()
+                    .map(|(name, value)| (name.clone(), self.subst_expr(value, subs)))
+                    .collect(),
+            },
+            other => other.clone(),
+        };
+        self.mk_expr(kind, e.span)
     }
 
     fn looks_like_struct_literal(&self) -> bool {
@@ -1457,6 +1618,25 @@ impl<'a> Parser<'a> {
     fn parse_postfix(&mut self) -> Result<Expr, ()> {
         let mut expr = self.parse_primary()?;
         loop {
+            if let TokenKind::LParen = self.peek() {
+                if let ExprKind::Ident(name) = &expr.kind {
+                    if let Some(mac) = self.macros.get(name).cloned() {
+                        let open = self.advance();
+                        let mut args = Vec::new();
+                        while !self.at(&TokenKind::RParen) {
+                            args.push(self.parse_expr()?);
+                            if self.at(&TokenKind::Comma) {
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                        let close = self.expect(&TokenKind::RParen, "after macro arguments")?;
+                        expr = self.expand_macro(&mac, args, open.span.merge(close.span))?;
+                        continue;
+                    }
+                }
+            }
             match self.peek() {
                 TokenKind::LParen => {
                     self.advance();

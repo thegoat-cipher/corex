@@ -138,6 +138,13 @@ pub fn module_name(file: &SourceFile) -> String {
         .unwrap_or_else(|| "module.cx".to_string())
 }
 
+/// Parse and lint one source text (used by `corex lint`).
+pub fn lint_source(text: &str) -> Result<Vec<Diagnostic>, Vec<Diagnostic>> {
+    let tokens = lexer::lex(text)?;
+    let program = parser::parse(&tokens)?;
+    Ok(crate::lint::lint(&program))
+}
+
 pub fn emit_ir(file: &SourceFile) -> Result<String, Vec<Diagnostic>> {
     let fe = check(file)?;
     Ok(codegen::generate(
@@ -292,6 +299,14 @@ pub struct BuildConfig {
     pub include_paths: Vec<PathBuf>,
     /// Root units must define `main`/`_start` (false for library targets).
     pub require_entry: bool,
+    /// Build the root unit as a test runner (`test_*` functions returning bool).
+    pub test_mode: bool,
+    /// Emit DWARF line tables and function/variable debug metadata.
+    pub debug_info: bool,
+    /// Checked integer arithmetic and allocator hardening.
+    pub sanitize: bool,
+    /// Link against the hosted C runtime (no synthesized `_start`).
+    pub hosted: bool,
 }
 
 impl Default for BuildConfig {
@@ -300,6 +315,10 @@ impl Default for BuildConfig {
             cfg: Vec::new(),
             include_paths: Vec::new(),
             require_entry: true,
+            test_mode: false,
+            debug_info: false,
+            sanitize: false,
+            hosted: false,
         }
     }
 }
@@ -844,6 +863,9 @@ pub fn compile_units(
             cfg.push(key.to_string());
         }
     }
+    if config.sanitize && !cfg.iter().any(|k| k == "sanitize=true") {
+        cfg.push("sanitize=true".to_string());
+    }
 
     let mut units: Vec<Unit> = Vec::new();
     for root in roots {
@@ -937,7 +959,9 @@ pub fn compile_units(
         }
         mangle::mangle_unit(&mut program, unit_start, &prefix);
 
-        let analysis = semantic::analyze_with(&program, unit.is_root && config.require_entry)
+        let require_entry =
+            unit.is_root && config.require_entry && !config.test_mode;
+        let analysis = semantic::analyze_with(&program, require_entry)
             .map_err(|d| shift_diags(d, unit_start))?;
 
         let interface = generate_interface(&program, &analysis, unit_start, &prefix)?;
@@ -949,7 +973,48 @@ pub fn compile_units(
         } else {
             prefix.replace('$', "_").replace("::", "_")
         };
-        let ir = codegen::generate(&program, &analysis, &combined_file.name);
+        let mut test_names: Option<Vec<String>> = None;
+        if config.test_mode && unit.is_root {
+            let mut names = Vec::new();
+            for f in &program.fns {
+                if f.name.starts_with("test_") && f.body.is_some() {
+                    if f.ret != Type::Bool {
+                        return Err(vec![Diagnostic::error(
+                            "E0235",
+                            f.name_span,
+                            format!(
+                                "test `{}` must return `bool` (true = pass)",
+                                f.name
+                            ),
+                        )]);
+                    }
+                    names.push(f.name.clone());
+                }
+            }
+            if names.is_empty() {
+                return Err(vec![Diagnostic::error(
+                    "E0235",
+                    Span::new(0, 0),
+                    "no tests found: define `fn test_something() -> bool`",
+                )]);
+            }
+            test_names = Some(names);
+        }
+        let ir = match &test_names {
+            Some(names) => codegen::generate_tests(&program, &analysis, &combined_file.name, names),
+            None => codegen::generate_full(
+                &program,
+                &analysis,
+                &combined_file.name,
+                if config.debug_info {
+                    Some(&combined_file)
+                } else {
+                    None
+                },
+                config.sanitize,
+                config.hosted,
+            ),
+        };
         let object = assemble_and_lower(&ir, work, opt_level, &tag)?;
         objects.push(object);
         if unit.is_root && entry_ir.is_empty() {
@@ -1028,6 +1093,9 @@ pub struct Manifest {
     pub opt: u8,
     pub features: Vec<String>,
     pub output: Option<PathBuf>,
+    pub debug: bool,
+    pub sanitize: bool,
+    pub hosted: bool,
     pub dir: PathBuf,
 }
 
@@ -1132,6 +1200,15 @@ pub fn parse_manifest(text: &str, dir: PathBuf) -> Result<Manifest, String> {
                     .map_err(|_| format!("line {}: invalid opt level `{value}`", line_no + 1))?;
             }
             ("build", "output") => manifest.output = Some(PathBuf::from(unquote(value)?)),
+            ("build", "debug") => {
+                manifest.debug = matches!(value, "true" | "yes" | "1");
+            }
+            ("build", "sanitize") => {
+                manifest.sanitize = matches!(value, "true" | "yes" | "1");
+            }
+            ("build", "hosted") => {
+                manifest.hosted = matches!(value, "true" | "yes" | "1");
+            }
             _ => {
                 return Err(format!(
                     "line {}: unknown manifest key `{section}.{key}`",
@@ -1204,6 +1281,10 @@ pub fn build_manifest(
         cfg,
         include_paths,
         require_entry: manifest.kind == OutputKind::Executable,
+        test_mode: false,
+        debug_info: manifest.debug,
+        sanitize: manifest.sanitize,
+        hosted: manifest.hosted,
     };
     let opt = opt_override.unwrap_or(manifest.opt);
     let output = output_override.map(|p| p.to_path_buf()).unwrap_or_else(|| {

@@ -440,6 +440,7 @@ pub struct Program {
     pub imports: Vec<ImportDecl>,
     pub fns: Vec<FnDecl>,
     pub typedefs: Vec<TypedefDecl>,
+    pub macros: Vec<MacroDecl>,
     pub globals: Vec<GlobalDecl>,
     pub consts: Vec<ConstDecl>,
     pub enums: Vec<EnumDecl>,
@@ -456,6 +457,14 @@ pub struct StructDecl {
     pub packed: bool,
     pub align: u64,
     pub public: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct MacroDecl {
+    pub name: String,
+    pub params: Vec<String>,
+    pub body: Expr,
+    pub span: Span,
 }
 
 #[derive(Clone, Debug)]
@@ -480,6 +489,7 @@ pub struct GlobalDecl {
     pub name_span: Span,
     pub ty: Type,
     pub mutable: bool,
+    pub volatile: bool,
     pub init: Expr,
     pub span: Span,
     pub is_extern: bool,

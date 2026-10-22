@@ -208,6 +208,33 @@ fn switch_works_at_every_optimization_level() {
 }
 
 #[test]
+fn declarative_macros_expand_at_compile_time() {
+    let r = build_and_run(
+        r#"
+        macro square(x) = x * x;
+        macro add3(a, b, c) = a + b + c;
+        macro twice(e) = e + e;
+
+        fn main() -> i32 {
+            print(square(5));
+            print(add3(1, 2, 3));
+            print(twice(square(3)));
+            let p: i32 = 4;
+            // The argument is an expression tree, so precedence is preserved.
+            print(square(p + 1));
+            return 0;
+        }
+        "#,
+    );
+    assert_eq!(r.stdout, "25
+6
+18
+25
+");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+}
+
+#[test]
 fn c_strings_convert_in_both_directions() {
     let r = build_and_run(
         r#"

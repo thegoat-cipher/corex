@@ -24,10 +24,14 @@ use crate::ast::*;
 use crate::diagnostics::{Diagnostic, Span};
 
 /// Names that are always in scope and cannot be redefined.
-pub const BUILTINS: [&str; 18] = [
+pub const BUILTINS: [&str; 33] = [
     "syscall", "alloc", "free", "print", "len", "vec_new", "vec_push", "vec_free",
     "vec_slice", "read_file", "write_file", "panic", "assert",
     "cstr_len", "cstr_to_str", "str_to_cstr", "data_ptr", "str_from_raw",
+    "atomic_load", "atomic_load_relaxed", "atomic_store", "atomic_store_relaxed",
+    "atomic_fetch_add", "atomic_fetch_sub", "atomic_fetch_and", "atomic_fetch_or",
+    "atomic_fetch_xor", "atomic_xchg", "atomic_cas", "atomic_fence",
+    "volatile_load", "volatile_store", "asm",
 ];
 
 /// Maximum size of a stack-allocated value. Keeps `alloca` within a sane
@@ -58,6 +62,21 @@ pub enum Callee {
     StrToCStr,
     DataPtr,
     StrFromRaw,
+    AtomicLoad,
+    AtomicLoadRelaxed,
+    AtomicStore,
+    AtomicStoreRelaxed,
+    AtomicFetchAdd,
+    AtomicFetchSub,
+    AtomicFetchAnd,
+    AtomicFetchOr,
+    AtomicFetchXor,
+    AtomicXchg,
+    AtomicCas,
+    AtomicFence,
+    VolatileLoad,
+    VolatileStore,
+    Asm,
 }
 
 #[derive(Clone, Debug)]
@@ -82,6 +101,8 @@ pub struct LocalRef {
 pub struct FnLayout {
     /// Slot index -> type. Parameters occupy slots `0..params.len()`.
     pub slot_types: Vec<Type>,
+    /// Slot index -> binding name and declaration span (for debug info).
+    pub slot_names: Vec<Option<(String, Span)>>,
 }
 
 #[derive(Clone, Debug)]
@@ -89,6 +110,7 @@ pub struct GlobalDef {
     pub name: String,
     pub ty: Type,
     pub mutable: bool,
+    pub volatile: bool,
     pub value: ConstValue,
 }
 
@@ -138,6 +160,10 @@ pub struct Analysis {
     pub external_fns: HashSet<String>,
     /// Globals declared `extern` without an initializer.
     pub external_globals: HashSet<String>,
+    /// Expression ids that access a `volatile` global.
+    pub volatile_places: HashSet<NodeId>,
+    /// Inline assembly template and constraint string per call expression.
+    pub asm_specs: HashMap<NodeId, (String, String)>,
 }
 
 pub fn analyze(program: &Program) -> Result<Analysis, Vec<Diagnostic>> {
@@ -175,12 +201,16 @@ pub fn analyze_with(
         const_sizes: HashMap::new(),
         external_fns: HashSet::new(),
         external_globals: HashSet::new(),
+        volatile_globals: HashSet::new(),
+        volatile_places: HashSet::new(),
+        asm_specs: HashMap::new(),
         break_depth: 0,
         switch_depth: 0,
         labels: HashMap::new(),
         diags: Vec::new(),
         scopes: Vec::new(),
         slot_types: Vec::new(),
+        slot_names: Vec::new(),
         slot_mut: HashMap::new(),
         ret_ty: Type::Unit,
         loop_depth: 0,
@@ -223,6 +253,7 @@ pub fn analyze_with(
                         name: name.clone(),
                         ty: ty.clone(),
                         mutable: *mutable,
+                        volatile: a.volatile_globals.contains(name),
                         value: a
                             .global_inits
                             .get(name)
@@ -242,6 +273,8 @@ pub fn analyze_with(
             const_sizes: a.const_sizes,
             external_fns: a.external_fns,
             external_globals: a.external_globals,
+            volatile_places: a.volatile_places,
+            asm_specs: a.asm_specs,
         })
     } else {
         Err(a.diags)
@@ -273,6 +306,9 @@ struct Analyzer {
     const_sizes: HashMap<NodeId, u64>,
     external_fns: HashSet<String>,
     external_globals: HashSet<String>,
+    volatile_globals: HashSet<String>,
+    volatile_places: HashSet<NodeId>,
+    asm_specs: HashMap<NodeId, (String, String)>,
     break_depth: u32,
     switch_depth: u32,
     labels: HashMap<String, String>,
@@ -280,6 +316,7 @@ struct Analyzer {
 
     scopes: Vec<HashMap<String, LocalRef>>,
     slot_types: Vec<Type>,
+    slot_names: Vec<Option<(String, Span)>>,
     slot_mut: HashMap<usize, bool>,
     ret_ty: Type,
     loop_depth: u32,
@@ -731,6 +768,9 @@ impl Analyzer {
             if g.is_extern {
                 self.external_globals.insert(g.name.clone());
             }
+            if g.volatile {
+                self.volatile_globals.insert(g.name.clone());
+            }
             self.globals.insert(g.name.clone(), (ty, g.mutable));
             self.global_order.push(g.name.clone());
         }
@@ -822,6 +862,7 @@ impl Analyzer {
             ExprKind::Float(v) => ConstValue::Float(*v),
             ExprKind::Bool(b) => ConstValue::Bool(*b),
             ExprKind::Char(c) => ConstValue::Char(*c),
+            ExprKind::Null => ConstValue::Int(0),
             ExprKind::Str(bytes) => ConstValue::Str(bytes.clone()),
             ExprKind::Path(segments) => {
                 let n = segments.len();
@@ -1101,6 +1142,7 @@ impl Analyzer {
         self.current_fn = f.name.clone();
         self.scopes = vec![HashMap::new()];
         self.slot_types = Vec::new();
+        self.slot_names = Vec::new();
         self.slot_mut = HashMap::new();
         let sig = self
             .sigs
@@ -1157,6 +1199,7 @@ impl Analyzer {
             f.name.clone(),
             FnLayout {
                 slot_types: std::mem::take(&mut self.slot_types),
+                slot_names: std::mem::take(&mut self.slot_names),
             },
         );
     }
@@ -1255,6 +1298,11 @@ impl Analyzer {
         let slot = self.slot_types.len();
         self.slot_types.push(ty.clone());
         self.slot_mut.insert(slot, mutable);
+        self.slot_names.push(if name == "_" {
+            None
+        } else {
+            Some((name.to_string(), span))
+        });
         let r = LocalRef { slot, ty };
         if let Some(scope) = self.scopes.last_mut() {
             scope.insert(name.to_string(), r.clone());
@@ -1308,6 +1356,7 @@ impl Analyzer {
                         declared
                     }
                     None => match self.check_expr(init, None) {
+                        Ok(Type::Unit) if name == "_" => Type::Unit,
                         Ok(Type::Unit) => {
                             self.error(
                                 "E0225",
@@ -1842,6 +1891,9 @@ impl Analyzer {
                             variadic: sig.variadic,
                         })
                     } else if let Some((ty, _)) = self.globals.get(&full).cloned() {
+                        if self.volatile_globals.contains(&full) {
+                            self.volatile_places.insert(e.id);
+                        }
                         ty
                     } else if let Some((ty, _)) = self.consts.get(&full).cloned() {
                         ty
@@ -1867,6 +1919,9 @@ impl Analyzer {
                     local.ty
                 } else if let Some((ty, _)) = self.globals.get(name) {
                     let ty = ty.clone();
+                    if self.volatile_globals.contains(name) {
+                        self.volatile_places.insert(e.id);
+                    }
                     self.expr_types.insert(e.id, ty.clone());
                     ty
                 } else if let Some((ty, _)) = self.consts.get(name) {
@@ -2676,6 +2731,168 @@ impl Analyzer {
             unreachable!("indirect calls handled above");
         };
 
+        if name == "asm" {
+            if args.is_empty() {
+                self.error("E0204", e.span, "`asm` requires a template string");
+                return Err(());
+            }
+            if self.unsafe_depth == 0 {
+                self.error("E0209", e.span, "`asm` is only allowed inside an `unsafe` block");
+            }
+            let template = match &args[0].kind {
+                ExprKind::Str(bytes) | ExprKind::CStr(bytes) => {
+                    String::from_utf8_lossy(bytes).to_string()
+                }
+                _ => {
+                    self.error(
+                        "E0203",
+                        args[0].span,
+                        "`asm` template must be a string literal",
+                    );
+                    return Err(());
+                }
+            };
+            let mut index = 1;
+            let mut constraints = String::new();
+            if let Some(arg) = args.get(1) {
+                if let ExprKind::Str(bytes) | ExprKind::CStr(bytes) = &arg.kind {
+                    constraints = String::from_utf8_lossy(bytes).to_string();
+                    index = 2;
+                }
+            }
+            let mut returns_value = false;
+            for part in constraints.split(',') {
+                if part.trim_start().starts_with('=') {
+                    returns_value = true;
+                }
+            }
+            for arg in &args[index..] {
+                match self.check_expr(arg, None) {
+                    Ok(t) if t.is_integer() || t.is_pointer_like() => {}
+                    Ok(t) => self.error(
+                        "E0216",
+                        arg.span,
+                        format!(
+                            "inline assembly operands must be integers or pointers, found `{}`",
+                            t.display()
+                        ),
+                    ),
+                    Err(()) => {}
+                }
+            }
+            self.asm_specs
+                .insert(e.id, (template, constraints));
+            self.calls.insert(e.id, Callee::Asm);
+            return Ok(if returns_value {
+                Type::Int(IntTy::Usize)
+            } else {
+                Type::Unit
+            });
+        }
+        if name == "atomic_fence" {
+            if !args.is_empty() {
+                self.error("E0204", e.span, "`atomic_fence` takes no arguments");
+                return Err(());
+            }
+            if self.unsafe_depth == 0 {
+                self.error("E0209", e.span, "`atomic_fence` is only allowed inside an `unsafe` block");
+            }
+            self.calls.insert(e.id, Callee::AtomicFence);
+            return Ok(Type::Unit);
+        }
+        if matches!(
+            name.as_str(),
+            "atomic_load"
+                | "atomic_load_relaxed"
+                | "atomic_store"
+                | "atomic_store_relaxed"
+                | "atomic_fetch_add"
+                | "atomic_fetch_sub"
+                | "atomic_fetch_and"
+                | "atomic_fetch_or"
+                | "atomic_fetch_xor"
+                | "atomic_xchg"
+                | "atomic_cas"
+                | "volatile_load"
+                | "volatile_store"
+        ) {
+            if self.unsafe_depth == 0 {
+                self.error("E0209", e.span, format!("`{name}` is only allowed inside an `unsafe` block"));
+            }
+            let load_like = matches!(
+                name.as_str(),
+                "atomic_load" | "atomic_load_relaxed" | "volatile_load"
+            );
+            let store_like = matches!(
+                name.as_str(),
+                "atomic_store" | "atomic_store_relaxed" | "volatile_store"
+            );
+            let cas_like = name == "atomic_cas";
+            let expected_args = if load_like { 1 } else if cas_like { 3 } else { 2 };
+            if args.len() != expected_args {
+                self.error(
+                    "E0204",
+                    e.span,
+                    format!("`{name}` takes {expected_args} argument(s), found {}", args.len()),
+                );
+                return Err(());
+            }
+            let ptr_ty = self.check_expr(&args[0], None)?;
+            let Some(pointee) = ptr_ty.pointee().cloned() else {
+                self.error(
+                    "E0203",
+                    args[0].span,
+                    format!("`{name}` expects a pointer, found `{}`", ptr_ty.display()),
+                );
+                return Err(());
+            };
+            if pointee.is_aggregate() || pointee == Type::Unit {
+                self.error(
+                    "E0203",
+                    args[0].span,
+                    format!("`{name}` requires an integer or pointer pointee, found `{}`", pointee.display()),
+                );
+                return Err(());
+            }
+            if !load_like {
+                if let Ok(t) = self.check_expr(&args[1], Some(&pointee)) {
+                    if !self.compatible(&pointee, &t) {
+                        self.type_mismatch(args[1].span, &pointee, &t, " in atomic operand");
+                    }
+                }
+            }
+            if cas_like {
+                if let Ok(t) = self.check_expr(&args[2], Some(&pointee)) {
+                    if !self.compatible(&pointee, &t) {
+                        self.type_mismatch(args[2].span, &pointee, &t, " in atomic operand");
+                    }
+                }
+            }
+            let callee = match name.as_str() {
+                "atomic_load" => Callee::AtomicLoad,
+                "atomic_load_relaxed" => Callee::AtomicLoadRelaxed,
+                "atomic_store" => Callee::AtomicStore,
+                "atomic_store_relaxed" => Callee::AtomicStoreRelaxed,
+                "atomic_fetch_add" => Callee::AtomicFetchAdd,
+                "atomic_fetch_sub" => Callee::AtomicFetchSub,
+                "atomic_fetch_and" => Callee::AtomicFetchAnd,
+                "atomic_fetch_or" => Callee::AtomicFetchOr,
+                "atomic_fetch_xor" => Callee::AtomicFetchXor,
+                "atomic_xchg" => Callee::AtomicXchg,
+                "atomic_cas" => Callee::AtomicCas,
+                "volatile_load" => Callee::VolatileLoad,
+                _ => Callee::VolatileStore,
+            };
+            let ret = if store_like {
+                Type::Unit
+            } else if cas_like {
+                Type::Bool
+            } else {
+                pointee
+            };
+            self.calls.insert(e.id, callee);
+            return Ok(ret);
+        }
         if name == "data_ptr" {
             if args.len() != 1 {
                 self.error("E0204", e.span, format!("`data_ptr` takes 1 argument, found {}", args.len()));
@@ -3295,6 +3512,9 @@ impl Analyzer {
                         return Err(());
                     }
                     if let Some((ty, mutable)) = self.globals.get(name).cloned() {
+                        if self.volatile_globals.contains(name) {
+                            self.volatile_places.insert(e.id);
+                        }
                         self.expr_types.insert(e.id, ty.clone());
                         return Ok((ty, mutable));
                     }

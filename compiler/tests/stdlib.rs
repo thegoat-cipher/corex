@@ -19,9 +19,8 @@ fn build_and_run(source: &str) -> (String, String, i32) {
     let file = SourceFile::new(src.display().to_string(), source);
     let exe = work.join("program");
     let config = BuildConfig {
-        cfg: Vec::new(),
         include_paths: vec![lib_dir()],
-        require_entry: true,
+        ..Default::default()
     };
     let artifacts = driver::build_with_config(&file, &exe, 2, false, &LinkInputs::default(), &config)
         .unwrap_or_else(|d| panic!("compile failed:\n{}", file.render_all(&d)));

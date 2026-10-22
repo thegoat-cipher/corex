@@ -171,6 +171,73 @@ fn cfg_attributes_select_items_and_target_keys() {
 }
 
 #[test]
+fn shared_library_can_be_loaded_with_dlopen() {
+    let dir = driver::temp_dir("corex-dlopen");
+    std::fs::create_dir_all(&dir).expect("create dir");
+    let lib_source = r#"
+        module shlib;
+        extern "C" fn sh_add(a: i32, b: i32) -> i32 { return a + b; }
+        extern "C" fn sh_mul(a: i32, b: i32) -> i32 { return a * b; }
+    "#;
+    let lib_path = dir.join("shlib.cx");
+    std::fs::write(&lib_path, lib_source).expect("write lib");
+    let lib_file = SourceFile::new(lib_path.display().to_string(), lib_source);
+    let so = dir.join("libsh.so");
+    let lib_config = BuildConfig {
+        require_entry: false,
+        ..Default::default()
+    };
+    driver::build_project(
+        std::slice::from_ref(&lib_file),
+        &so,
+        2,
+        &LinkInputs::default(),
+        &lib_config,
+        driver::OutputKind::Shared,
+    )
+    .expect("shared library build");
+    assert!(so.is_file());
+
+    let program = r#"
+        mod std_dl;
+        fn main() -> i32 {
+            unsafe {
+                let h: *mut u8 = std_dl::open(c"SHLIB_PATH");
+                print(h != null);
+                if h == null { return 1; }
+                let add: fn(i32, i32) -> i32 = std_dl::sym(h, c"sh_add") as fn(i32, i32) -> i32;
+                let mul: fn(i32, i32) -> i32 = std_dl::sym(h, c"sh_mul") as fn(i32, i32) -> i32;
+                print(add(20, 22));
+                print(mul(6, 7));
+                std_dl::close(h);
+            }
+            return 0;
+        }
+    "#;
+    let path_literal = format!("c\"{}\"", so.display());
+    let program = program.replace("c\"SHLIB_PATH\"", &path_literal);
+    let src = dir.join("program.cx");
+    std::fs::write(&src, &program).expect("write program");
+    let file = SourceFile::new(src.display().to_string(), program);
+    let exe = dir.join("program");
+    let config = BuildConfig {
+        hosted: true,
+        include_paths: vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("../lib/corex")],
+        ..Default::default()
+    };
+    let hosted_inputs = LinkInputs {
+        hosted: true,
+        ..Default::default()
+    };
+    driver::build_with_config(&file, &exe, 2, false, &hosted_inputs, &config)
+        .expect("hosted build");
+    let r = run(&exe, &[]);
+    assert_eq!(r.stdout, "true\n42\n42\n");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[test]
 fn manifest_builds_executable_and_static_library() {
     let dir = driver::temp_dir("corex-manifest");
     std::fs::create_dir_all(&dir).expect("create dir");

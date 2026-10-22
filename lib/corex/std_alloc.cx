@@ -4,6 +4,25 @@
 module std_alloc;
 mod std_mem;
 
+/// True only when the compiler passes `--sanitize` (cfg `sanitize=true`).
+#[cfg(sanitize = "true")]
+fn sanitizing() -> bool { return true; }
+
+#[cfg(not(sanitize = "true"))]
+fn sanitizing() -> bool { return false; }
+
+fn sanitize_abort(msg: cstr) {
+    unsafe {
+        let p: *u8 = msg as *u8;
+        let mut n: usize = 0;
+        while *(p + n) != 0 {
+            n += 1;
+        }
+        let _ = syscall(1, 2, p as usize, n);
+        let _ = syscall(60, 101);
+    }
+}
+
 const HEADER: usize = 32;
 const MAGIC: u64 = 1375996858349269571;
 
@@ -92,14 +111,24 @@ pub fn free(ptr: *mut u8) {
     unsafe {
         let header: *mut Header = (ptr as usize - HEADER) as *mut Header;
         if (*header).magic != MAGIC {
+            if sanitizing() {
+                sanitize_abort(c"corex: free of an invalid or already freed pointer\n");
+            }
             return;
         }
         let base: *mut u8 = ((*header).base) as *mut u8;
         let total: usize = (*header).total as usize;
+        let size: usize = (*header).size as usize;
+        if sanitizing() {
+            // Poison the payload. Under `--sanitize` the mapping is kept (and
+            // leaked) so a second free is diagnosed instead of faulting.
+            std_mem::memset(ptr, 222, size);
+        }
         (*header).magic = 0;
-        // Raw munmap: the module cannot call the `free` builtin here because
-        // `free` is this module's own function.
-        let _ = syscall(11, base as usize, total, 0, 0, 0, 0);
+        (*header).size = 0;
+        if !sanitizing() {
+            let _ = syscall(11, base as usize, total, 0, 0, 0, 0);
+        }
     }
 }
 
