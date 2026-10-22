@@ -22,7 +22,7 @@ Commits on the branch (oldest → newest):
 
 ## Verification (all run)
 
-- `cargo test` → **193 passed, 0 failed** (68 unit, 125 integration).
+- `cargo test` → **194 passed, 0 failed** (68 unit, 126 integration).
 - Every `examples/*.cx` run at `--opt 0,1,2,3` → identical stdout and exit status.
 - `tests/ffi.rs` compiles a C helper with `cc` and links it both directions
   (including aggregate and variadic calls).
@@ -36,30 +36,11 @@ Commits on the branch (oldest → newest):
   `mix` 1.017, `array` 1.056, `struct` 0.964, `f64` 0.947, `fib` 1.636.
   Compiler throughput on 4,001 lines: 22 ms frontend, 798 ms full `--opt 2`.
 
-## Blocker: branch not pushed
+## Branch status
 
-`git push -u origin room/corex-c-class-roadmap-deepseek-hjce` fails in this
-environment:
-
-```
-error: unable to read askpass response from '/usr/bin/false'
-fatal: could not read Username for 'https://github.com': terminal prompts disabled
-```
-
-Tried: `git fetch origin` (works, no divergence), `gh` (not installed),
-`ssh-add -l` (no identities), `ssh -T git@github.com` (publickey denied).
-There is no credential helper, `~/.git-credentials`, or `GH_TOKEN` available.
-
-To finish: authenticate once (host user's git credential helper, `gh auth login`,
-or an SSH key + SSH remote), then:
-
-```bash
-cd <repo>
-git pull --rebase origin main
-git push -u origin room/corex-c-class-roadmap-deepseek-hjce
-```
-
-No rebase was needed at handoff time (`HEAD..origin/main` was empty).
+The branch was pushed by the parent and merged into `main` through PR #1
+(merge commit `b9ed2a2`). The local push blocker was only missing credentials in
+the child environment; no rebase was needed.
 
 ## Known gaps (documented, not silent)
 

@@ -4,8 +4,8 @@ Status values: NOT STARTED, IN PROGRESS, BLOCKED, COMPLETED. Validated status
 changed only after the acceptance criteria passed. Evidence names the command or
 test that proves completion; counts are from the run on 2026-10-21.
 
-Test totals (v0.3, 2026-10-22): `cargo test` → **193 passed, 0 failed**
-(68 unit, 125 integration).
+Test totals (v0.3, 2026-10-22): `cargo test` → **194 passed, 0 failed**
+(68 unit, 126 integration).
 
 | ID | Description | Workstream | Priority | Depends on | Status | Acceptance criteria | Validation evidence |
 |---|---|---|---|---|---|---|---|
@@ -101,7 +101,7 @@ All tasks below are COMPLETED and validated by the named test or command on
 | T-075 | Declarative expression macros | Language | P1 | COMPLETED | `tests/extended.rs::declarative_macros_expand_at_compile_time` |
 | T-076 | Shared libraries and `dlopen` | Runtime + Driver | P1 | COMPLETED | `tests/modules.rs::shared_library_can_be_loaded_with_dlopen` |
 | T-077 | Benchmark suite and measured results | Performance | P1 | COMPLETED | `scripts/bench.sh`; `docs/benchmarks.md` (5 kernels + compiler throughput) |
-| T-078 | Self-hosting P0 blockers: static aggregate constants, `const` array lengths, `std_map`/`std_set`/`std_builder`, driver helpers (`std_env`, `pipe`/`dup2`, `spawn_argv`/`run_argv`), nested `vec<vec<T>>` syntax, `switch` divergence | Language + Backend + Runtime | P0 | COMPLETED | Static arrays/structs/function pointers emit LLVM globals at `--opt 0..3`; `lib/corex` has insertion-ordered map/set and a growable builder; a CoreX program forks `/bin/echo`, captures stdout through a pipe, and reports exit status; `vec<vec<u8>>` parses without whitespace while `>>`/`>>=` stay shifts; a `switch` with `default` satisfies return analysis | `tests/aggregates.rs` (5), `tests/collections.rs` (2), `tests/driver_helpers.rs` (2), `tests/modules.rs::module_const_is_a_valid_array_length`, `tests/features.rs::nested_generic_types_and_shift_operators`, `tests/extended.rs::switch_with_default_satisfies_return_analysis`, 4 parser unit tests, 3 semantic unit tests; `llvm-as` verifies the aggregate IR |
+| T-078 | Self-hosting P0 blockers: static aggregate constants, `const` array lengths, `std_map` (with `Set`)/`std_builder`, driver helpers (`std_env`, `pipe`/`dup2`, `spawn_argv`/`run_argv`), nested `vec<vec<T>>` syntax, `switch` divergence | Language + Backend + Runtime | P0 | COMPLETED | Static arrays/structs/function pointers emit LLVM globals at `--opt 0..3`; `lib/corex` has insertion-ordered map/set and a growable builder; a CoreX program forks `/bin/echo`, captures stdout through a pipe, and reports exit status; `vec<vec<u8>>` parses without whitespace while `>>`/`>>=` stay shifts; a `switch` with `default` satisfies return analysis | `tests/aggregates.rs` (5), `tests/collections.rs` (2), `tests/driver_helpers.rs` (2), `tests/modules.rs::module_const_is_a_valid_array_length`, `tests/features.rs::nested_generic_types_and_shift_operators`, `tests/extended.rs::switch_with_default_satisfies_return_analysis`, 4 parser unit tests, 3 semantic unit tests; `llvm-as` verifies the aggregate IR |
 
 ### Known gaps (explicit)
 

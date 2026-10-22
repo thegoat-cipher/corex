@@ -28,8 +28,8 @@ test counts and limitations"), 2026-10-22. Worktree branch:
 `room/corex-self-hosting-assessment-xvuu`.
 
 **Update (2026-10-22, branch `room/corex-p0-blocker-fixes-by6h`):** P0-1 … P0-5
-are implemented, tested, and committed; `cargo test` reports **193 passed, 0
-failed** (68 unit, 125 integration), and every example prints identical output
+are implemented, tested, and committed; `cargo test` reports **194 passed, 0
+failed** (68 unit, 126 integration), and every example prints identical output
 and exit status at `--opt 0,1,2,3`. The rows below record the new evidence. The
 remaining gates are P0-6 and P0-7 in §8.1, plus B6 if parallel builds are ever
 required.
@@ -65,8 +65,9 @@ enums, `switch` instead of `match`, explicit context pointers instead of
 closures, hand-written containers instead of generics, and arena allocation
 instead of `Box`/`Rc`.
 
-The port is therefore **feasible but expensive**, and the missing library
-surface — not the language core — is what makes "today" the wrong start date.
+The port is therefore **feasible but expensive**. The language and library
+prerequisites are now in place; what remains is the differential harness and a
+performance baseline, plus the ordinary engineering risk of a 20k+ line port.
 
 ---
 
@@ -99,7 +100,7 @@ thread join; targets other than Linux x86-64.
 
 ### 2.2 Compiler
 
-`compiler/src` is 17,954 lines including inline tests (17,212 non-test lines),
+`compiler/src` is 18,020 lines including inline tests (17,289 non-test lines),
 zero external crates, Rust edition 2021, LLVM 20 textual IR.
 
 | Area | File | Lines | Role |
@@ -107,17 +108,17 @@ zero external crates, Rust edition 2021, LLVM 20 textual IR.
 | Tokens | `token.rs` | 267 | 103 `TokenKind` variants, descriptions |
 | Diagnostics | `diagnostics.rs` | 321 | spans, source map, rendering |
 | Lexer | `lexer.rs` | 787 | byte-oriented, structured errors |
-| AST | `ast.rs` | 846 | `Program`, `Stmt` (13 variants), `ExprKind` (11), `Type` (15), layouts |
-| Parser | `parser.rs` | 2,274 | recursive descent + precedence climbing, recovery, macros, cfg |
+| AST | `ast.rs` | 847 | `Program`, `Stmt` (13 variants), `ExprKind` (11), `Type` (15), layouts |
+| Parser | `parser.rs` | 2,301 | recursive descent + precedence climbing, recovery, macros, cfg |
 | Semantic | `semantic.rs` | 4,330 | scopes, types, layouts, const eval, mutability, unsafe, return flow |
 | Codegen | `codegen.rs` | 4,001 | textual LLVM IR, ABI, debug metadata, sanitizer mode |
-| Driver | `driver.rs` | 1,355 | units, interfaces, objects, archives, linking, manifest |
+| Driver | `driver.rs` | 1,357 | units, interfaces, objects, archives, linking, manifest |
 | Mangle | `mangle.rs` | 404 | deterministic `module$item` rewriting |
 | Formatter | `format.rs` | 270 | whitespace-only, idempotent |
 | Linter | `lint.rs` | 356 | `W0001`–`W0004` |
 | Docgen | `docgen.rs` | 217 | Markdown from `///` |
 | LSP | `lsp.rs` | 908 | dependency-free JSON-RPC over stdio |
-| REPL | `repl.rs` | 472 | accumulating definitions, `:` commands |
+| REPL | `repl.rs` | 508 | accumulating definitions, `:` commands |
 | Line editor | `lineedit.rs` | 273 | raw mode via `stty` |
 | CLI | `main.rs` | 844 | commands, stdin, exit codes |
 
@@ -141,8 +142,8 @@ with `u64` values in insertion order and `std_builder` grows with
 ### 2.4 Tooling, tests, benchmarks, build
 
 - CLI: `build run exec repl emit-ir check fmt lint doc test`; `corex-lsp`.
-- Tests: **193 passed, 0 failed** (68 unit + 125 integration). Per binary:
-  `aggregates` 5, `cli` 14, `collections` 2, `compiler_caps` 8, `concurrency` 3,
+- Tests: **194 passed, 0 failed** (68 unit + 126 integration). Per binary:
+  `aggregates` 5, `cli` 15, `collections` 2, `compiler_caps` 8, `concurrency` 3,
   `diagnostics` 29, `driver_helpers` 2, `extended` 7, `features` 8, `ffi` 2,
   `ir` 6, `modules` 5, `native` 18, `opt_levels` 5, `robustness` 2,
   `stdlib` 2, `tooling` 7. Unit tests: `semantic` 29, `parser` 18, `lexer` 9,
@@ -245,18 +246,13 @@ places, `unsafe` gating, return flow, and bounds diagnostics.
 
 `codegen.rs` is a textual emitter: it builds `String`s with `format!` (673
 occurrences), stores function bodies in `Vec<String>`, and deduplicates string
-literals with a `Vec` scan. `std_fmt::Fmt` provides typed pushes
-(`push_str`, `push_i64`, `push_hex`, `push_f64`) into a fixed buffer, and
-`vec<u8>` provides growth.
+literals with a `Vec` scan. `std_builder::Builder` now provides the growable
+byte buffer (`reserve`, `push_byte`, `push_str`, `push_i64`, `push_hex`,
+`push_f64`), and `std_fmt` remains the typed number formatter it calls into.
 
-What is missing is a **growable formatter**. The port needs one of:
-
-1. a `Builder { data: *mut u8, len, cap }` with `reserve`/`push_byte`/
-   `push_str`/`push_i64` in `lib/corex`; or
-2. a `vec<u8>` with a small formatting helper that appends digits.
-
-Either is straightforward and was prototyped (§5.5). The risk is silent
-formatting drift in 673 call sites, which differential IR tests catch.
+The port should emit IR and diagnostics through `Builder`; do not add a second
+formatting path. The risk is silent formatting drift in 673 call sites, which
+differential IR tests catch.
 
 ### 3.5 Driver, subprocesses, and file I/O
 
@@ -398,7 +394,7 @@ test result: ok. 2 passed;  0 failed   (stdlib)
 test result: ok. 7 passed;  0 failed   (tooling)
 ```
 
-Total: **193 passed, 0 failed**. This matches the README and `docs/tasks.md`.
+Total: **194 passed, 0 failed**. This matches the README and `docs/tasks.md`.
 The suite includes native compile/run tests, IR verification, diagnostics,
 modules/archives/shared objects, C ABI in both directions, DWARF inspection,
 sanitizers, an LSP session, optimization-level equivalence, static aggregate
@@ -506,7 +502,7 @@ compiler are expressible. The gaps are library ergonomics, not semantics.
 
 | Phase | Work | Exit gate |
 |---|---|---|
-| **0. Prerequisites** | Implement P0 items in §8; add the differential harness and a CoreX-native test runner | `cargo test` still 174; new tests cover map/builder/driver helpers; probes B1/B2/B3/B4 have documented workarounds |
+| **0. Prerequisites** | Implement P0 items in §8; add the differential harness and a CoreX-native test runner | `cargo test` remains green (194); map/builder/driver helpers and aggregate tests pass; probes B1/B2/B3/B4 have documented workarounds |
 | **1. Infrastructure** | Arena, growable builder, string map/set, diagnostics/source map, path helpers, temp dirs | Unit tests for map/builder; can read a file and emit a diagnostic with a span |
 | **2. Lexer** | Port `token.rs` + `lexer.rs`; token dump mode | Token stream for every `examples/*.cx` and corpus file matches the Rust lexer; negative cases produce the same codes |
 | **3. AST + parser** | Tagged AST, recursive descent, precedence climbing, recovery, `#[cfg]`, macros (last) | Parses all corpus files; AST dump normalized and compared; malformed corpus yields the same diagnostic codes and counts |
@@ -577,12 +573,12 @@ binary". Self-compilation comes only after codegen and driver parity.
 | AC-1 | Corpus parity: every corpus program produces the same stdout/stderr/exit with both compilers at `--opt 0..3` | differential runner report |
 | AC-2 | Negative parity: every negative input produces the same ordered diagnostic codes and start positions | differential runner report |
 | AC-3 | IR validity: every emitted module passes `llvm-as` | `emit-ir --verify` |
-| AC-4 | Existing behavior tests: the 193-test suite's behavioral cases pass when run against `corexc` | ported/parameterized harness |
+| AC-4 | Existing behavior tests: the 194-test suite's behavioral cases pass when run against `corexc` | ported/parameterized harness |
 | AC-5 | Modules/FFI: separate compilation, archives, shared objects, `dlopen`, C calls both directions work | `tests/modules.rs`, `tests/ffi.rs` equivalents |
 | AC-6 | Determinism: twin builds produce identical artifacts | SHA-256 comparison |
 | AC-7 | Fixed point: stage2 and stage3 agree on the compiler source | normalized IR/ELF diff |
 | AC-8 | Performance: self-compile at `--opt 2` under an agreed budget (suggest ≤ 10 s on the reference machine), frontend within 2× of Rust `corex check` on the same input | timing harness |
-| AC-9 | No regression: Rust `corex` remains the default and all 193 tests pass | CI |
+| AC-9 | No regression: Rust `corex` remains the default and all 194 tests pass | CI |
 
 ### 6.7 Rollback
 
@@ -622,7 +618,7 @@ commitment.
 |---|---|---|
 | **AST/parser volume** | 281 `match` sites become `switch` trees with no exhaustiveness checking; fallthrough and missing `break` are silent bugs | Mechanical port with AST-dump differential tests; one node kind at a time; `switch` lint |
 | **IR string emission** | 673 `format!` sites; manual width/hex/float formatting; O(n²) concatenation if naive | Growable builder with `reserve`; snapshot tests; `llvm-as` on every module |
-| **Driver process handling** | No pipes/env/argv stdlib; `llvm-as`/`opt`/`llc`/`cc` failures must produce `E0300`, not hangs | Add wrappers first; test missing tools, bad IR, and linker failures; timeouts |
+| **Driver process handling** | The wrappers exist, but `fork`/`exec`/pipe cleanup, argument vectors, and tool timeouts still need careful integration; `llvm-as`/`opt`/`llc`/`cc` failures must produce `E0300`, not hangs | Test missing tools, bad IR, and linker failures; close every pipe end; enforce timeouts |
 | **Memory bugs** | Manual arena, shallow `vec` copies, no destructors; a double free or UAF in the compiler is a crash | One arena per compilation; never copy owning `vec` headers; `--sanitize` on the CoreX compiler build |
 | **Determinism** | Hash iteration order and map collisions can change output and break the fixed point | Insertion-order maps; counter-only temp names; twin-build SHA-256 gate |
 | **Performance** | CoreX has no LLVM optimization of its own; frontend is allocation-light but bounds-checked; single-threaded | Benchmark a 10k-line input early; budget 2–4× Rust; consider `fork` per unit |
@@ -638,8 +634,9 @@ commitment.
   point impossible to reach.
 - IR emission is written as repeated string concatenation, making self-compile
   minutes instead of seconds.
-- The driver remains unable to capture tool stderr, so failures are silent and
-  the differential harness cannot classify them.
+- The driver uses the new pipe/`spawn_argv` wrappers without closing every pipe
+  end or enforcing timeouts, so a failed tool hangs or the differential harness
+  cannot classify the failure.
 - The team treats "Turing-complete" as sufficient and starts the semantic port
   before the lexer/parser corpus is stable.
 
@@ -668,10 +665,11 @@ holds for P0-1 … P0-3: C-like data and explicit allocation, no new runtime.
 
 ### 8.2 Recommended before the semantic/codegen phases
 
-- **P1:** `read_file` error distinction, `getenv`/`PATH` parsing helpers,
-  `dirname`/`basename`/path normalization, and directory iteration tests.
-- **P1:** a stable `Builder` API used by both `std_fmt` and the compiler, so
-  formatting code is not duplicated.
+- **P1:** path normalization (`dirname`/`basename`/`.`/`..`) and directory
+  iteration tests for the driver; `envp` lookup and `read_file` failure
+  distinction are already in `std_env`/`std_fs`.
+- **P1:** use `std_builder` for the port's IR and diagnostic output rather than
+  adding a second formatting path; `std_fmt` remains the number formatter.
 - **P1:** a decision on modules: one unit for the first bootstrap, then
   `corex.toml` once interfaces are proven.
 - **P2:** thread join and parallel unit builds; not needed for a first fixed

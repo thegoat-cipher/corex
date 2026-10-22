@@ -19,8 +19,8 @@ fn main() -> i32 {
 }
 ```
 
-Status: **C-class systems language implemented and tested** — 193 automated
-tests pass (68 unit, 125 integration), including native compile/run tests at
+Status: **C-class systems language implemented and tested** — 194 automated
+tests pass (68 unit, 126 integration), including native compile/run tests at
 every optimization level, C ABI tests in both directions, separate-compilation
 and manifest builds, DWARF inspection, LSP sessions, and sanitizer aborts.
 
@@ -109,7 +109,8 @@ Inside the REPL:
   `42`;
 - a trailing `;` runs it as a statement instead, so no value is printed
   (`1 + 2;`);
-- function definitions accumulate and a redefinition replaces the old one;
+- top-level items (functions, structs, unions, typedefs, enums, consts, globals, macros) accumulate; redefinition replaces the old one;
+- use `:reset` before pasting an unrelated program; existing `main`/`_start` definitions are re-run after each new definition;
 - a blank line submits a multi-statement block, and pasted programs (with blank
   lines between functions) run once when their entry point is complete;
 - arrows/Home/End/Delete/Backspace edit the line, Up/Down walk history (saved in
@@ -213,7 +214,7 @@ Full normative details: [`docs/language-spec.md`](docs/language-spec.md) and
 
 ```bash
 cd compiler
-cargo test                 # 193 tests: 68 unit + 125 integration
+cargo test                 # 194 tests: 68 unit + 126 integration
 cargo test --lib           # stage unit tests only
 cargo test --test native   # compile → link → execute, asserts stdout/exit codes
 cargo test --test cli      # stdin, exec, REPL, flags and exit codes
@@ -269,7 +270,7 @@ compiler/
     lint.rs             unused/unreachable/constant-condition warnings
     docgen.rs           Markdown from `///` comments
     lsp.rs              JSON-RPC language server
-    repl.rs             interactive session (definitions accumulate)
+    repl.rs             interactive session (items accumulate)
     lineedit.rs         TTY line editing + history (stty raw mode)
     main.rs             CLI (files, stdin, inline source, REPL, tooling)
   lsp_main.rs           `corex-lsp` binary
@@ -320,11 +321,11 @@ Feature boundaries:
   supported for `static` declarations: arrays (including nested arrays and
   arrays of structs), structs with a plain C layout, `str` elements, and
   function-pointer tables are emitted as real LLVM globals with no runtime
-  initializer. Bits of aggregates that still need runtime work are unsupported
-  and rejected with `E0226`: unions, bitfields, packed/`align(N)` structs, and
-  flexible array members in a static struct initializer. Constant initializers
-  may only read previously declared immutable globals (forward references are
-  rejected with `E0226`). Array lengths may be integer literals, previously
+  initializer. Static struct literals outside the plain C layout are rejected
+  with `E0226`: unions, bitfields, packed/`align(N)` structs, and flexible array
+  members. Constant initializers may only read previously declared immutable
+  globals (forward references are rejected with `E0226`). Array lengths may be
+  integer literals, previously
   declared integer `const` names, or constant arithmetic over them; a length
   that is not constant is `E0100`.
 - **Slices and strings.** `[T]` and `str` are shallow two-word copies and have no
