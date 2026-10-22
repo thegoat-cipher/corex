@@ -127,7 +127,9 @@ pub fn load_source(file: &SourceFile) -> Result<SourceFile, Vec<Diagnostic>> {
 
 fn parse_imports(text: &str) -> Result<Vec<crate::ast::ImportDecl>, Vec<Diagnostic>> {
     let tokens = lexer::lex(text)?;
-    let program = parser::parse(&tokens)?;
+    // Import extraction runs before module interfaces exist; unresolved array
+    // lengths are re-checked by the real compile below.
+    let program = parser::parse_for_discovery(&tokens, &[])?;
     Ok(program.imports)
 }
 
@@ -347,7 +349,7 @@ fn unit_from_text(
 ) -> Result<Unit, Vec<Diagnostic>> {
     let file = SourceFile::new(display.clone(), text.clone());
     let tokens = lexer::lex(&text)?;
-    let program = parser::parse_with_cfg(&tokens, cfg)?;
+    let program = parser::parse_for_discovery(&tokens, cfg)?;
     let module = match (&program.module_name, expected_module) {
         (Some(name), Some(expected)) if name != expected => {
             return Err(vec![Diagnostic::error(
@@ -490,6 +492,9 @@ fn render_const(ty: &Type, value: &ConstValue) -> String {
         ConstValue::Float(v) => format!("{v:?}"),
         ConstValue::Str(bytes) => quote_str(bytes),
         ConstValue::GlobalAddr(name) => format!("&{name}"),
+        ConstValue::FnAddr(name) => format!("&{name}"),
+        // Interfaces only export scalar, `str`, and pointer constants.
+        ConstValue::Array(_) | ConstValue::Struct(_) => "0".to_string(),
     }
 }
 

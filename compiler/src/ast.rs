@@ -537,6 +537,12 @@ pub enum ConstValue {
     Char(u8),
     Str(Vec<u8>),
     GlobalAddr(String),
+    /// Address of a function, emitted as `ptr @name` in a static initializer.
+    FnAddr(String),
+    /// Array constant; elements are emitted in order.
+    Array(Vec<ConstValue>),
+    /// Struct constant; fields are stored in declaration order.
+    Struct(Vec<(String, ConstValue)>),
 }
 
 #[derive(Clone, Debug)]
