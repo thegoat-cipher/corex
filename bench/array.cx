@@ -1,0 +1,22 @@
+// CoreX benchmark: pointer-based array fill and sum.
+// Must match bench/array.c.
+
+fn main() -> i32 {
+    let n: usize = 4000000;
+    unsafe {
+        let p: *mut i64 = alloc(n * 8) as *mut i64;
+        let mut i: usize = 0;
+        while i < n {
+            *(p + i) = (i as i64) ^ 14979642;
+            i += 1;
+        }
+        let mut sum: i64 = 0;
+        i = 0;
+        while i < n {
+            sum += *(p + i);
+            i += 1;
+        }
+        free(p as *mut u8, n * 8);
+        return (sum % 256) as i32;
+    }
+}

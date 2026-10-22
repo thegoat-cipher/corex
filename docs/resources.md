@@ -164,3 +164,23 @@ CoreX is dual-licensed under MIT OR Apache-2.0. See
 [`LICENSE-MIT`](../LICENSE-MIT), [`LICENSE-APACHE`](../LICENSE-APACHE), and
 [`THIRD_PARTY.md`](../THIRD_PARTY.md). The compiler uses no external Rust crates;
 LLVM and the host C toolchain are build tools, not redistributed components.
+
+---
+
+## 8. v0.3 additions
+
+| Path | Use it for |
+|---|---|
+| [`lib/corex/`](../lib/corex) | Freestanding standard library: allocator, memory, strings, I/O, files, process, time, math, formatting, sync, threads, TLS, dynamic loading |
+| [`compiler/src/format.rs`](../compiler/src/format.rs) | Whitespace formatter and its unit tests |
+| [`compiler/src/lint.rs`](../compiler/src/lint.rs) | Linter rules `W0001`–`W0004` |
+| [`compiler/src/docgen.rs`](../compiler/src/docgen.rs) | Markdown generator for `///` comments |
+| [`compiler/src/lsp.rs`](../compiler/src/lsp.rs) | JSON-RPC language server (no dependencies) |
+| [`compiler/src/mangle.rs`](../compiler/src/mangle.rs) | `module$item` mangling and reference rewriting |
+| [`compiler/tests/ffi.rs`](../compiler/tests/ffi.rs) | C helper compiled and linked in both directions |
+| [`compiler/tests/modules.rs`](../compiler/tests/modules.rs) | Modules, cfg, manifest, archives, shared libraries |
+| [`compiler/tests/stdlib.rs`](../compiler/tests/stdlib.rs) | Standard library end-to-end |
+| [`compiler/tests/concurrency.rs`](../compiler/tests/concurrency.rs) | Atomics, volatile, asm, threads, futex, TLS |
+| [`compiler/tests/tooling.rs`](../compiler/tests/tooling.rs) | Formatter, linter, docs, tests, DWARF, sanitizer, LSP |
+| [`examples/dispatch.cx`](../examples/dispatch.cx) | Function-pointer dispatch table in a stack machine |
+| [`bench/array.cx`](../bench/array.cx), [`bench/struct.cx`](../bench/struct.cx), [`bench/f64.cx`](../bench/f64.cx) | Pointer, struct, and floating-point benchmarks with C references |

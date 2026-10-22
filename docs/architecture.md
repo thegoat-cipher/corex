@@ -415,3 +415,90 @@ cargo test --test robustness  # malformed input never panics
 | Add a builtin | `semantic.rs` (`BUILTINS`, `check_call`, `Callee`), `codegen.rs` (`gen_call`, `helpers`) |
 | Change runtime behavior | `codegen.rs` (`helpers`, `fatal`), `docs/language-spec.md` §8–§10, `docs/memory-model.md`, add a native test |
 | Add a diagnostic | emit in the stage that detects it, document the code in `docs/language-spec.md` §11, add a case to `tests/diagnostics.rs` |
+
+---
+
+## 12. v0.3 architecture: modules, units, and tooling
+
+### 12.1 Multi-unit pipeline
+
+```
+entry.cx  ──parse──► deps (`mod name;`) ──discover──► topo order
+   │
+   ├─ for each unit:
+   │    interfaces of transitive deps (generated .cxi source)
+   │    + unit source ──lex/parse──► AST
+   │    mangle unit-local items with `module$item` + rewrite references
+   │    semantic analysis (entry required only for the root program)
+   │    interface generation for `pub` items
+   │    codegen (textual LLVM IR) ──llvm-as──► opt ──llc──► unit.o
+   │
+   └─ cc: unit.o ... [extra objects/archives] [-L/-l] ──► ELF / .so
+      or llvm-ar rcs ──► libname.a
+```
+
+No global symbol table is shared between units. A unit sees its own items plus
+the generated interfaces of its dependencies; interface files are valid CoreX
+source using `extern "corex"` declarations and mangled names. This makes the
+interface a stable, inspectable artifact (set `COREX_DUMP_INTERFACES=1`).
+
+### 12.2 Mangling
+
+| Item | Symbol |
+|---|---|
+| `math::add` (CoreX ABI) | `math$add` |
+| `pub fn` in the untitled single-file profile | `add` |
+| `extern "C" fn c_add` | `c_add` (never mangled) |
+| entry point | `main` / `_start` (never mangled) |
+| `pub const K` in `math` | compile-time; no symbol |
+| `pub static G` in `math` | `math$G` |
+| `math::Point` | `math$Point` in type names and interfaces |
+
+The `$` separator is reserved for compiler-generated names and is accepted by
+the lexer only inside identifiers.
+
+### 12.3 Interfaces and visibility
+
+`generate_interface` walks the unit AST after analysis and emits:
+
+- full `pub struct`/`union` definitions (fields are part of the ABI),
+- `pub enum` with discriminants,
+- `pub typedef`,
+- `pub const` with its evaluated value,
+- `extern static` for public globals,
+- `extern "corex" fn` for public function definitions.
+
+Private items are absent, so referencing them from another module fails at type
+or name resolution. A public signature that mentions a private local type is
+rejected with `E0233` instead of leaking an unusable declaration.
+
+### 12.4 Layout representation for the backend
+
+LLVM's default struct layout matches the C layout only for ordinary natural
+structs. For unions, packed/aligned structs, bitfields, and flexible-array
+structs, the LLVM type is `[size x i8]`; all field access is a byte GEP with the
+offset computed by semantic analysis. Loads/stores use the declared field type
+and explicit alignment. This keeps LLVM from inserting padding that would
+disagree with `sizeof`/`offsetof`. C-ABI functions still use literal LLVM struct
+types where the layout is plain C, so System V classification applies.
+
+### 12.5 Tooling entry points
+
+| Binary | Purpose |
+|---|---|
+| `corex` | build/run/exec/repl/emit-ir/check/fmt/lint/doc/test |
+| `corex-lsp` | JSON-RPC language server over stdio |
+
+Formatter and linter live in `format.rs` and `lint.rs`; doc generation in
+`docgen.rs`; the LSP transport/handlers in `lsp.rs`. Debug metadata is emitted by
+`codegen.rs` only when requested, so ordinary builds stay small. Checked
+arithmetic/sanitizers are a codegen option, not a separate backend.
+
+### 12.6 Reproducibility
+
+- IR and object generation use only source/spans and the unit's interface set.
+- Interface concatenation order is dependency order.
+- No timestamps or paths are embedded unless `-g` is used (DWARF contains the
+  source path, as expected).
+- Linker selection is `COREX_CC`, default `cc`; archiver is `llvm-ar` from
+  `COREX_LLVM_BIN`, falling back to `ar`.

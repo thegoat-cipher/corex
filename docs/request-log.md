@@ -501,3 +501,26 @@ permitted. A public repository without a license is not open source.
 **Outcome.** The repo is OSI open source under a permissive dual license; forks
 and commercial use are permitted. GitHub license detection was checked after
 pushing.
+
+---
+
+## R-0017 — C-class roadmap implementation (2026-10-22)
+
+**Request:** Implement the complete CoreX C-class roadmap: function pointers;
+C control flow; unions/bitfields/flexible arrays/designated and compound
+literals; layout introspection and C layout; C ABI/FFI/`cstr`/varargs/main
+args; file modules, interfaces, separate compilation and `corex.toml`;
+allocator API and a minimal standard library; tooling (DWARF, formatter, linter,
+LSP, docs generator, test runner, sanitizers); P1 (volatile/atomics/threads/TLS,
+inline asm, macros, cfg, shared libraries/`dlopen`, varargs conformance,
+benchmarks). Update all documentation and keep the suite green.
+
+**Outcome:** Implemented end to end on branch
+`room/corex-c-class-roadmap-deepseek-hjce`. 174 tests pass (61 unit, 113
+integration); examples run at `--opt 0..3`; C interop, separate compilation,
+static archives, shared libraries + `dlopen`, DWARF inspection, LSP sessions, and
+sanitizer aborts are covered. Measured benchmark ratios are recorded in
+`docs/benchmarks.md` (`mix` 1.017, `array` 1.056, `struct` 0.964, `f64` 0.947,
+`fib` 1.636). Known gaps are listed in `docs/tasks.md` (no thread join, explicit
+TLS table, expression-only macros, volatile globals + pointer builtins, `fib`
+codegen gap).

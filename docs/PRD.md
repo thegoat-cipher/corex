@@ -348,3 +348,34 @@ Feature-level additions that were not in the original PRD but are implemented an
 documented in `docs/language-spec.md`: the `print` intrinsic (ADR-0017), `[value; N]`
 array repeats (ADR-0011), the optional `fn _start()` entry point, `stdin`/`exec`/`repl`
 CLI paths (ADR-0014), and the 256-level nesting limit (request log R-0009, `E0111`).
+
+---
+
+## 12. v0.3 addendum: C-class roadmap
+
+The product thesis is unchanged; the surface is now C-class. All P0 and P1
+roadmap items are implemented and tested, with explicit gaps listed at the end.
+
+| Area | Delivered | Evidence |
+|---|---|---|
+| Function pointers | Function types, addresses, indirect calls, null, dispatch tables | `tests/extended.rs`, `examples/dispatch.cx` |
+| C control flow | `switch` fallthrough, `for`, `do while`, labels, `goto` | `tests/extended.rs` |
+| Aggregates | Unions, bitfields, flexible arrays, designated/partial/compound literals | `tests/extended.rs` |
+| Layout | `typedef`, `repr(C)`, packed, `align(N)`, `sizeof`/`alignof`/`offsetof` | `tests/extended.rs` |
+| ABI/FFI | `extern "C"` both directions, aggregates, variadic calls, `cstr`, `main(argc,argv,envp)` | `tests/ffi.rs` |
+| Modules | `module`/`mod`/`pub`, interfaces, `module$item` mangling | `tests/modules.rs` |
+| Separate compilation | Per-unit objects, archives, shared objects, `corex.toml`, `#[cfg]` | `tests/modules.rs` |
+| Allocator | malloc/calloc/realloc/free, `Allocator`, arena | `tests/stdlib.rs` |
+| Stdlib | mem/str/io/fs/process/time/math/fmt/sync/thread/TLS/dl | `tests/stdlib.rs`, `tests/concurrency.rs` |
+| Tooling | DWARF, formatter, linter, LSP, docs generator, test runner, sanitizers | `tests/tooling.rs` |
+| P1 runtime | volatile, atomics, threads, futex mutex/condvar, explicit TLS | `tests/concurrency.rs` |
+| P1 language | inline asm, macros, shared libraries/`dlopen` | `tests/concurrency.rs`, `tests/modules.rs` |
+| Performance | Five kernels + compiler throughput, measured | `docs/benchmarks.md` |
+
+Non-goals that remain: garbage collection, hidden allocation, a mandatory
+runtime, exceptions, borrow checking/lifetimes, and C++ compatibility. Package
+management and non-x86-64 targets remain out of scope.
+
+Known gaps: no thread join, explicit (not compiler-managed) TLS, expression
+macros only, `volatile` on globals plus pointer builtins, and a measured ~1.6×
+gap on the recursive `fib` kernel versus GCC.

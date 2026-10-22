@@ -19,10 +19,18 @@ fn main() -> i32 {
 }
 ```
 
-Status: **MVP implemented and tested** — 142 automated tests pass, including
-integration tests that compile programs to native binaries and assert their
-output and exit codes at every optimization level.
-Language surface is deliberately small; see [Limitations](#limitations).
+Status: **C-class systems language implemented and tested** — 174 automated
+tests pass (61 unit, 113 integration), including native compile/run tests at
+every optimization level, C ABI tests in both directions, separate-compilation
+and manifest builds, DWARF inspection, LSP sessions, and sanitizer aborts.
+
+The language now has function pointers, C control flow, unions/bitfields/packed
+layout, `sizeof`/`alignof`/`offsetof`, C FFI and variadic calls, file modules
+with visibility and separate compilation, `corex.toml` projects, a freestanding
+standard library, atomics/threads/futexes, inline assembly, macros, debug info,
+a formatter, linter, docs generator, test runner, and a language server. It
+still has no garbage collector, hidden allocation, runtime, or libc dependency.
+See [Limitations](#limitations).
 
 ---
 
@@ -62,13 +70,27 @@ file factorial     # ELF 64-bit LSB executable, x86-64, statically linked (abrid
 ## CLI
 
 ```
-corex build <file.cx | -> [-o <output>] [--opt <0-3>]
+corex build <file.cx | -> | directory> [-o <output>] [--opt <0-3>]
+            [--link <obj|a>]... [-L <dir>]... [-l <lib>]... [--hosted]
+            [--shared] [--emit obj|shared|staticlib] [-g] [--sanitize]
+            [--cfg name=value]... [-I <dir>]...
 corex run   <file.cx | -> [--opt <0-3>] [-- <program args>...]
 corex exec  '<source>' [--opt <0-3>] [-- <program args>...]
 corex repl  [--opt <0-3>]
 corex emit-ir <file.cx | -> [--verify]
 corex check <file.cx | ->
+corex fmt   <file.cx | -> [-w | --check]
+corex lint  <file.cx | -> [--deny-warnings]
+corex doc   <file.cx | -> [-o <out.md>]
+corex test  <file.cx | -> [--opt <0-3>] [--cfg ...] [-I <dir>]...
+corex-lsp
 ```
+
+`corex build <directory>` reads `corex.toml`; `--emit staticlib|shared` produces
+archives/shared objects, `--emit obj` a single unit object. `-g` emits DWARF 5,
+`--sanitize` checks signed overflow and hardens the allocator. `corex-lsp` is a
+stdio language server (diagnostics, completion, definition, references, rename,
+hover, formatting).
 
 `-` reads source from stdin, `exec` runs source given as an argument, and `repl`
 starts an interactive session where a blank line compiles and runs the block:
@@ -116,22 +138,30 @@ Environment: `COREX_LLVM_BIN` (LLVM tool directory), `COREX_CC` (linker driver),
 ## Language in one screen
 
 - **Types:** `i8 i16 i32 i64`, `u8 u16 u32 u64`, `usize isize`, `bool`, `char`,
-  `f32 f64`, `*T`, `*mut T`, `[T; N]`, slices `[T]`, `str`, `vec<T>`, `enum`,
-  and `struct` values. Arrays cannot be passed or returned by value; structs,
-  slices, `str`, and vectors can.
-- **Items:** functions, `const` compile-time constants, `static`/`static mut`
-  globals, enums, structs, and file `import`s.
+  `f32 f64`, `*T`, `*mut T`, `[T; N]`, slices `[T]`, `str`, `cstr`, `vec<T>`,
+  `enum`, `struct`, `union`, and function types `fn(T) -> R`. Arrays cannot be
+  passed or returned by value; structs, slices, `str`, and vectors can.
+- **Items:** functions (including `extern "C"` and `extern "corex"`),
+  `typedef`, `const`, `static`/`static mut`/`static mut volatile` globals,
+  enums, structs (`repr(C)`, packed, `align(N)`), unions, file modules
+  (`module`/`mod`/`pub`), `#[cfg(...)]` attributes, declarative `macro`s, and
+  legacy textual `import`s.
 - **Bindings:** `let x: i32 = 1;` (immutable) or `let x = 1;` (inferred);
   `let mut` makes the binding mutable. The initializer is mandatory.
 - **Functions:** `fn name(a: T, b: U) -> R { ... }`; recursion allowed.
-- **Control flow:** `if/else`, `while`, `loop`, `break`, `continue`, `return`,
+- **Control flow:** `if/else`, `while`, `loop`, `for`, `do while`, `switch` with
+  C fallthrough, labels and `goto`, `break`, `continue`, `return`,
   `unsafe { ... }`. Blocks are statements, not expressions.
 - **Operators:** `+ - * / %`, comparisons, `&& || !`, `& | ^ << >>`, compound
-  assignment (`+=`, `<<=`, …), unary `-`, `as`, indexing, field access,
-  slicing, and `len(x)`.
-- **Compiler data:** `vec_new`/`vec_push`/`vec_slice`/`vec_free` dynamic arrays;
-  `read_file`/`write_file`; `panic`/`assert`; recursive structs via pointers;
-  enums for token/error kinds; file imports with a flat namespace.
+  assignment (`+=`, `<<=`, …), unary `-`, `as`, indexing, field access
+  (`p->x` is `(*p).x`), slicing, `len(x)`, `sizeof(T)`, `alignof(T)`, and
+  `offsetof(T, field)`.
+- **Compiler data and systems work:** `vec_new`/`vec_push`/`vec_slice`/
+  `vec_free`; `read_file`/`write_file`; `panic`/`assert`; function-pointer
+  dispatch tables; unions and tagged unions; bitfields; flexible array members;
+  designated/partial initializers; C ABI calls and variadic C calls;
+  `main(argc, argv, envp)`; atomics, `volatile`, threads, futex mutexes, TLS,
+  inline assembly, and `dlopen` (hosted).
 - **Semantics that matter:**
   - integer overflow wraps (`(255 as u8) + 1 == 0`);
   - shift counts are masked (`(1 as u8) << 8 == 1`);
@@ -141,9 +171,11 @@ Environment: `COREX_LLVM_BIN` (LLVM tool directory), `COREX_CC` (linker driver),
   - floats are IEEE 754 and never abort on division by zero;
   - no implicit numeric conversions — use `as`.
 - **Memory:** `alloc(bytes)` → `*mut u8` via `mmap`, `free(ptr, bytes)` via
-  `munmap`; raw pointer dereference, pointer arithmetic, integer/pointer casts,
-  and syscalls require `unsafe`. No borrow checker: the language does **not**
-  claim memory safety for pointer code.
+  `munmap`; the freestanding stdlib adds C-style `malloc`/`calloc`/`realloc`/
+  `free`, an `Allocator` interface, and an arena. Raw pointer access, pointer
+  arithmetic, integer/pointer casts, atomics, inline asm, and syscalls require
+  `unsafe`. No borrow checker: the language does **not** claim memory safety for
+  pointer code.
 - **Syscalls:** `syscall(nr, a1, ..., a6)` with 1–7 arguments (missing arguments
   are passed as 0), returning `isize` in `rax`.
 - **Printing:** `print(value)` writes an integer, `bool`, `char`, float (fixed
@@ -152,8 +184,9 @@ Environment: `COREX_LLVM_BIN` (LLVM tool directory), `COREX_CC` (linker driver),
 - **Files and errors:** `read_file(path)` returns an owned `vec<u8>`;
   `write_file(path, data)` returns `0`/`-1`; `panic(msg)` and
   `assert(cond, msg)` abort with exit 101. There are no exceptions or `Result`.
-- **Entry:** `fn _start()` for full control, or `fn main() -> i32` (the compiler
-  synthesizes `_start`, exits with the low 8 bits of the return value).
+- **Entry:** `fn _start()` for full control, `fn main() -> i32` (the compiler
+  synthesizes `_start`), or `fn main(argc: i32, argv: **u8, envp: **u8) -> i32`.
+  With `--hosted`, the C runtime calls `main` instead.
 
 Full normative details: [`docs/language-spec.md`](docs/language-spec.md) and
 [`docs/grammar.ebnf`](docs/grammar.ebnf).
@@ -170,6 +203,7 @@ Full normative details: [`docs/language-spec.md`](docs/language-spec.md) and
 | [`examples/loop_sum.cx`](examples/loop_sum.cx) | `while`, `continue`, `usize` arithmetic | exit status 51 |
 | [`examples/features.cx`](examples/features.cx) | enums, structs, globals, floats, chars, inference, compound assignment, slices, strings, `len` | deterministic tour output, exit 0 |
 | [`examples/compiler_data.cx`](examples/compiler_data.cx) | tokenizer using `enum`, `struct`, `const`, `vec<T>`, strings, slices, `assert` | token count and kind output, exit 0 |
+| [`examples/dispatch.cx`](examples/dispatch.cx) | function-pointer dispatch table, unions of opcode data, `sizeof` | stack-machine result `30`, exit 0 |
 
 ---
 
@@ -177,7 +211,7 @@ Full normative details: [`docs/language-spec.md`](docs/language-spec.md) and
 
 ```bash
 cd compiler
-cargo test                 # 142 tests: 53 unit + 89 integration
+cargo test                 # 174 tests: 61 unit + 113 integration
 cargo test --lib           # stage unit tests only
 cargo test --test native   # compile → link → execute, asserts stdout/exit codes
 cargo test --test cli      # stdin, exec, REPL, flags and exit codes
@@ -189,6 +223,12 @@ cargo test --test opt_levels   # identical semantics at --opt 0 through 3
                                # (wrapping, shifts, aborts, aliasing, print)
                                # plus 1,104 generated value assertions
 cargo test --test robustness   # malformed input yields diagnostics, not panics
+cargo test --test extended     # function pointers, switch/for/do/goto, layout, cstr, macros
+cargo test --test ffi          # C helper compiled with cc, linked and called both ways
+cargo test --test modules      # file modules, cfg, manifest, static and shared libraries
+cargo test --test stdlib       # allocator, mem/str, files, formatting, time, math
+cargo test --test concurrency  # atomics, volatile, inline asm, threads, futex, TLS
+cargo test --test tooling      # fmt, lint, docs, test runner, DWARF, sanitizers, LSP
 ```
 
 The integration tests invoke the real toolchain; they fail loudly if LLVM 20 is
@@ -216,11 +256,17 @@ compiler/
     ast.rs              AST, Type, IntTy
     parser.rs           recursive descent + precedence climbing
     semantic.rs         scopes, types, mutability, unsafe, return flow
-    codegen.rs          LLVM 20 textual IR backend
-    driver.rs           verify → optimize → object → link → run
+    codegen.rs          LLVM 20 textual IR backend, debug metadata, sanitizer mode
+    driver.rs           units, interfaces, objects, archives, linking, manifest
+    mangle.rs           module symbol/reference rewriting
+    format.rs           whitespace formatter
+    lint.rs             unused/unreachable/constant-condition warnings
+    docgen.rs           Markdown from `///` comments
+    lsp.rs              JSON-RPC language server
     repl.rs             interactive session (definitions accumulate)
     lineedit.rs         TTY line editing + history (stty raw mode)
-    main.rs             CLI (files, stdin, inline source, REPL)
+    main.rs             CLI (files, stdin, inline source, REPL, tooling)
+  lsp_main.rs           `corex-lsp` binary
   tests/
     diagnostics.rs      rejection cases by error code
     ir.rs               IR verification and regressions
@@ -230,8 +276,16 @@ compiler/
     features.rs         globals/enums/floats/structs/slices/strings end to end
     compiler_caps.rs    vec, const, file I/O, imports, panic/assert
     robustness.rs       malformed/adversarial input never panics
-examples/               hello, factorial, pointers, loop_sum, features, compiler_data, playground
-bench/                  two kernels with C references
+    extended.rs         function pointers, C control flow, layout, cstr, macros
+    ffi.rs              C helper compiled and linked both directions
+    modules.rs          modules, cfg, manifest, archives, shared libraries/dlopen
+    stdlib.rs           allocator, memory/strings, files, formatting, time, math
+    concurrency.rs      atomics, volatile, asm, threads, futex, TLS
+    tooling.rs          fmt/lint/doc/test, DWARF, sanitizers, LSP
+lib/corex/              freestanding standard library modules
+examples/               hello, factorial, pointers, loop_sum, features, compiler_data,
+                        dispatch, playground
+bench/                  five kernels with C references
 scripts/bench.sh        benchmark harness
 scripts/try.sh          compile-and-run one file (check / ir / build modes)
 docs/                   spec, grammar, memory model, architecture, PRD, NFR,
@@ -244,10 +298,11 @@ master.md               current status, milestones, next actions
 
 ## Limitations
 
-Explicitly not implemented: unions, tuples, general generics, traits, closures,
-function pointers, namespaced modules, `extern` / C FFI, labeled break, `match`,
-macros, threads, debug information, cross-compilation, and any CoreX-level
-optimizer. File imports are supported with a flat namespace.
+Explicitly not implemented: tuples, general generics, traits, closures,
+exceptions, `async`, labeled `break`, `match`, operator overloading, a package
+registry, thread join, language-level `thread_local`, and targets other than
+Linux x86-64. Function pointers, unions, namespaced file modules, `extern`/C FFI,
+macros, threads, debug information, and tooling are implemented (see the spec).
 
 Feature boundaries:
 
@@ -269,13 +324,21 @@ Feature boundaries:
   vector copies the header and shares the backing block; two owning copies can
   double-free. Treat a vector as owned by one binding and access it through
   `&`/`&mut`.
-- **Imports.** `import "file.cx";` recursively includes files into one flat
-  global namespace. There are no qualified module names, visibility modifiers,
-  or per-module scopes; top-level names must be unique.
+- **Modules.** `module name;` + `mod name;` compile each file independently and
+  expose only `pub` items through generated interfaces. Legacy
+  `import "file.cx";` still expands textually into one flat namespace. Struct
+  fields have no per-field visibility. Public signatures may not expose private
+  local types.
+- **Threads/TLS.** `std_thread::spawn` exists but there is no join; threads exit
+  via `exit(2)`. TLS is the explicit `std_tls` table keyed by thread id, not a
+  compiler `thread_local`. Stacks are caller-allocated and must be freed only
+  after the thread exits.
+- **Function pointer ABI.** Function-pointer calls use the CoreX internal
+  aggregate convention; a C function with aggregate parameters must be called
+  directly through its `extern "C"` declaration.
 - **Error handling.** `panic` and `assert` abort with a message and exit 101.
   There are no exceptions, `Result`, `Option`, or `?`; recoverable failures use
-  ordinary values. Function pointers are not implemented and are not needed by
-  the current compiler-style dispatch.
+  ordinary values.
 - **File I/O.** `read_file` returns an empty `vec<u8>` on failure (it does not
   distinguish empty files from errors); `write_file` returns `0` or `-1`.
   Paths are byte strings and are not UTF-8 validated.
@@ -312,6 +375,7 @@ and runtime aborts for dynamic bounds and division by zero. See
 | [`docs/tasks.md`](docs/tasks.md) | Task tracker with validation evidence |
 | [`docs/request-log.md`](docs/request-log.md) | Append-only record of requests and outcomes |
 | [`docs/benchmarks.md`](docs/benchmarks.md) | Measured performance with methodology |
+| [`lib/corex`](lib/corex) | Freestanding standard library source (modules listed in spec §12.7) |
 
 ## AI assistance
 
