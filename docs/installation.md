@@ -281,3 +281,82 @@ CoreX.
 - [`docs/architecture.md`](architecture.md) — compiler pipeline and code layout.
 - [`examples/compiler_data.cx`](../examples/compiler_data.cx) — a tokenizer built
   from CoreX structs, enums, strings, slices, vectors, and `assert`.
+
+---
+
+## 10. v0.3 addendum: tooling and projects
+
+The compiler now ships two binaries (`corex`, `corex-lsp`) and a freestanding
+standard library. All tools use the same LLVM 20 lookup as the compiler:
+`COREX_LLVM_BIN`, then `PATH`, then `/usr/lib/llvm-N/bin`.
+
+### 10.1 Build and run the newer commands
+
+```bash
+cd compiler && cargo build --release
+
+./target/release/corex fmt   ../examples/features.cx --check   # 0 if formatted
+./target/release/corex fmt   ../examples/features.cx -w        # rewrite
+./target/release/corex lint  ../examples/features.cx           # warnings, exit 0
+./target/release/corex doc   ../examples/features.cx           # Markdown on stdout
+./target/release/corex test  tests/example_tests.cx            # per-test results
+./target/release/corex-lsp                                     # stdio LSP server
+```
+
+`corex test` expects functions named `test_*` returning `bool`; it builds a
+runner, prints `test name ... ok` or `... FAILED`, and exits 1 on any failure.
+
+### 10.2 Compiling with the standard library
+
+The library lives in `lib/corex`. Point the module search path at it:
+
+```bash
+./target/release/corex run app.cx -I ../lib/corex
+```
+
+`app.cx` uses `mod std_alloc; mod std_io; ...` and calls qualified functions.
+A `corex.toml` project can list `include_paths = ["../lib/corex"]` instead of
+passing `-I`.
+
+### 10.3 Debug and sanitizer builds
+
+```bash
+./target/release/corex build app.cx -g -o app-dbg
+readelf --debug-dump=decodedline app-dbg
+readelf --debug-dump=info app-dbg | grep DW_TAG_subprogram
+
+./target/release/corex build app.cx --sanitize -o app-san
+```
+
+`-g` adds DWARF 5 line tables, subprograms, and local variables. `--sanitize`
+adds checked signed arithmetic and allocator double-free detection; overflow
+aborts with exit 101 and `corex: integer overflow` on stderr.
+
+### 10.4 Hosted builds and shared libraries
+
+```bash
+corex build lib.cx --emit shared -o libdemo.so
+corex build app.cx --hosted -I ../lib/corex -o app     # dlopen/dlsym available
+```
+
+`--hosted` links the C runtime and lets it call `main`; freestanding builds
+remain the default. `--emit staticlib` produces an archive with `llvm-ar`.
+
+### 10.5 Environment additions
+
+| Variable | Effect |
+|---|---|
+| `COREX_DUMP_INTERFACES=1` | Print generated module interfaces (`.cxi` source) to stderr |
+| `COREX_DUMP_IR=1` | Include generated IR in an `llvm-as` failure note |
+| `COREX_KEEP_TEMP=1` | Keep the build directory with `.ll`, `.bc`, `.o` files |
+
+### 10.6 Troubleshooting additions
+
+| Symptom | Cause / fix |
+|---|---|
+| `cannot find module 'std_alloc'` | Add `-I <repo>/lib/corex` (or `include_paths` in `corex.toml`) |
+| `E0232` cycle | `mod` dependencies form a cycle; break it with a smaller shared module |
+| `undefined reference to dlopen` | Build with `--hosted` (and `-l dl` on older glibc) |
+| `E0233` | A public function/type mentions a private local type; mark the type `pub` |
+| `E0235` | `corex test` found no `test_*` functions, or one does not return `bool` |
+| Debug sections missing | Rebuild with `-g`; `readelf -S` must list `.debug_line` |

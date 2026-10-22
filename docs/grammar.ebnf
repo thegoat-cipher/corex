@@ -1,5 +1,5 @@
 (*
- * CoreX v0.2 grammar (EBNF).
+ * CoreX v0.3 grammar (EBNF).
  *
  * This grammar is normative and matches compiler/src/parser.rs. Where the
  * parser is intentionally more permissive than the grammar (for error recovery),
@@ -9,30 +9,64 @@
  * "[ x ]" is optional, "|" is alternation.
  *)
 
-program        = { item } EOF ;
-item           = function | global | const_decl | import_decl
-               | enum_decl | struct_decl ;
+program        = { cfg_attr } item { item } EOF ;
 
-function       = "fn" IDENT "(" [ param_list ] ")" [ "->" type ] block ;
+cfg_attr       = "#" "[" "cfg" "(" cfg_expr ")" "]" ;
+cfg_expr       = IDENT "=" STRING
+               | "not" "(" cfg_expr ")"
+               | ( "all" | "any" ) "(" cfg_expr { "," cfg_expr } ")" ;
+
+item           = [ "pub" ] item_body
+               | "module" IDENT ";"
+               | "mod" IDENT ";"
+               | attribute* ( struct_decl | union_decl ) ;
+
+item_body      = function
+               | global
+               | const_decl
+               | import_decl
+               | enum_decl
+               | struct_decl
+               | union_decl
+               | typedef_decl
+               | extern_decl
+               | macro_decl ;
+
+attribute      = "repr" "(" IDENT ")" | "packed" | "align" "(" INTEGER ")" ;
+
+function       = "fn" IDENT "(" [ param_list [ "," "..." ] ] ")"
+                 [ "->" type ] ( block | ";" ) ;
 param_list     = param { "," param } ;
 param          = IDENT ":" type ;
 
-global         = "static" [ "mut" ] IDENT ":" type "=" expression ";" ;
+(* `;` terminates an extern declaration; a block defines an exported C symbol. *)
+extern_decl    = "extern" [ STRING ] ( function | extern_global ) ;
+extern_global  = "static" [ "mut" ] [ "volatile" ] IDENT ":" type ";" ;
+
+global         = "static" [ "mut" ] [ "volatile" ] IDENT ":" type "=" expression ";" ;
 const_decl     = "const" IDENT ":" type "=" expression ";" ;
 import_decl    = "import" STRING ";" ;
+typedef_decl   = "typedef" IDENT "=" type ";" ;
+
+macro_decl     = "macro" IDENT "(" [ IDENT { "," IDENT } ] ")"
+                 "=" expression ";" ;
 
 enum_decl      = "enum" IDENT "{" [ variant { "," variant } [ "," ] ] "}" ;
 variant        = IDENT [ "=" expression ] ;
 
-struct_decl    = "struct" IDENT "{" [ field_decl { "," field_decl } [ "," ] ] "}" ;
-field_decl     = IDENT ":" type ;
+struct_decl    = attribute* "struct" IDENT "{" [ field_decl { "," field_decl } [ "," ] ] "}" ;
+union_decl     = attribute* "union" IDENT "{" [ field_decl { "," field_decl } [ "," ] ] "}" ;
+field_decl     = IDENT ":" type [ ":" INTEGER ] ;      (* bitfield width *)
 
 type           = primitive
+               | "cstr"
                | "[" type ";" INTEGER "]"
                | "[" type "]"
                | "vec" "<" type ">"
                | "*" [ "mut" ] type
-               | IDENT ;
+               | "fn" "(" [ type { "," type } [ "," "..." ] ] ")"
+                 [ "->" type ]
+               | IDENT { "::" IDENT } ;
 
 primitive      = "i8"  | "i16" | "i32" | "i64"
                | "u8"  | "u16" | "u32" | "u64"
@@ -45,6 +79,11 @@ statement      = let_stmt
                | if_stmt
                | while_stmt
                | loop_stmt
+               | for_stmt
+               | do_while_stmt
+               | switch_stmt
+               | label_stmt
+               | goto_stmt
                | break_stmt
                | continue_stmt
                | return_stmt
@@ -58,6 +97,13 @@ let_stmt       = "let" [ "mut" ] IDENT [ ":" type ] "=" expression ";" ;
 if_stmt        = "if" expression block [ "else" ( if_stmt | block ) ] ;
 while_stmt     = "while" expression block ;
 loop_stmt      = "loop" block ;
+for_stmt       = "for" "(" [ for_clause ] ";" [ expression ] ";" [ for_clause ] ")" block ;
+for_clause     = let_stmt | assignment | expression_stmt ;
+do_while_stmt  = "do" block "while" expression ";" ;
+switch_stmt    = "switch" expression "{" { case_arm } "}" ;
+case_arm       = ( "case" expression | "default" ) [ ":" ] block ;
+label_stmt     = IDENT ":" statement ;
+goto_stmt      = "goto" IDENT ";" ;
 break_stmt     = "break" ";"
 continue_stmt  = "continue" ";"
 return_stmt    = "return" [ expression ] ";" ;
@@ -96,29 +142,45 @@ unary          = "-" unary
                | "*" unary
                | postfix ;
 
-postfix        = primary { call_suffix | index_suffix | range_suffix | field_suffix } ;
+postfix        = primary { call_suffix | index_suffix | range_suffix
+                         | field_suffix | arrow_suffix } ;
 call_suffix    = "(" [ arg_list ] ")" ;
+macro_call     = IDENT "(" [ arg_list ] ")" ;           (* expanded at parse time *)
 index_suffix   = "[" expression "]" ;
 range_suffix   = "[" [ expression ] ".." [ expression ] "]" ;
 field_suffix   = "." IDENT ;
+arrow_suffix   = "->" IDENT ;                          (* sugar for (*base).field *)
 arg_list       = expression { "," expression } ;
 
 primary        = INTEGER
                | FLOAT
                | STRING
+               | CSTRING
                | CHAR
                | "true"
                | "false"
-               | IDENT [ "::" IDENT ]
+               | "null"
+               | "sizeof" "(" type ")"
+               | "alignof" "(" type ")"
+               | "offsetof" "(" type "," IDENT ")"
+               | IDENT { "::" IDENT }
                | struct_literal
+               | array_compound_literal
                | "(" expression ")"
                | "[" array_literal "]" ;
 
-(* `IDENT "{" IDENT ":"` is a struct literal; this lookahead keeps block
-   statements such as `if flag { ... }` unambiguous. An empty literal is not
-   accepted. *)
-struct_literal = IDENT "{" IDENT ":" expression
-                 { "," IDENT ":" expression } [ "," ] "}" ;
+(* `IDENT "{" IDENT ":"` or `IDENT { "::" IDENT } "{" IDENT ":"` is a struct
+   literal; the lookahead keeps block statements (`if flag { ... }`)
+   unambiguous. A trailing `...` makes it a partial compound literal whose
+   omitted fields are zero. *)
+struct_literal = path "{" IDENT ":" expression
+                 { "," IDENT ":" expression } [ "," ] [ "..." ] "}" ;
+path           = IDENT { "::" IDENT } ;
+
+(* Typed array compound literal with index designators. *)
+array_compound_literal = "[" type ";" INTEGER "]" "{"
+                         [ INTEGER ":" expression
+                           { "," INTEGER ":" expression } [ "," ] ] "}" ;
 
 array_literal  = expression [ "," [ expression { "," expression } [ "," ] ] ]
                | expression ";" INTEGER ;
@@ -136,10 +198,12 @@ FLOAT          = dec_lit ( "." DIGIT { DIGIT | "_" } [ exponent ]
 exponent       = ( "e" | "E" ) [ "+" | "-" ] DIGIT { DIGIT | "_" } ;
 
 STRING         = '"' { string_char | escape } '"' ;
+CSTRING        = 'c"' { string_char | escape } '"' ;   (* NUL-terminated constant *)
 CHAR           = "'" ( string_char | escape ) "'" ;
 escape         = "\" ( "n" | "t" | "r" | "0" | "\" | '"' | "'" | "\x" HEXDIGIT HEXDIGIT ) ;
 
-IDENT          = ( "_" | ALPHA ) { "_" | ALPHA | DIGIT } ;
+(* `$` appears only in compiler-generated module symbols. *)
+IDENT          = ( "_" | ALPHA ) { "_" | "$" | ALPHA | DIGIT } ;
 
 ALPHA          = "a"…"z" | "A"…"Z" ;
 DIGIT          = "0"…"9" ;
@@ -150,15 +214,24 @@ OCTDIGIT       = "0"…"7" ;
 (* Comments and whitespace are trivia:
    line comment   = "//" { any byte except newline } ;
    block comment  = "/*" { any byte } "*/" ;  (not nested)
+   Doc comments (`///`) are ordinary line comments; the documentation generator
+   reads them from the source text.
 *)
 
 (* ----- reserved words (cannot be identifiers) -----
 
-   fn import static const enum struct let mut if else while loop break
-   continue return unsafe as true false
-   i8 i16 i32 i64 u8 u16 u32 u64 usize isize bool char f32 f64 str vec
+   fn import static const enum struct union typedef repr packed align extern
+   pub mod module macro switch case default for do goto null volatile sizeof
+   alignof offsetof let mut if else while loop break continue return unsafe as
+   true false
+   i8 i16 i32 i64 u8 u16 u32 u64 usize isize bool char f32 f64 str cstr vec
 
    Builtin function names, reserved everywhere (functions, bindings, parameters):
    syscall alloc free print len vec_new vec_push vec_free vec_slice
-   read_file write_file panic assert
+   read_file write_file panic assert cstr_len cstr_to_str str_to_cstr
+   data_ptr str_from_raw asm
+   atomic_load atomic_load_relaxed atomic_store atomic_store_relaxed
+   atomic_fetch_add atomic_fetch_sub atomic_fetch_and atomic_fetch_or
+   atomic_fetch_xor atomic_xchg atomic_cas atomic_fence
+   volatile_load volatile_store
 *)

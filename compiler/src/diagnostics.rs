@@ -27,12 +27,19 @@ impl Span {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Severity {
+    Error,
+    Warning,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Diagnostic {
     pub code: &'static str,
     pub message: String,
     pub span: Span,
     pub note: Option<String>,
+    pub severity: Severity,
 }
 
 impl Diagnostic {
@@ -42,7 +49,22 @@ impl Diagnostic {
             message: message.into(),
             span,
             note: None,
+            severity: Severity::Error,
         }
+    }
+
+    pub fn warning(code: &'static str, span: Span, message: impl Into<String>) -> Diagnostic {
+        Diagnostic {
+            code,
+            message: message.into(),
+            span,
+            note: None,
+            severity: Severity::Warning,
+        }
+    }
+
+    pub fn is_warning(&self) -> bool {
+        self.severity == Severity::Warning
     }
 
     pub fn with_note(mut self, note: impl Into<String>) -> Diagnostic {
@@ -61,7 +83,12 @@ impl Diagnostic {
             .min(line_text.chars().count().saturating_sub(caret_start).max(1));
 
         let mut out = String::new();
-        let _ = writeln!(out, "error[{}]: {}", self.code, self.message);
+        let label = if self.severity == Severity::Warning {
+            "warning"
+        } else {
+            "error"
+        };
+        let _ = writeln!(out, "{label}[{}]: {}", self.code, self.message);
         let _ = writeln!(out, "{:width$}--> {}:{}:{}", "", source_name, line, col, width = gutter + 1);
         let _ = writeln!(out, "{:width$} |", "", width = gutter);
         let _ = writeln!(out, "{:>width$} | {}", line, line_text, width = gutter);

@@ -1,0 +1,121 @@
+//! Mutexes and condition variables built on kernel futexes and the compiler's
+//! atomic builtins (sequential consistency).
+
+module std_sync;
+
+const FUTEX_WAIT: usize = 0;
+const FUTEX_WAKE: usize = 1;
+
+fn futex_wait(addr: *mut u32, expected: u32) -> i32 {
+    unsafe {
+        return syscall(
+            202,
+            addr as usize,
+            FUTEX_WAIT,
+            expected as usize,
+            0,
+            0,
+            0,
+        ) as i32;
+    }
+}
+
+fn futex_wake(addr: *mut u32, count: i32) -> i32 {
+    unsafe {
+        return syscall(
+            202,
+            addr as usize,
+            FUTEX_WAKE,
+            count as usize,
+            0,
+            0,
+            0,
+        ) as i32;
+    }
+}
+
+pub struct Mutex {
+    state: u32,
+}
+
+pub fn mutex_new() -> Mutex {
+    return Mutex { state: 0 };
+}
+
+pub fn mutex_lock(m: *mut Mutex) {
+    unsafe {
+        loop {
+            if atomic_cas(&mut (*m).state, 0, 1) {
+                return;
+            }
+            let _ = futex_wait(&mut (*m).state, 1);
+        }
+    }
+}
+
+pub fn mutex_try_lock(m: *mut Mutex) -> bool {
+    unsafe {
+        return atomic_cas(&mut (*m).state, 0, 1);
+    }
+}
+
+pub fn mutex_unlock(m: *mut Mutex) {
+    unsafe {
+        atomic_store(&mut (*m).state, 0);
+        let _ = futex_wake(&mut (*m).state, 1);
+    }
+}
+
+pub struct Condvar {
+    seq: u32,
+}
+
+pub fn condvar_new() -> Condvar {
+    return Condvar { seq: 0 };
+}
+
+pub fn condvar_wait(cv: *mut Condvar, m: *mut Mutex) {
+    unsafe {
+        let seq: u32 = atomic_load(&mut (*cv).seq);
+        mutex_unlock(m);
+        let _ = futex_wait(&mut (*cv).seq, seq);
+        mutex_lock(m);
+    }
+}
+
+pub fn condvar_signal(cv: *mut Condvar) {
+    unsafe {
+        let _ = atomic_fetch_add(&mut (*cv).seq, 1);
+        let _ = futex_wake(&mut (*cv).seq, 1);
+    }
+}
+
+pub fn condvar_broadcast(cv: *mut Condvar) {
+    unsafe {
+        let _ = atomic_fetch_add(&mut (*cv).seq, 1);
+        let _ = futex_wake(&mut (*cv).seq, 2147483647);
+    }
+}
+
+/// A simple spin lock, useful before the futex path is available.
+pub struct SpinLock {
+    state: u32,
+}
+
+pub fn spinlock_new() -> SpinLock {
+    return SpinLock { state: 0 };
+}
+
+pub fn spinlock_lock(s: *mut SpinLock) {
+    unsafe {
+        while !atomic_cas(&mut (*s).state, 0, 1) {
+            let _ = asm("pause", "");
+        }
+    }
+}
+
+pub fn spinlock_unlock(s: *mut SpinLock) {
+    unsafe {
+        atomic_store(&mut (*s).state, 0);
+    }
+}

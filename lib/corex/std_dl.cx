@@ -1,0 +1,36 @@
+//! Dynamic loading (`dlopen`/`dlsym`) for hosted builds.
+//!
+//! Build with `--hosted` and link `-l dl` where the C library keeps these in a
+//! separate DSO (glibc 2.34+ has them in libc).
+
+module std_dl;
+
+extern "C" fn dlopen(path: cstr, flags: i32) -> *mut u8;
+extern "C" fn dlsym(handle: *mut u8, symbol: cstr) -> *mut u8;
+extern "C" fn dlclose(handle: *mut u8) -> i32;
+extern "C" fn dlerror() -> cstr;
+
+pub const RTLD_LAZY: i32 = 1;
+pub const RTLD_NOW: i32 = 2;
+pub const RTLD_GLOBAL: i32 = 256;
+pub const RTLD_LOCAL: i32 = 0;
+
+pub fn open(path: cstr) -> *mut u8 {
+    return dlopen(path, RTLD_NOW | RTLD_LOCAL);
+}
+
+pub fn open_now(path: cstr) -> *mut u8 {
+    return dlopen(path, RTLD_NOW | RTLD_LOCAL);
+}
+
+pub fn sym(handle: *mut u8, name: cstr) -> *mut u8 {
+    return dlsym(handle, name);
+}
+
+pub fn close(handle: *mut u8) -> i32 {
+    return dlclose(handle);
+}
+
+pub fn error() -> cstr {
+    return dlerror();
+}

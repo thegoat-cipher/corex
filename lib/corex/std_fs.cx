@@ -1,0 +1,239 @@
+//! Files, `stat`, and directory iteration via Linux syscalls.
+
+module std_fs;
+mod std_alloc;
+mod std_io;
+
+/// x86-64 Linux `struct stat` layout.
+pub struct Stat {
+    dev: u64,
+    ino: u64,
+    nlink: u64,
+    mode: u32,
+    uid: u32,
+    gid: u32,
+    pad0: u32,
+    rdev: u64,
+    size: i64,
+    blksize: i64,
+    blocks: i64,
+    atime: i64,
+    atime_nsec: i64,
+    mtime: i64,
+    mtime_nsec: i64,
+    ctime: i64,
+    ctime_nsec: i64,
+    unused0: i64,
+    unused1: i64,
+    unused2: i64,
+}
+
+pub fn stat_path(path: cstr, out: *mut Stat) -> i32 {
+    unsafe {
+        return syscall(4, path as usize, out as usize, 0, 0, 0, 0) as i32;
+    }
+}
+
+pub fn lstat_path(path: cstr, out: *mut Stat) -> i32 {
+    unsafe {
+        return syscall(6, path as usize, out as usize, 0, 0, 0, 0) as i32;
+    }
+}
+
+pub fn file_size(path: cstr) -> i64 {
+    let mut st: Stat = Stat {
+        dev: 0, ino: 0, nlink: 0, mode: 0, uid: 0, gid: 0, pad0: 0, rdev: 0,
+        size: 0, blksize: 0, blocks: 0, atime: 0, atime_nsec: 0,
+        mtime: 0, mtime_nsec: 0, ctime: 0, ctime_nsec: 0,
+        unused0: 0, unused1: 0, unused2: 0,
+    };
+    if stat_path(path, &mut st) != 0 {
+        return -1;
+    }
+    return st.size;
+}
+
+pub const S_IFMT: u32 = 61440;
+pub const S_IFDIR: u32 = 16384;
+pub const S_IFREG: u32 = 32768;
+pub const S_IFLNK: u32 = 40960;
+
+pub fn is_dir(st: Stat) -> bool {
+    return (st.mode & S_IFMT) == S_IFDIR;
+}
+
+pub fn is_file(st: Stat) -> bool {
+    return (st.mode & S_IFMT) == S_IFREG;
+}
+
+pub fn exists(path: cstr) -> bool {
+    let mut st: Stat = Stat {
+        dev: 0, ino: 0, nlink: 0, mode: 0, uid: 0, gid: 0, pad0: 0, rdev: 0,
+        size: 0, blksize: 0, blocks: 0, atime: 0, atime_nsec: 0,
+        mtime: 0, mtime_nsec: 0, ctime: 0, ctime_nsec: 0,
+        unused0: 0, unused1: 0, unused2: 0,
+    };
+    return stat_path(path, &mut st) == 0;
+}
+
+pub fn mkdir(path: cstr, mode: i32) -> i32 {
+    unsafe {
+        return syscall(83, path as usize, mode as usize, 0, 0, 0, 0) as i32;
+    }
+}
+
+pub fn rmdir(path: cstr) -> i32 {
+    unsafe {
+        return syscall(84, path as usize, 0, 0, 0, 0, 0) as i32;
+    }
+}
+
+pub fn unlink(path: cstr) -> i32 {
+    unsafe {
+        return syscall(87, path as usize, 0, 0, 0, 0, 0) as i32;
+    }
+}
+
+pub fn rename(old_path: cstr, new_path: cstr) -> i32 {
+    unsafe {
+        return syscall(82, old_path as usize, new_path as usize, 0, 0, 0, 0) as i32;
+    }
+}
+
+pub fn getcwd(buf: *mut u8, cap: usize) -> cstr {
+    unsafe {
+        let r: i64 = syscall(79, buf as usize, cap) as i64;
+        if r < 0 {
+            return null;
+        }
+    }
+    return buf as cstr;
+}
+
+pub fn chdir(path: cstr) -> i32 {
+    unsafe {
+        return syscall(80, path as usize, 0, 0, 0, 0, 0) as i32;
+    }
+}
+
+/// Read a whole file into `buf`. Returns bytes read, or -1.
+pub fn read_file(path: cstr, buf: *mut u8, cap: usize) -> isize {
+    let fd: i32 = std_io::open(path, std_io::O_RDONLY, 0);
+    if fd < 0 {
+        return -1;
+    }
+    let n: isize = std_io::read(fd, buf, cap);
+    std_io::close(fd);
+    return n;
+}
+
+/// Write `len` bytes to `path`, truncating it. Returns 0 or -1.
+pub fn write_file(path: cstr, data: *u8, n: usize, mode: i32) -> i32 {
+    let flags: i32 = std_io::O_WRONLY | std_io::O_CREAT | std_io::O_TRUNC;
+    let fd: i32 = std_io::open(path, flags, mode);
+    if fd < 0 {
+        return -1;
+    }
+    let ok: i32 = std_io::write_all(fd, data, n);
+    std_io::close(fd);
+    return ok;
+}
+
+/// Directory stream over `getdents64`.
+pub struct Dir {
+    fd: i32,
+    buf: *mut u8,
+    cap: usize,
+    len: isize,
+    pos: usize,
+    failed: bool,
+}
+
+pub fn dir_open(path: cstr) -> Dir {
+    let fd: i32 = std_io::open(path, std_io::O_RDONLY | std_io::O_DIRECTORY, 0);
+    let cap: usize = 8192;
+    let buf: *mut u8 = std_alloc::malloc(cap);
+    return Dir {
+        fd: fd,
+        buf: buf,
+        cap: cap,
+        len: 0,
+        pos: 0,
+        failed: fd < 0 || buf == null,
+    };
+}
+
+fn dir_refill(d: *mut Dir) -> bool {
+    unsafe {
+        let n: i64 = syscall(217, (*d).fd as usize, (*d).buf as usize, (*d).cap) as i64;
+        if n <= 0 {
+            (*d).len = 0;
+            (*d).pos = 0;
+            return false;
+        }
+        (*d).len = n as isize;
+        (*d).pos = 0;
+        return true;
+    }
+}
+
+fn name_is(p: *u8, text: *u8, n: usize) -> bool {
+    let mut i: usize = 0;
+    unsafe {
+        while i < n {
+            if *(p + i) != *(text + i) {
+                return false;
+            }
+            i += 1;
+        }
+        return *(p + n) == 0;
+    }
+}
+
+/// Next directory entry name (a NUL-terminated pointer inside the stream
+/// buffer), or null at the end. Skips `.` and `..`.
+pub fn dir_next(d: *mut Dir) -> cstr {
+    unsafe {
+        while true {
+            let dlen: isize = (*d).len;
+            if (*d).failed || (*d).pos as isize >= dlen {
+                if !dir_refill(d) {
+                    return null;
+                }
+            }
+            let base: usize = (*d).buf as usize + (*d).pos;
+            let p: *u8 = base as *u8;
+            let lo: usize = *(p + 16) as usize;
+            let hi: usize = *(p + 17) as usize;
+            let reclen: usize = lo | (hi << 8);
+            if reclen == 0 {
+                return null;
+            }
+            let name: *u8 = (base + 19) as *u8;
+            (*d).pos += reclen;
+            if name_is(name, c"." as *u8, 1) {
+                continue;
+            }
+            if name_is(name, c".." as *u8, 2) {
+                continue;
+            }
+            return name as cstr;
+        }
+    }
+    return null;
+}
+
+pub fn dir_close(d: *mut Dir) {
+    unsafe {
+        if (*d).fd >= 0 {
+            std_io::close((*d).fd);
+        }
+        if (*d).buf != null {
+            std_alloc::free((*d).buf);
+        }
+        (*d).fd = -1;
+        (*d).buf = null;
+        (*d).len = 0;
+        (*d).pos = 0;
+    }
+}

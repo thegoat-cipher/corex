@@ -4,8 +4,11 @@
 # Usage: scripts/bench.sh [runs]
 #
 # Kernels:
-#   mix  - data-dependent 64-bit integer loop, N read from stdin (1e9 iterations)
-#   fib  - recursive fib(35), call-heavy, not foldable
+#   mix    - data-dependent 64-bit integer loop, N read from stdin (1e9 iterations)
+#   fib    - recursive fib(35), call-heavy, not foldable
+#   array  - 4M i64 array fill/sum through a heap pointer
+#   struct - 2M array-of-structs field updates
+#   f64    - 2M f64 multiply-add over two arrays (vectorizable)
 #
 # Requires: compiler built (`cargo build --release` in compiler/), llvm-as, llc,
 # opt, cc, and gcc. Prints best and median wall time in milliseconds.
@@ -28,7 +31,7 @@ fi
 
 echo "compiler: $("$COREX" --version)"
 echo "rustc:    $(rustc --version)"
-echo "llvm:     $(llc --version | head -1)"
+echo "llvm:     $(llc --version | head -1 2>/dev/null || llc-20 --version | head -1)"
 echo "cc:       $(cc --version | head -1)"
 echo "cpu:      $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2- | sed 's/^ *//')"
 echo "runs:     $RUNS"
@@ -36,11 +39,10 @@ echo
 
 printf '1000000000\n' > "$WORK/n.txt"
 
-"$COREX" build "$ROOT/bench/mix.cx" -o "$WORK/mix.cx.bin" --opt 2 >/dev/null
-cc -O2 -o "$WORK/mix.c.bin" "$ROOT/bench/mix.c"
-
-"$COREX" build "$ROOT/bench/fib.cx" -o "$WORK/fib.cx.bin" --opt 2 >/dev/null
-cc -O2 -o "$WORK/fib.c.bin" "$ROOT/bench/fib.c"
+for kernel in mix fib array struct f64; do
+    "$COREX" build "$ROOT/bench/$kernel.cx" -o "$WORK/$kernel.cx.bin" --opt 3 >/dev/null
+    cc -O3 -o "$WORK/$kernel.c.bin" "$ROOT/bench/$kernel.c"
+done
 
 measure() {
     local bin="$1" input="${2:-}"
@@ -85,8 +87,8 @@ compare() {
 
     printf '%s (exit status %s, both agree)\n' "$name" "$cx_status"
     printf '  %-10s %10s %12s\n' "binary" "best (ms)" "median (ms)"
-    printf '  %-10s %10s %12s\n' "CoreX -O2" "$cx_best" "$cx_median"
-    printf '  %-10s %10s %12s\n' "C gcc -O2" "$c_best" "$c_median"
+    printf '  %-10s %10s %12s\n' "CoreX -O3" "$cx_best" "$cx_median"
+    printf '  %-10s %10s %12s\n' "C gcc -O3" "$c_best" "$c_median"
     awk -v a="$cx_median" -v b="$c_median" 'BEGIN {
         printf "\n  ratio (median, CoreX/C): %.3f\n\n", (b == 0) ? 0 : a / b
     }'
@@ -94,3 +96,6 @@ compare() {
 
 compare "mix" "$WORK/n.txt" "$WORK/mix.cx.bin" "$WORK/mix.c.bin"
 compare "fib" "" "$WORK/fib.cx.bin" "$WORK/fib.c.bin"
+compare "array" "" "$WORK/array.cx.bin" "$WORK/array.c.bin"
+compare "struct" "" "$WORK/struct.cx.bin" "$WORK/struct.c.bin"
+compare "f64" "" "$WORK/f64.cx.bin" "$WORK/f64.c.bin"

@@ -63,11 +63,17 @@ impl<'a> Lexer<'a> {
                 b'}' => self.push(TokenKind::RBrace, start),
                 b'[' => self.push(TokenKind::LBracket, start),
                 b']' => self.push(TokenKind::RBracket, start),
+                b'#' => self.push(TokenKind::Hash, start),
                 b',' => self.push(TokenKind::Comma, start),
                 b'.' => {
                     if self.peek() == Some(b'.') {
                         self.bump();
-                        self.push(TokenKind::DotDot, start);
+                        if self.peek() == Some(b'.') {
+                            self.bump();
+                            self.push(TokenKind::DotDotDot, start);
+                        } else {
+                            self.push(TokenKind::DotDot, start);
+                        }
                     } else {
                         self.push(TokenKind::Dot, start);
                     }
@@ -223,8 +229,17 @@ impl<'a> Lexer<'a> {
                         self.push(kind, start);
                     }
                 }
+                b'c' if self.peek() == Some(b'"') => {
+                    // C string literal: `c"..."`, stored NUL-terminated in the
+                    // object file by code generation.
+                    self.bump();
+                    if let Some(bytes) = self.string(start) {
+                        self.push(TokenKind::CStr(bytes), start);
+                    }
+                }
                 b'_' | b'a'..=b'z' | b'A'..=b'Z' => {
-                    while matches!(self.peek(), Some(c) if c == b'_' || c.is_ascii_alphanumeric()) {
+                    // `$` is reserved for compiler-generated module symbols.
+                    while matches!(self.peek(), Some(c) if c == b'_' || c == b'$' || c.is_ascii_alphanumeric()) {
                         self.bump();
                     }
                     let text = std::str::from_utf8(&self.src[start..self.pos])
@@ -596,6 +611,27 @@ fn keyword(text: &str) -> Option<TokenKind> {
         "const" => TokenKind::Const,
         "enum" => TokenKind::Enum,
         "struct" => TokenKind::Struct,
+        "union" => TokenKind::Union,
+        "typedef" => TokenKind::Typedef,
+        "repr" => TokenKind::Repr,
+        "packed" => TokenKind::Packed,
+        "align" => TokenKind::Align,
+        "extern" => TokenKind::Extern,
+        "pub" => TokenKind::Pub,
+        "mod" => TokenKind::Mod,
+        "module" => TokenKind::Module,
+        "macro" => TokenKind::Macro,
+        "switch" => TokenKind::Switch,
+        "case" => TokenKind::Case,
+        "default" => TokenKind::Default,
+        "for" => TokenKind::For,
+        "do" => TokenKind::Do,
+        "goto" => TokenKind::Goto,
+        "null" => TokenKind::Null,
+        "volatile" => TokenKind::Volatile,
+        "sizeof" => TokenKind::Sizeof,
+        "alignof" => TokenKind::Alignof,
+        "offsetof" => TokenKind::Offsetof,
         "let" => TokenKind::Let,
         "mut" => TokenKind::Mut,
         "if" => TokenKind::If,
@@ -624,6 +660,7 @@ fn keyword(text: &str) -> Option<TokenKind> {
         "f32" => TokenKind::F32,
         "f64" => TokenKind::F64,
         "str" => TokenKind::StrType,
+        "cstr" => TokenKind::CStrType,
         "vec" => TokenKind::VecType,
         _ => return None,
     })

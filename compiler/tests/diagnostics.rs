@@ -186,7 +186,7 @@ fn rejects_arrays_in_parameters_and_returns() {
 fn rejects_function_used_as_value() {
     assert_rejected(
         "fn g() {} fn main() -> i32 { let x: i32 = g; return 0; }",
-        "E0218",
+        "E0203",
     );
 }
 
@@ -207,7 +207,7 @@ fn rejects_amp_mut_of_immutable_place() {
 fn rejects_zero_length_array_type() {
     assert_rejected(
         "fn main() -> i32 { let a: [u8; 0] = [1]; return 0; }",
-        "E0110",
+        "E0224",
     );
 }
 

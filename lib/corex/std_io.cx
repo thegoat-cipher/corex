@@ -1,0 +1,115 @@
+//! File-descriptor I/O through raw Linux syscalls. No libc, no buffering; every
+//! call is a direct `read`/`write`/`lseek`/`open`/`close`.
+
+module std_io;
+
+pub const STDIN: i32 = 0;
+pub const STDOUT: i32 = 1;
+pub const STDERR: i32 = 2;
+
+pub const O_RDONLY: i32 = 0;
+pub const O_WRONLY: i32 = 1;
+pub const O_RDWR: i32 = 2;
+pub const O_CREAT: i32 = 64;
+pub const O_EXCL: i32 = 128;
+pub const O_TRUNC: i32 = 512;
+pub const O_APPEND: i32 = 1024;
+pub const O_DIRECTORY: i32 = 65536;
+
+pub const SEEK_SET: i32 = 0;
+pub const SEEK_CUR: i32 = 1;
+pub const SEEK_END: i32 = 2;
+
+pub fn write(fd: i32, data: *u8, n: usize) -> isize {
+    unsafe {
+        return syscall(1, fd as usize, data as usize, n, 0, 0, 0) as isize;
+    }
+}
+
+pub fn read(fd: i32, data: *mut u8, n: usize) -> isize {
+    unsafe {
+        return syscall(0, fd as usize, data as usize, n, 0, 0, 0) as isize;
+    }
+}
+
+pub fn close(fd: i32) -> i32 {
+    unsafe {
+        return syscall(3, fd as usize, 0, 0, 0, 0, 0) as i32;
+    }
+}
+
+pub fn seek(fd: i32, offset: i64, whence: i32) -> i64 {
+    unsafe {
+        return syscall(8, fd as usize, offset as usize, whence as usize, 0, 0, 0) as i64;
+    }
+}
+
+pub fn open(path: cstr, flags: i32, mode: i32) -> i32 {
+    unsafe {
+        return syscall(2, path as usize, flags as usize, mode as usize, 0, 0, 0) as i32;
+    }
+}
+
+pub fn write_str(fd: i32, s: str) -> isize {
+    return write(fd, data_ptr(s), len(s));
+}
+
+pub fn write_cstr(fd: i32, s: cstr) -> isize {
+    unsafe {
+        let p: *u8 = s as *u8;
+        let mut n: usize = 0;
+        while *(p + n) != 0 {
+            n += 1;
+        }
+        return write(fd, p, n);
+    }
+}
+
+/// Write the whole buffer, retrying short writes. Returns 0 or -1.
+pub fn write_all(fd: i32, data: *u8, n: usize) -> i32 {
+    let mut off: usize = 0;
+    unsafe {
+        while off < n {
+            let w: isize = write(fd, data + off, n - off);
+            if w <= 0 {
+                return -1;
+            }
+            off += w as usize;
+        }
+    }
+    return 0;
+}
+
+pub fn puts(s: str) -> i32 {
+    write_str(STDOUT, s);
+    write(STDOUT, c"\n" as *u8, 1);
+    return 0;
+}
+
+pub fn eputs(s: str) -> i32 {
+    write_str(STDERR, s);
+    write(STDERR, c"\n" as *u8, 1);
+    return 0;
+}
+
+/// Read one byte; returns -1 on end of file or error.
+pub fn getbyte(fd: i32) -> i32 {
+    let mut b: u8 = 0;
+    unsafe {
+        let n: isize = read(fd, &mut b as *mut u8, 1);
+        if n <= 0 {
+            return -1;
+        }
+    }
+    return b as i32;
+}
+
+pub fn putbyte(fd: i32, b: u8) -> i32 {
+    unsafe {
+        let n: isize = write(fd, &b as *u8, 1);
+        if n == 1 {
+            return 0;
+        }
+    }
+    return -1;
+}

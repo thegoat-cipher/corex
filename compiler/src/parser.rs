@@ -10,64 +10,41 @@ use crate::token::{Token, TokenKind};
 /// Maximum syntactic nesting depth. Bounds parser recursion (and therefore
 /// downstream AST recursion in semantic analysis and code generation) so that
 /// adversarial input produces a diagnostic instead of a stack overflow.
-const MAX_NESTING: usize = 256;
+const MAX_NESTING: usize = 128;
 
 pub fn parse(tokens: &[Token]) -> Result<Program, Vec<Diagnostic>> {
+    parse_with_cfg(tokens, &[])
+}
+
+/// Parse with a set of enabled `#[cfg]` keys, e.g. `feature=fast` or
+/// `target_os=linux`.
+pub fn parse_with_cfg(tokens: &[Token], cfg: &[String]) -> Result<Program, Vec<Diagnostic>> {
     let mut p = Parser {
         tokens,
         pos: 0,
         diags: Vec::new(),
         next_id: 0,
         depth: 0,
+        cfg: cfg.to_vec(),
+        macros: std::collections::HashMap::new(),
+        macro_depth: 0,
     };
-    let mut imports = Vec::new();
-    let mut fns = Vec::new();
-    let mut globals = Vec::new();
-    let mut consts = Vec::new();
-    let mut enums = Vec::new();
-    let mut structs = Vec::new();
+    let mut program = Program {
+        module_name: None,
+        mod_deps: Vec::new(),
+        imports: Vec::new(),
+        fns: Vec::new(),
+        typedefs: Vec::new(),
+        macros: Vec::new(),
+        globals: Vec::new(),
+        consts: Vec::new(),
+        enums: Vec::new(),
+        structs: Vec::new(),
+    };
     while !p.at(&TokenKind::Eof) && p.diags.len() < 100 {
         let before = p.pos;
-        match p.peek() {
-            TokenKind::Fn => {
-                if let Ok(f) = p.parse_fn() {
-                    fns.push(f);
-                }
-            }
-            TokenKind::Import => {
-                if let Ok(import) = p.parse_import() {
-                    imports.push(import);
-                }
-            }
-            TokenKind::Static => {
-                if let Ok(g) = p.parse_global() {
-                    globals.push(g);
-                }
-            }
-            TokenKind::Const => {
-                if let Ok(c) = p.parse_const() {
-                    consts.push(c);
-                }
-            }
-            TokenKind::Enum => {
-                if let Ok(en) = p.parse_enum() {
-                    enums.push(en);
-                }
-            }
-            TokenKind::Struct => {
-                if let Ok(st) = p.parse_struct() {
-                    structs.push(st);
-                }
-            }
-            _ => {
-                let span = p.peek_span();
-                let found = p.peek().describe();
-                p.diags.push(Diagnostic::error(
-                    "E0100",
-                    span,
-                    format!("expected `fn`, `static`, or `enum`, found {found}"),
-                ));
-            }
+        if p.parse_item(&mut program).is_err() {
+            // `parse_item` records the diagnostic; recover at the next item.
         }
         if p.pos == before {
             p.advance();
@@ -75,14 +52,7 @@ pub fn parse(tokens: &[Token]) -> Result<Program, Vec<Diagnostic>> {
         p.recover_to_item();
     }
     if p.diags.is_empty() {
-        Ok(Program {
-            imports,
-            fns,
-            globals,
-            consts,
-            enums,
-            structs,
-        })
+        Ok(program)
     } else {
         Err(p.diags)
     }
@@ -94,11 +64,27 @@ struct Parser<'a> {
     diags: Vec<Diagnostic>,
     next_id: NodeId,
     depth: usize,
+    cfg: Vec<String>,
+    macros: std::collections::HashMap<String, MacroDecl>,
+    macro_depth: usize,
+}
+
+#[derive(Default, Clone, Copy)]
+struct StructAttrs {
+    packed: bool,
+    align: u64,
 }
 
 impl<'a> Parser<'a> {
     fn peek(&self) -> &TokenKind {
         &self.tokens[self.pos].kind
+    }
+
+    fn peek_at(&self, offset: usize) -> &TokenKind {
+        self.tokens
+            .get(self.pos + offset)
+            .map(|t| &t.kind)
+            .unwrap_or(&TokenKind::Eof)
     }
 
     fn peek_span(&self) -> Span {
@@ -120,6 +106,338 @@ impl<'a> Parser<'a> {
     fn error<T>(&mut self, code: &'static str, span: Span, message: impl Into<String>) -> Result<T, ()> {
         self.diags.push(Diagnostic::error(code, span, message));
         Err(())
+    }
+
+    // ----- items -------------------------------------------------------
+
+    fn parse_item(&mut self, program: &mut Program) -> Result<(), ()> {
+        let enabled = self.parse_cfg_attrs()?;
+        if !enabled {
+            // Parse the item for recovery, then discard its declarations.
+            let mut scratch = Program {
+                module_name: None,
+                mod_deps: Vec::new(),
+                imports: Vec::new(),
+                fns: Vec::new(),
+                typedefs: Vec::new(),
+                macros: Vec::new(),
+                globals: Vec::new(),
+                consts: Vec::new(),
+                enums: Vec::new(),
+                structs: Vec::new(),
+            };
+            let result = self.parse_item_inner(&mut scratch);
+            if result.is_err() {
+                self.skip_stmt();
+            }
+            return result;
+        }
+        self.parse_item_inner(program)
+    }
+
+    /// Parse zero or more `#[cfg(...)]` attributes. Returns false when a
+    /// condition evaluates to false and the item must be skipped.
+    fn parse_cfg_attrs(&mut self) -> Result<bool, ()> {
+        let mut enabled = true;
+        while self.at(&TokenKind::Hash) {
+            self.advance();
+            self.expect(&TokenKind::LBracket, "after `#`")?;
+            let (name, span) = self.expect_ident("attribute name")?;
+            if name != "cfg" {
+                let _: Result<(), ()> =
+                    self.error("E0100", span, format!("unknown attribute `{name}`"));
+                // Skip to `]` so parsing can continue.
+                while !self.at(&TokenKind::RBracket) && !self.at(&TokenKind::Eof) {
+                    self.advance();
+                }
+                self.expect(&TokenKind::RBracket, "after attribute")?;
+                continue;
+            }
+            self.expect(&TokenKind::LParen, "after `cfg`")?;
+            let value = self.parse_cfg_expr()?;
+            self.expect(&TokenKind::RParen, "after cfg expression")?;
+            self.expect(&TokenKind::RBracket, "after cfg attribute")?;
+            if !value {
+                enabled = false;
+            }
+        }
+        Ok(enabled)
+    }
+
+    fn parse_cfg_expr(&mut self) -> Result<bool, ()> {
+        let (name, span) = self.expect_ident("cfg key")?;
+        match name.as_str() {
+            "not" => {
+                self.expect(&TokenKind::LParen, "after `not`")?;
+                let inner = self.parse_cfg_expr()?;
+                self.expect(&TokenKind::RParen, "after `not` expression")?;
+                Ok(!inner)
+            }
+            "all" | "any" => {
+                self.expect(&TokenKind::LParen, "after cfg combinator")?;
+                let mut values = Vec::new();
+                while !self.at(&TokenKind::RParen) {
+                    values.push(self.parse_cfg_expr()?);
+                    if self.at(&TokenKind::Comma) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.expect(&TokenKind::RParen, "after cfg combinator")?;
+                Ok(if name == "all" {
+                    values.iter().all(|v| *v)
+                } else {
+                    values.iter().any(|v| *v)
+                })
+            }
+            key => {
+                self.expect(&TokenKind::Assign, "after cfg key")?;
+                let value = match self.peek().clone() {
+                    TokenKind::Str(bytes) => {
+                        self.advance();
+                        String::from_utf8_lossy(&bytes).to_string()
+                    }
+                    other => {
+                        let span = self.peek_span();
+                        return self.error(
+                            "E0100",
+                            span,
+                            format!("expected a string cfg value, found {}", other.describe()),
+                        );
+                    }
+                };
+                let _ = span;
+                Ok(self.cfg.iter().any(|k| k == &format!("{key}={value}")))
+            }
+        }
+    }
+
+    fn parse_item_inner(&mut self, program: &mut Program) -> Result<(), ()> {
+        let start_span = self.peek_span();
+        let public = if self.at(&TokenKind::Pub) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+
+        // Layout attributes may precede `struct` or `union` in any order.
+        let mut attrs = StructAttrs::default();
+        loop {
+            match self.peek() {
+                TokenKind::Repr => {
+                    self.advance();
+                    self.expect(&TokenKind::LParen, "after `repr`")?;
+                    let (name, _) = self.expect_ident("representation name")?;
+                    if name != "C" && name != "c" {
+                        return self.error(
+                            "E0100",
+                            self.peek_span(),
+                            "only `repr(C)` is supported",
+                        );
+                    }
+                    self.expect(&TokenKind::RParen, "after representation name")?;
+                }
+                TokenKind::Packed => {
+                    self.advance();
+                    attrs.packed = true;
+                }
+                TokenKind::Align => {
+                    self.advance();
+                    self.expect(&TokenKind::LParen, "after `align`")?;
+                    let n = match self.peek().clone() {
+                        TokenKind::Int(v) => {
+                            self.advance();
+                            v
+                        }
+                        other => {
+                            let span = self.peek_span();
+                            return self.error(
+                                "E0100",
+                                span,
+                                format!("expected alignment value, found {}", other.describe()),
+                            );
+                        }
+                    };
+                    if n == 0 || !n.is_power_of_two() {
+                        return self.error(
+                            "E0110",
+                            self.peek_span(),
+                            "alignment must be a power of two",
+                        );
+                    }
+                    self.expect(&TokenKind::RParen, "after alignment value")?;
+                    attrs.align = n;
+                }
+                _ => break,
+            }
+        }
+
+        match self.peek().clone() {
+            TokenKind::Macro => {
+                if public {
+                    return self.error("E0100", start_span, "`pub` does not apply to `macro`");
+                }
+                let kw = self.advance();
+                let (name, _name_span) = self.expect_ident("macro name")?;
+                self.expect(&TokenKind::LParen, "after macro name")?;
+                let mut params = Vec::new();
+                while !self.at(&TokenKind::RParen) {
+                    let (param, _) = self.expect_ident("macro parameter")?;
+                    params.push(param);
+                    if self.at(&TokenKind::Comma) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.expect(&TokenKind::RParen, "after macro parameters")?;
+                self.expect(&TokenKind::Assign, "before macro body")?;
+                let body = self.parse_expr()?;
+                let semi = self.expect(&TokenKind::Semi, "after macro body")?;
+                let decl = MacroDecl {
+                    name: name.clone(),
+                    params,
+                    body,
+                    span: kw.span.merge(semi.span),
+                };
+                self.macros.insert(name, decl.clone());
+                program.macros.push(decl);
+                Ok(())
+            }
+            TokenKind::Module => {
+                if public {
+                    return self.error("E0100", start_span, "`pub` does not apply to `module`");
+                }
+                self.advance();
+                let (name, _) = self.expect_ident("module name")?;
+                self.expect(&TokenKind::Semi, "after module name")?;
+                if program.module_name.is_some() {
+                    return self.error(
+                        "E0202",
+                        start_span,
+                        "a file may declare only one `module`",
+                    );
+                }
+                program.module_name = Some(name);
+                Ok(())
+            }
+            TokenKind::Mod => {
+                self.advance();
+                let (name, _) = self.expect_ident("module dependency name")?;
+                if self.at(&TokenKind::LBrace) {
+                    return self.error(
+                        "E0100",
+                        self.peek_span(),
+                        "inline modules are not supported; put the module in its own file and write `mod name;`",
+                    );
+                }
+                self.expect(&TokenKind::Semi, "after module dependency")?;
+                if !program.mod_deps.contains(&name) {
+                    program.mod_deps.push(name);
+                }
+                Ok(())
+            }
+            TokenKind::Fn => {
+                let f = self.parse_fn(public, None)?;
+                program.fns.push(f);
+                Ok(())
+            }
+            TokenKind::Import => {
+                let import = self.parse_import()?;
+                program.imports.push(import);
+                Ok(())
+            }
+            TokenKind::Static => {
+                let g = self.parse_global(public, false)?;
+                program.globals.push(g);
+                Ok(())
+            }
+            TokenKind::Const => {
+                let c = self.parse_const(public)?;
+                program.consts.push(c);
+                Ok(())
+            }
+            TokenKind::Enum => {
+                let e = self.parse_enum(public)?;
+                program.enums.push(e);
+                Ok(())
+            }
+            TokenKind::Struct => {
+                let st = self.parse_struct(public, attrs, false)?;
+                program.structs.push(st);
+                Ok(())
+            }
+            TokenKind::Union => {
+                let st = self.parse_struct(public, attrs, true)?;
+                program.structs.push(st);
+                Ok(())
+            }
+            TokenKind::Typedef => {
+                let t = self.parse_typedef(public)?;
+                program.typedefs.push(t);
+                Ok(())
+            }
+            TokenKind::Extern => self.parse_extern(program),
+            _ => {
+                let found = self.peek().describe();
+                self.error(
+                    "E0100",
+                    start_span,
+                    format!(
+                        "expected an item (`fn`, `static`, `const`, `enum`, `struct`, `union`, `typedef`, or `extern`), found {found}"
+                    ),
+                )
+            }
+        }
+    }
+
+    fn parse_extern(&mut self, program: &mut Program) -> Result<(), ()> {
+        self.expect(&TokenKind::Extern, "start of extern declaration")?;
+        let mut abi = "C".to_string();
+        if let TokenKind::Str(bytes) = self.peek().clone() {
+            self.advance();
+            abi = String::from_utf8(bytes).map_err(|_| {
+                self.diags.push(Diagnostic::error(
+                    "E0232",
+                    self.peek_span(),
+                    "ABI name must be valid UTF-8",
+                ));
+            })?;
+            if abi != "C" && abi != "corex" {
+                return self.error(
+                    "E0100",
+                    self.peek_span(),
+                    format!(
+                        "unsupported ABI `{abi}`; expected `extern \"C\"` or `extern \"corex\"`"
+                    ),
+                );
+            }
+        }
+        match self.peek().clone() {
+            TokenKind::Fn => {
+                let f = self.parse_fn(false, Some(abi))?;
+                program.fns.push(f);
+                Ok(())
+            }
+            TokenKind::Static => {
+                let g = self.parse_global(false, true)?;
+                program.globals.push(g);
+                Ok(())
+            }
+            other => {
+                let span = self.peek_span();
+                self.error(
+                    "E0100",
+                    span,
+                    format!(
+                        "expected `fn` or `static` after `extern`, found {}",
+                        other.describe()
+                    ),
+                )
+            }
+        }
     }
 
     fn expect(&mut self, kind: &TokenKind, context: &str) -> Result<Token, ()> {
@@ -162,6 +480,17 @@ impl<'a> Parser<'a> {
                 | TokenKind::Import
                 | TokenKind::Enum
                 | TokenKind::Struct
+                | TokenKind::Union
+                | TokenKind::Typedef
+                | TokenKind::Extern
+                | TokenKind::Pub
+                | TokenKind::Mod
+                | TokenKind::Module
+                | TokenKind::Macro
+                | TokenKind::Hash
+                | TokenKind::Repr
+                | TokenKind::Packed
+                | TokenKind::Align
                 | TokenKind::Eof
         ) {
             self.advance();
@@ -199,13 +528,22 @@ impl<'a> Parser<'a> {
 
     // ----- items -------------------------------------------------------
 
-    fn parse_fn(&mut self) -> Result<FnDecl, ()> {
+    fn parse_fn(&mut self, public: bool, extern_abi: Option<String>) -> Result<FnDecl, ()> {
         let start = self.expect(&TokenKind::Fn, "start of function")?.span.start;
         let (name, name_span) = self.expect_ident("function name")?;
         self.expect(&TokenKind::LParen, "after function name")?;
 
         let mut params = Vec::new();
+        let mut variadic = false;
         while !self.at(&TokenKind::RParen) {
+            if self.at(&TokenKind::DotDotDot) {
+                self.advance();
+                variadic = true;
+                if self.at(&TokenKind::Comma) {
+                    self.advance();
+                }
+                break;
+            }
             let (pname, pspan) = self.expect_ident("parameter name")?;
             self.expect(&TokenKind::Colon, "after parameter name")?;
             let ty = self.parse_type()?;
@@ -230,8 +568,21 @@ impl<'a> Parser<'a> {
             (Type::Unit, self.tokens[self.pos - 1].span)
         };
 
-        let body = self.parse_block()?;
-        let span = Span::new(start, body.span.end);
+        let (body, end) = if self.at(&TokenKind::LBrace) {
+            let body = self.parse_block()?;
+            let end = body.span.end;
+            (Some(body), end)
+        } else if extern_abi.is_some() {
+            let semi = self.expect(&TokenKind::Semi, "after extern function declaration")?;
+            (None, semi.span.end)
+        } else {
+            return self.error(
+                "E0100",
+                self.peek_span(),
+                "expected `{` to start the function body",
+            );
+        };
+
         Ok(FnDecl {
             name,
             name_span,
@@ -239,7 +590,10 @@ impl<'a> Parser<'a> {
             ret,
             ret_span,
             body,
-            span,
+            span: Span::new(start, end),
+            extern_abi,
+            variadic,
+            public,
         })
     }
 
@@ -271,6 +625,41 @@ impl<'a> Parser<'a> {
             TokenKind::F32 => Type::Float(FloatTy::F32),
             TokenKind::F64 => Type::Float(FloatTy::F64),
             TokenKind::StrType => Type::Str,
+            TokenKind::CStrType => Type::CStr,
+            TokenKind::Fn => {
+                self.advance();
+                self.expect(&TokenKind::LParen, "after `fn` in a function type")?;
+                let mut params = Vec::new();
+                let mut variadic = false;
+                while !self.at(&TokenKind::RParen) {
+                    if self.at(&TokenKind::DotDotDot) {
+                        self.advance();
+                        variadic = true;
+                        if self.at(&TokenKind::Comma) {
+                            self.advance();
+                        }
+                        break;
+                    }
+                    params.push(self.parse_type()?);
+                    if self.at(&TokenKind::Comma) {
+                        self.advance();
+                    } else {
+                        break;
+                    }
+                }
+                self.expect(&TokenKind::RParen, "after function type parameters")?;
+                let ret = if self.at(&TokenKind::Arrow) {
+                    self.advance();
+                    self.parse_type()?
+                } else {
+                    Type::Unit
+                };
+                Type::Fn(FnType {
+                    params,
+                    ret: Box::new(ret),
+                    variadic,
+                })
+            }
             TokenKind::VecType => {
                 self.advance();
                 self.expect(&TokenKind::Lt, "after `vec`")?;
@@ -291,7 +680,14 @@ impl<'a> Parser<'a> {
             }
             TokenKind::Ident(ref name) => {
                 self.advance();
-                Type::Named(name.clone())
+                let mut path = name.clone();
+                while self.at(&TokenKind::ColonColon) {
+                    self.advance();
+                    let (seg, _) = self.expect_ident("type name segment")?;
+                    path.push_str("::");
+                    path.push_str(&seg);
+                }
+                Type::Named(path)
             }
             TokenKind::LBracket => {
                 self.advance();
@@ -317,10 +713,8 @@ impl<'a> Parser<'a> {
                     }
                 };
                 self.expect(&TokenKind::RBracket, "after array length")?;
-                if len == 0 {
-                    let span = self.peek_span();
-                    return self.error("E0110", span, "array length must be greater than zero");
-                }
+                // Zero-length arrays are allowed as flexible array members; the
+                // semantic pass restricts them to the last field of a struct.
                 Type::array_of(elem, len)
             }
             other => {
@@ -356,6 +750,7 @@ impl<'a> Parser<'a> {
                 | TokenKind::F32
                 | TokenKind::F64
                 | TokenKind::StrType
+                | TokenKind::CStrType
         ) {
             self.advance();
         }
@@ -393,9 +788,33 @@ impl<'a> Parser<'a> {
     }
 
     fn parse_stmt(&mut self) -> Result<Stmt, ()> {
+        // `name: stmt` is a label; no expression statement can start this way.
+        if matches!(self.peek(), TokenKind::Ident(_)) && self.peek_at(1) == &TokenKind::Colon {
+            let (name, span) = self.expect_ident("label name")?;
+            self.expect(&TokenKind::Colon, "after label name")?;
+            let stmt = self.parse_stmt()?;
+            let full = span.merge(stmt.span());
+            return Ok(Stmt::Label {
+                name,
+                stmt: Box::new(stmt),
+                span: full,
+            });
+        }
         match self.peek().clone() {
             TokenKind::Let => self.parse_let(),
             TokenKind::If => self.parse_if(),
+            TokenKind::Switch => self.parse_switch(),
+            TokenKind::For => self.parse_for(),
+            TokenKind::Do => self.parse_do_while(),
+            TokenKind::Goto => {
+                let kw = self.advance();
+                let (label, _) = self.expect_ident("goto target")?;
+                let semi = self.expect(&TokenKind::Semi, "after `goto` target")?;
+                Ok(Stmt::Goto {
+                    label,
+                    span: kw.span.merge(semi.span),
+                })
+            }
             TokenKind::While => {
                 let kw = self.advance();
                 let cond = self.parse_expr()?;
@@ -553,11 +972,161 @@ impl<'a> Parser<'a> {
         })
     }
 
+    fn parse_switch(&mut self) -> Result<Stmt, ()> {
+        let kw = self.expect(&TokenKind::Switch, "start of switch")?;
+        let value = self.parse_expr()?;
+        self.expect(&TokenKind::LBrace, "after switch value")?;
+        let mut arms = Vec::new();
+        while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+            let arm_span = self.peek_span();
+            if self.at(&TokenKind::Case) {
+                self.advance();
+                let case_value = self.parse_expr()?;
+                if self.at(&TokenKind::Colon) {
+                    self.advance();
+                }
+                let body = self.parse_block()?;
+                let span = arm_span.merge(body.span);
+                arms.push(SwitchArm {
+                    value: Some(case_value),
+                    body,
+                    span,
+                });
+            } else if self.at(&TokenKind::Default) {
+                self.advance();
+                if self.at(&TokenKind::Colon) {
+                    self.advance();
+                }
+                let body = self.parse_block()?;
+                let span = arm_span.merge(body.span);
+                arms.push(SwitchArm {
+                    value: None,
+                    body,
+                    span,
+                });
+            } else {
+                let found = self.peek().describe();
+                return self.error(
+                    "E0100",
+                    self.peek_span(),
+                    format!("expected `case` or `default` in switch, found {found}"),
+                );
+            }
+        }
+        let close = self.expect(&TokenKind::RBrace, "after switch arms")?;
+        Ok(Stmt::Switch {
+            value,
+            arms,
+            span: kw.span.merge(close.span),
+        })
+    }
+
+    fn parse_for(&mut self) -> Result<Stmt, ()> {
+        let kw = self.expect(&TokenKind::For, "start of for loop")?;
+        self.expect(&TokenKind::LParen, "after `for`")?;
+        let init = if self.at(&TokenKind::Semi) {
+            self.advance();
+            None
+        } else if self.at(&TokenKind::Let) {
+            Some(Box::new(self.parse_let()?))
+        } else {
+            let start = self.peek_span();
+            let e = self.parse_expr()?;
+            let semi = self.expect(&TokenKind::Semi, "after for initializer")?;
+            Some(Box::new(Stmt::Expr(Expr {
+                span: start.merge(semi.span),
+                ..e
+            })))
+        };
+        let cond = if self.at(&TokenKind::Semi) {
+            None
+        } else {
+            Some(self.parse_expr()?)
+        };
+        self.expect(&TokenKind::Semi, "after for condition")?;
+        let step = if self.at(&TokenKind::RParen) {
+            None
+        } else {
+            Some(Box::new(self.parse_for_step()?))
+        };
+        self.expect(&TokenKind::RParen, "after for clauses")?;
+        let body = self.parse_block()?;
+        let span = kw.span.merge(body.span);
+        Ok(Stmt::For {
+            init,
+            cond,
+            step,
+            body,
+            span,
+        })
+    }
+
+    /// A `for` initializer or step: an expression, assignment, or compound
+    /// assignment. The trailing `;`/`)` is left to the caller.
+    fn parse_for_step(&mut self) -> Result<Stmt, ()> {
+        let start = self.peek_span();
+        let target = self.parse_expr()?;
+        let compound = match self.peek() {
+            TokenKind::PlusEq => Some(BinOp::Add),
+            TokenKind::MinusEq => Some(BinOp::Sub),
+            TokenKind::StarEq => Some(BinOp::Mul),
+            TokenKind::SlashEq => Some(BinOp::Div),
+            TokenKind::PercentEq => Some(BinOp::Rem),
+            TokenKind::AmpEq => Some(BinOp::BitAnd),
+            TokenKind::PipeEq => Some(BinOp::BitOr),
+            TokenKind::CaretEq => Some(BinOp::BitXor),
+            TokenKind::ShlEq => Some(BinOp::Shl),
+            TokenKind::ShrEq => Some(BinOp::Shr),
+            _ => None,
+        };
+        if let Some(op) = compound {
+            self.advance();
+            let value = self.parse_expr()?;
+            let span = start.merge(value.span);
+            Ok(Stmt::CompoundAssign {
+                target,
+                op,
+                value,
+                span,
+            })
+        } else if self.at(&TokenKind::Assign) {
+            self.advance();
+            let value = self.parse_expr()?;
+            let span = start.merge(value.span);
+            Ok(Stmt::Assign {
+                target,
+                value,
+                span,
+            })
+        } else {
+            Ok(Stmt::Expr(Expr { span: start, ..target }))
+        }
+    }
+
+    fn parse_do_while(&mut self) -> Result<Stmt, ()> {
+        let kw = self.expect(&TokenKind::Do, "start of do-while")?;
+        let body = self.parse_block()?;
+        self.expect(&TokenKind::While, "after do block")?;
+        let cond = self.parse_expr()?;
+        let semi = self.expect(&TokenKind::Semi, "after do-while condition")?;
+        Ok(Stmt::DoWhile {
+            body,
+            cond,
+            span: kw.span.merge(semi.span),
+        })
+    }
+
     // ----- expressions -------------------------------------------------
 
-    fn parse_global(&mut self) -> Result<GlobalDecl, ()> {
+    fn parse_global(&mut self, public: bool, is_extern: bool) -> Result<GlobalDecl, ()> {
         let kw = self.expect(&TokenKind::Static, "start of global")?;
         let mutable = if self.at(&TokenKind::Mut) {
+            self.advance();
+            true
+        } else {
+            false
+        };
+        let volatile = if self.at(&TokenKind::Volatile) {
             self.advance();
             true
         } else {
@@ -566,16 +1135,32 @@ impl<'a> Parser<'a> {
         let (name, name_span) = self.expect_ident("global name")?;
         self.expect(&TokenKind::Colon, "after global name")?;
         let ty = self.parse_type()?;
-        self.expect(&TokenKind::Assign, "before global initializer")?;
-        let init = self.parse_expr()?;
-        let semi = self.expect(&TokenKind::Semi, "after global initializer")?;
+        let (init, end) = if is_extern {
+            let semi = self.expect(&TokenKind::Semi, "after extern global declaration")?;
+            (
+                Expr {
+                    id: 0,
+                    kind: ExprKind::Int(0),
+                    span: name_span,
+                },
+                semi.span.end,
+            )
+        } else {
+            self.expect(&TokenKind::Assign, "before global initializer")?;
+            let init = self.parse_expr()?;
+            let semi = self.expect(&TokenKind::Semi, "after global initializer")?;
+            (init, semi.span.end)
+        };
         Ok(GlobalDecl {
             name,
             name_span,
             ty,
             mutable,
             init,
-            span: kw.span.merge(semi.span),
+            span: Span::new(kw.span.start, end),
+            is_extern,
+            public,
+            volatile,
         })
     }
 
@@ -611,7 +1196,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_const(&mut self) -> Result<ConstDecl, ()> {
+    fn parse_const(&mut self, public: bool) -> Result<ConstDecl, ()> {
         let kw = self.expect(&TokenKind::Const, "start of constant")?;
         let (name, name_span) = self.expect_ident("constant name")?;
         self.expect(&TokenKind::Colon, "after constant name")?;
@@ -625,10 +1210,11 @@ impl<'a> Parser<'a> {
             ty,
             value,
             span: kw.span.merge(semi.span),
+            public,
         })
     }
 
-    fn parse_enum(&mut self) -> Result<EnumDecl, ()> {
+    fn parse_enum(&mut self, public: bool) -> Result<EnumDecl, ()> {
         let kw = self.expect(&TokenKind::Enum, "start of enum")?;
         let (name, name_span) = self.expect_ident("enum name")?;
         self.expect(&TokenKind::LBrace, "after enum name")?;
@@ -658,36 +1244,206 @@ impl<'a> Parser<'a> {
             name_span,
             variants,
             span: kw.span.merge(close.span),
+            public,
         })
     }
 
-    fn parse_struct(&mut self) -> Result<StructDecl, ()> {
-        let kw = self.expect(&TokenKind::Struct, "start of struct")?;
-        let (name, name_span) = self.expect_ident("struct name")?;
-        self.expect(&TokenKind::LBrace, "after struct name")?;
+    fn parse_struct(
+        &mut self,
+        public: bool,
+        attrs: StructAttrs,
+        is_union: bool,
+    ) -> Result<StructDecl, ()> {
+        let kw = if is_union {
+            self.expect(&TokenKind::Union, "start of union")?
+        } else {
+            self.expect(&TokenKind::Struct, "start of struct")?
+        };
+        let (name, name_span) = self.expect_ident("type name")?;
+        self.expect(&TokenKind::LBrace, "after type name")?;
         let mut fields = Vec::new();
         while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
             let (fname, fspan) = self.expect_ident("field name")?;
             self.expect(&TokenKind::Colon, "after field name")?;
             let ty = self.parse_type()?;
+            let bit_width = if self.at(&TokenKind::Colon) {
+                self.advance();
+                match self.peek().clone() {
+                    TokenKind::Int(v) if v > 0 && v <= 64 => {
+                        self.advance();
+                        v as u32
+                    }
+                    other => {
+                        let span = self.peek_span();
+                        return self.error(
+                            "E0110",
+                            span,
+                            format!(
+                                "expected a bitfield width between 1 and 64, found {}",
+                                other.describe()
+                            ),
+                        );
+                    }
+                }
+            } else {
+                0
+            };
             fields.push(StructFieldDecl {
                 name: fname,
                 span: fspan,
                 ty,
+                bit_width,
             });
             if self.at(&TokenKind::Comma) {
                 self.advance();
-            } else {
+            } else if !self.at(&TokenKind::Semi) {
                 break;
+            } else {
+                self.advance();
             }
         }
-        let close = self.expect(&TokenKind::RBrace, "after struct fields")?;
+        let close = self.expect(&TokenKind::RBrace, "after fields")?;
         Ok(StructDecl {
             name,
             name_span,
             fields,
             span: kw.span.merge(close.span),
+            is_union,
+            packed: attrs.packed,
+            align: attrs.align,
+            public,
         })
+    }
+
+    fn parse_typedef(&mut self, public: bool) -> Result<TypedefDecl, ()> {
+        self.expect(&TokenKind::Typedef, "start of typedef")?;
+        let (name, name_span) = self.expect_ident("type alias name")?;
+        self.expect(&TokenKind::Assign, "after type alias name")?;
+        let ty = self.parse_type()?;
+        let semi = self.expect(&TokenKind::Semi, "after typedef")?;
+        let _ = semi;
+        Ok(TypedefDecl {
+            name,
+            name_span,
+            ty,
+            public,
+        })
+    }
+
+    fn expand_macro(
+        &mut self,
+        mac: &MacroDecl,
+        args: Vec<Expr>,
+        span: Span,
+    ) -> Result<Expr, ()> {
+        if args.len() != mac.params.len() {
+            return self.error(
+                "E0204",
+                span,
+                format!(
+                    "macro `{}` takes {} argument(s), found {}",
+                    mac.name,
+                    mac.params.len(),
+                    args.len()
+                ),
+            );
+        }
+        if self.macro_depth >= 64 {
+            return self.error("E0111", span, "macro expansion depth exceeds 64");
+        }
+        let subs: std::collections::HashMap<String, Expr> = mac
+            .params
+            .iter()
+            .cloned()
+            .zip(args)
+            .collect();
+        self.macro_depth += 1;
+        let result = self.subst_expr(&mac.body, &subs);
+        self.macro_depth -= 1;
+        let mut out = result;
+        out.span = span;
+        Ok(out)
+    }
+
+    /// Clone `e` with fresh node ids, replacing macro parameters.
+    fn subst_expr(
+        &mut self,
+        e: &Expr,
+        subs: &std::collections::HashMap<String, Expr>,
+    ) -> Expr {
+        let kind = match &e.kind {
+            ExprKind::Ident(name) => {
+                if let Some(arg) = subs.get(name) {
+                    return self.subst_expr(arg, &std::collections::HashMap::new());
+                }
+                ExprKind::Ident(name.clone())
+            }
+            ExprKind::Path(segments) => ExprKind::Path(segments.clone()),
+            ExprKind::EnumVariant {
+                enum_name,
+                variant,
+            } => ExprKind::EnumVariant {
+                enum_name: enum_name.clone(),
+                variant: variant.clone(),
+            },
+            ExprKind::StructLit { name, fields } => ExprKind::StructLit {
+                name: name.clone(),
+                fields: fields
+                    .iter()
+                    .map(|(name, value)| (name.clone(), self.subst_expr(value, subs)))
+                    .collect(),
+            },
+            ExprKind::Field { base, name } => ExprKind::Field {
+                base: Box::new(self.subst_expr(base, subs)),
+                name: name.clone(),
+            },
+            ExprKind::Unary { op, expr } => ExprKind::Unary {
+                op: *op,
+                expr: Box::new(self.subst_expr(expr, subs)),
+            },
+            ExprKind::Binary { op, lhs, rhs } => ExprKind::Binary {
+                op: *op,
+                lhs: Box::new(self.subst_expr(lhs, subs)),
+                rhs: Box::new(self.subst_expr(rhs, subs)),
+            },
+            ExprKind::Call { callee, args } => ExprKind::Call {
+                callee: Box::new(self.subst_expr(callee, subs)),
+                args: args.iter().map(|a| self.subst_expr(a, subs)).collect(),
+            },
+            ExprKind::Index { base, index } => ExprKind::Index {
+                base: Box::new(self.subst_expr(base, subs)),
+                index: Box::new(self.subst_expr(index, subs)),
+            },
+            ExprKind::SliceRange { base, start, end } => ExprKind::SliceRange {
+                base: Box::new(self.subst_expr(base, subs)),
+                start: start
+                    .as_ref()
+                    .map(|e| Box::new(self.subst_expr(e, subs))),
+                end: end
+                    .as_ref()
+                    .map(|e| Box::new(self.subst_expr(e, subs))),
+            },
+            ExprKind::Cast { expr, ty } => ExprKind::Cast {
+                expr: Box::new(self.subst_expr(expr, subs)),
+                ty: ty.clone(),
+            },
+            ExprKind::Array(elems) => {
+                ExprKind::Array(elems.iter().map(|e| self.subst_expr(e, subs)).collect())
+            }
+            ExprKind::ArrayRepeat { value, count } => ExprKind::ArrayRepeat {
+                value: Box::new(self.subst_expr(value, subs)),
+                count: *count,
+            },
+            ExprKind::CompoundLit { ty, fields } => ExprKind::CompoundLit {
+                ty: ty.clone(),
+                fields: fields
+                    .iter()
+                    .map(|(name, value)| (name.clone(), self.subst_expr(value, subs)))
+                    .collect(),
+            },
+            other => other.clone(),
+        };
+        self.mk_expr(kind, e.span)
     }
 
     fn looks_like_struct_literal(&self) -> bool {
@@ -819,9 +1575,68 @@ impl<'a> Parser<'a> {
         self.parse_postfix()
     }
 
+    /// Look ahead for `[ Type ; Int ] {` (an array compound literal) without
+    /// committing: on failure the token position and diagnostics are restored.
+    fn try_compound_array_type(&mut self) -> Option<(Type, u64)> {
+        let save_pos = self.pos;
+        let save_diags = self.diags.len();
+        let save_depth = self.depth;
+        let mut ok = false;
+        let mut elem = Type::Unit;
+        let mut len = 0;
+        if self.at(&TokenKind::LBracket) {
+            self.advance();
+            if let Ok(ty) = self.parse_type() {
+                if self.at(&TokenKind::Semi) {
+                    self.advance();
+                    if let TokenKind::Int(v) = self.peek().clone() {
+                        self.advance();
+                        if self.at(&TokenKind::RBracket) {
+                            self.advance();
+                            if self.at(&TokenKind::LBrace) {
+                                elem = ty;
+                                len = v;
+                                ok = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if !ok {
+            self.pos = save_pos;
+            self.diags.truncate(save_diags);
+            self.depth = save_depth;
+            return None;
+        }
+        self.pos = save_pos;
+        self.diags.truncate(save_diags);
+        self.depth = save_depth;
+        Some((elem, len))
+    }
+
     fn parse_postfix(&mut self) -> Result<Expr, ()> {
         let mut expr = self.parse_primary()?;
         loop {
+            if let TokenKind::LParen = self.peek() {
+                if let ExprKind::Ident(name) = &expr.kind {
+                    if let Some(mac) = self.macros.get(name).cloned() {
+                        let open = self.advance();
+                        let mut args = Vec::new();
+                        while !self.at(&TokenKind::RParen) {
+                            args.push(self.parse_expr()?);
+                            if self.at(&TokenKind::Comma) {
+                                self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                        let close = self.expect(&TokenKind::RParen, "after macro arguments")?;
+                        expr = self.expand_macro(&mac, args, open.span.merge(close.span))?;
+                        continue;
+                    }
+                }
+            }
             match self.peek() {
                 TokenKind::LParen => {
                     self.advance();
@@ -840,6 +1655,26 @@ impl<'a> Parser<'a> {
                         ExprKind::Call {
                             callee: Box::new(expr),
                             args,
+                        },
+                        span,
+                    );
+                }
+                TokenKind::Arrow => {
+                    self.advance();
+                    let (field, fspan) = self.expect_ident("field name")?;
+                    let arrow_span = expr.span;
+                    let deref = self.mk_expr(
+                        ExprKind::Unary {
+                            op: UnOp::Deref,
+                            expr: Box::new(expr),
+                        },
+                        arrow_span,
+                    );
+                    let span = arrow_span.merge(fspan);
+                    expr = self.mk_expr(
+                        ExprKind::Field {
+                            base: Box::new(deref),
+                            name: field,
                         },
                         span,
                     );
@@ -919,28 +1754,57 @@ impl<'a> Parser<'a> {
                 self.advance();
                 Ok(self.mk_expr(ExprKind::Char(value), span))
             }
+            TokenKind::CStr(bytes) => {
+                self.advance();
+                Ok(self.mk_expr(ExprKind::CStr(bytes), span))
+            }
+            TokenKind::Null => {
+                self.advance();
+                Ok(self.mk_expr(ExprKind::Null, span))
+            }
+            TokenKind::Sizeof | TokenKind::Alignof => {
+                self.advance();
+                self.expect(&TokenKind::LParen, "after `sizeof`/`alignof`")?;
+                let ty = self.parse_type()?;
+                let close = self.expect(&TokenKind::RParen, "after type")?;
+                let kind = if matches!(kind, TokenKind::Sizeof) {
+                    ExprKind::SizeOf(ty)
+                } else {
+                    ExprKind::AlignOf(ty)
+                };
+                Ok(self.mk_expr(kind, span.merge(close.span)))
+            }
+            TokenKind::Offsetof => {
+                self.advance();
+                self.expect(&TokenKind::LParen, "after `offsetof`")?;
+                let ty = self.parse_type()?;
+                self.expect(&TokenKind::Comma, "between type and field")?;
+                let (field, _) = self.expect_ident("field name")?;
+                let close = self.expect(&TokenKind::RParen, "after field name")?;
+                Ok(self.mk_expr(ExprKind::OffsetOf(ty, field), span.merge(close.span)))
+            }
             TokenKind::True | TokenKind::False => {
                 self.advance();
                 Ok(self.mk_expr(ExprKind::Bool(matches!(kind, TokenKind::True)), span))
             }
             TokenKind::Ident(name) => {
                 self.advance();
-                if self.at(&TokenKind::ColonColon) {
+                let mut segments = vec![name];
+                while self.at(&TokenKind::ColonColon) {
                     self.advance();
-                    let (variant, vspan) = self.expect_ident("enum variant")?;
-                    let span = span.merge(vspan);
-                    return Ok(self.mk_expr(
-                        ExprKind::EnumVariant {
-                            enum_name: name,
-                            variant,
-                        },
-                        span,
-                    ));
+                    let (seg, _) = self.expect_ident("path segment")?;
+                    segments.push(seg);
                 }
                 if self.looks_like_struct_literal() {
                     self.advance();
                     let mut fields = Vec::new();
+                    let mut partial = false;
                     while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+                        if self.at(&TokenKind::DotDotDot) {
+                            self.advance();
+                            partial = true;
+                            break;
+                        }
                         let (fname, _fspan) = self.expect_ident("field name")?;
                         self.expect(&TokenKind::Colon, "after field name")?;
                         let value = self.parse_expr()?;
@@ -952,10 +1816,26 @@ impl<'a> Parser<'a> {
                         }
                     }
                     let close = self.expect(&TokenKind::RBrace, "after struct literal")?;
-                    let span = span.merge(close.span);
-                    return Ok(self.mk_expr(ExprKind::StructLit { name, fields }, span));
+                    let full_span = span.merge(close.span);
+                    let joined = segments.join("::");
+                    let kind = if partial {
+                        ExprKind::CompoundLit {
+                            ty: Type::Named(joined),
+                            fields,
+                        }
+                    } else {
+                        ExprKind::StructLit {
+                            name: joined,
+                            fields,
+                        }
+                    };
+                    return Ok(self.mk_expr(kind, full_span));
                 }
-                Ok(self.mk_expr(ExprKind::Ident(name), span))
+                if segments.len() == 1 {
+                    Ok(self.mk_expr(ExprKind::Ident(segments[0].clone()), span))
+                } else {
+                    Ok(self.mk_expr(ExprKind::Path(segments), span))
+                }
             }
             TokenKind::LParen => {
                 self.advance();
@@ -964,6 +1844,45 @@ impl<'a> Parser<'a> {
                 Ok(inner)
             }
             TokenKind::LBracket => {
+                if let Some((elem, len)) = self.try_compound_array_type() {
+                    self.advance(); // `[`
+                    let _ = self.parse_type()?;
+                    self.expect(&TokenKind::Semi, "inside compound literal type")?;
+                    self.expect(&TokenKind::Int(len), "array length")?;
+                    self.expect(&TokenKind::RBracket, "after array length")?;
+                    self.expect(&TokenKind::LBrace, "start of compound literal")?;
+                    let mut fields = Vec::new();
+                    while !self.at(&TokenKind::RBrace) && !self.at(&TokenKind::Eof) {
+                        let index = match self.peek().clone() {
+                            TokenKind::Int(v) => {
+                                self.advance();
+                                v
+                            }
+                            other => {
+                                let span = self.peek_span();
+                                return self.error(
+                                    "E0100",
+                                    span,
+                                    format!("expected array index, found {}", other.describe()),
+                                );
+                            }
+                        };
+                        self.expect(&TokenKind::Colon, "after array index")?;
+                        let value = self.parse_expr()?;
+                        fields.push((index.to_string(), value));
+                        if self.at(&TokenKind::Comma) {
+                            self.advance();
+                        } else {
+                            break;
+                        }
+                    }
+                    let close = self.expect(&TokenKind::RBrace, "after compound literal")?;
+                    let ty = Type::array_of(elem, len);
+                    return Ok(self.mk_expr(
+                        ExprKind::CompoundLit { ty, fields },
+                        span.merge(close.span),
+                    ));
+                }
                 self.advance();
                 if self.at(&TokenKind::RBracket) {
                     return self.error("E0110", span, "empty array literal");
@@ -1047,7 +1966,7 @@ mod tests {
         assert_eq!(f.params.len(), 2);
         assert_eq!(f.params[0].ty, Type::Int(IntTy::I32));
         assert_eq!(f.ret, Type::Int(IntTy::I32));
-        match &f.body.stmts[0] {
+        match &f.body.as_ref().unwrap().stmts[0] {
             Stmt::Return { value: Some(e), .. } => {
                 assert!(matches!(e.kind, ExprKind::Binary { op: BinOp::Add, .. }))
             }
@@ -1064,7 +1983,7 @@ mod tests {
     #[test]
     fn precedence_multiplication_before_addition() {
         let f = one_fn("fn f() -> i32 { return 1 + 2 * 3; }");
-        let Stmt::Return { value: Some(e), .. } = &f.body.stmts[0] else {
+        let Stmt::Return { value: Some(e), .. } = &f.body.as_ref().unwrap().stmts[0] else {
             panic!("expected return")
         };
         let ExprKind::Binary { op, rhs, .. } = &e.kind else {
@@ -1077,7 +1996,7 @@ mod tests {
     #[test]
     fn assignment_binds_looser_than_or() {
         let f = one_fn("fn f() -> i32 { let mut x: i32 = 0; x = 1 | 2; return x; }");
-        match &f.body.stmts[1] {
+        match &f.body.as_ref().unwrap().stmts[1] {
             Stmt::Assign { value, .. } => {
                 assert!(matches!(value.kind, ExprKind::Binary { op: BinOp::BitOr, .. }))
             }
@@ -1104,8 +2023,8 @@ mod tests {
         let f = one_fn(
             "fn f(n: i32) -> i32 { while n > 0 { if n == 3 { break; } else { continue; } } loop { return 1; } }",
         );
-        assert!(matches!(f.body.stmts[0], Stmt::While { .. }));
-        assert!(matches!(f.body.stmts[1], Stmt::Loop { .. }));
+        assert!(matches!(f.body.as_ref().unwrap().stmts[0], Stmt::While { .. }));
+        assert!(matches!(f.body.as_ref().unwrap().stmts[1], Stmt::Loop { .. }));
     }
 
     #[test]
@@ -1113,7 +2032,7 @@ mod tests {
         let f = one_fn(
             "fn f(p: *mut u8, a: [u8; 4]) { unsafe { *p = a[0] as u8; } }",
         );
-        match &f.body.stmts[0] {
+        match &f.body.as_ref().unwrap().stmts[0] {
             Stmt::Unsafe { body, .. } => match &body.stmts[0] {
                 Stmt::Assign { target, value, .. } => {
                     assert!(matches!(
@@ -1145,7 +2064,7 @@ mod tests {
     #[test]
     fn parses_array_repeat_literal() {
         let f = one_fn("fn f() -> [u8; 4] { return [0; 4]; }");
-        let Stmt::Return { value: Some(e), .. } = &f.body.stmts[0] else {
+        let Stmt::Return { value: Some(e), .. } = &f.body.as_ref().unwrap().stmts[0] else {
             panic!("expected return");
         };
         assert!(matches!(e.kind, ExprKind::ArrayRepeat { count: 4, .. }));
