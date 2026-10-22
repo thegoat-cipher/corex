@@ -176,8 +176,11 @@ fn shared_library_can_be_loaded_with_dlopen() {
     std::fs::create_dir_all(&dir).expect("create dir");
     let lib_source = r#"
         module shlib;
+        static mut SH_BASE: i64 = 40;
         extern "C" fn sh_add(a: i32, b: i32) -> i32 { return a + b; }
         extern "C" fn sh_mul(a: i32, b: i32) -> i32 { return a * b; }
+        extern "C" fn sh_base() -> i64 { return SH_BASE + 2; }
+        extern "C" fn sh_greeting_len() -> i64 { return len("hello") as i64; }
     "#;
     let lib_path = dir.join("shlib.cx");
     std::fs::write(&lib_path, lib_source).expect("write lib");
@@ -209,6 +212,13 @@ fn shared_library_can_be_loaded_with_dlopen() {
                 let mul: fn(i32, i32) -> i32 = std_dl::sym(h, c"sh_mul") as fn(i32, i32) -> i32;
                 print(add(20, 22));
                 print(mul(6, 7));
+                // Global access and string constants need PC-relative
+                // relocations; a static-relocation object cannot be linked
+                // into a shared library.
+                let base: fn() -> i64 = std_dl::sym(h, c"sh_base") as fn() -> i64;
+                let greeting_len: fn() -> i64 = std_dl::sym(h, c"sh_greeting_len") as fn() -> i64;
+                print(base());
+                print(greeting_len());
                 std_dl::close(h);
             }
             return 0;
@@ -232,7 +242,7 @@ fn shared_library_can_be_loaded_with_dlopen() {
     driver::build_with_config(&file, &exe, 2, false, &hosted_inputs, &config)
         .expect("hosted build");
     let r = run(&exe, &[]);
-    assert_eq!(r.stdout, "true\n42\n42\n");
+    assert_eq!(r.stdout, "true\n42\n42\n42\n5\n");
     assert_eq!(r.code, 0, "stderr: {}", r.stderr);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -374,5 +384,93 @@ fn module_const_is_a_valid_array_length() {
     let r = run(&artifacts.executable, &[]);
     assert_eq!(r.stdout, "let\n6\n");
     assert_eq!(r.code, 2, "stderr: {}", r.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `main`/`_start` are entry points only in the root unit. A module that
+/// declares `pub fn main` must be mangled like any other item; leaving it
+/// unmangled produced a duplicate `main` symbol at link time (and made the
+/// module's `main` reachable as the program entry point).
+#[test]
+fn module_entry_points_are_mangled_and_callable() {
+    let dir = driver::temp_dir("corex-modmain");
+    std::fs::create_dir_all(&dir).expect("create dir");
+    write(
+        &dir,
+        "a.cx",
+        "module a;\npub fn main() -> i32 { return 5; }\n",
+    );
+    let root = write(
+        &dir,
+        "main.cx",
+        "mod a;\nfn main() -> i32 { return a::main(); }\n",
+    );
+    let exe = dir.join("program");
+    build_root(&root, &exe, &BuildConfig::default(), &LinkInputs::default())
+        .expect("build with a module-level main");
+    let r = run(&exe, &[]);
+    assert_eq!(r.code, 5, "stderr: {}", r.stderr);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// `std_dl::open` binds lazily and `open_now` eagerly: a library whose function
+/// references an undefined symbol loads with `RTLD_LAZY` but fails `RTLD_NOW`.
+#[test]
+fn std_dl_open_is_lazy_and_open_now_is_eager() {
+    let dir = driver::temp_dir("corex-dlopen-lazy");
+    std::fs::create_dir_all(&dir).expect("create dir");
+    let lib_source = r#"
+        module lazylib;
+        extern "C" fn missing_symbol() -> i32;
+        extern "C" fn lazy_entry() -> i32 { return missing_symbol(); }
+    "#;
+    let lib_path = write(&dir, "lazylib.cx", lib_source);
+    let lib_file = SourceFile::new(lib_path.display().to_string(), lib_source.to_string());
+    let so = dir.join("liblazy.so");
+    driver::build_project(
+        std::slice::from_ref(&lib_file),
+        &so,
+        2,
+        &LinkInputs::default(),
+        &BuildConfig {
+            require_entry: false,
+            ..Default::default()
+        },
+        driver::OutputKind::Shared,
+    )
+    .expect("shared library build");
+
+    let program = r#"
+        mod std_dl;
+        fn main() -> i32 {
+            unsafe {
+                let lazy: *mut u8 = std_dl::open(c"LIB_PATH");
+                print(lazy != null);
+                if lazy != null { std_dl::close(lazy); }
+                let eager: *mut u8 = std_dl::open_now(c"LIB_PATH");
+                print(eager == null);
+                if eager != null { std_dl::close(eager); }
+            }
+            return 0;
+        }
+    "#
+    .replace("c\"LIB_PATH\"", &format!("c\"{}\"", so.display()));
+    let src = write(&dir, "program.cx", &program);
+    let file = SourceFile::new(src.display().to_string(), program);
+    let exe = dir.join("program");
+    let config = BuildConfig {
+        hosted: true,
+        include_paths: vec![Path::new(env!("CARGO_MANIFEST_DIR")).join("../lib/corex")],
+        ..Default::default()
+    };
+    let inputs = LinkInputs {
+        hosted: true,
+        libs: vec!["dl".to_string()],
+        ..Default::default()
+    };
+    driver::build_with_config(&file, &exe, 2, false, &inputs, &config).expect("hosted build");
+    let r = run(&exe, &[]);
+    assert_eq!(r.stdout, "true\ntrue\n", "stderr: {}", r.stderr);
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
     let _ = std::fs::remove_dir_all(&dir);
 }

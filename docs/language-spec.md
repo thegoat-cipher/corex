@@ -103,8 +103,9 @@ here is not part of the language.
 - Slices and `str` are two-word values copied on binding, assignment, argument
   passing, and return. Copying a slice copies the pointer and length, not the
   referenced elements.
-- There are no unions, tuples, references, function pointers, trait objects, or
-  user-defined generic parameters; `vec<T>` is the only built-in generic type.
+- Tuples, references, trait objects, and user-defined generic parameters do not
+  exist; `vec<T>` is the only built-in generic type. Unions, bitfields, and
+  function pointers are C-class extensions (§12).
 
 ### 3.2 Mutability and pointer types
 
@@ -226,13 +227,14 @@ import "relative/or/absolute/path.cx";
 
 - Imports are resolved recursively relative to the importing file; repeated
   imports of the same canonical file are included once, and cycles terminate.
-- Every file is a module, but all top-level items are merged into one **flat
-  global namespace**. There are no qualified module names, visibility modifiers,
-  or per-module scopes: top-level names must be unique across the program.
+- `import` is textual inclusion: all top-level items are merged into one **flat
+  global namespace** with no per-file scopes, so top-level names must be unique
+  across the program. (`module`/`mod` file modules are a separate feature with
+  their own namespaces and mangled symbols; see §12.6.)
 - Imports are compile-time file inclusion, not runtime loading. Diagnostics map
   source spans back to the originating file and line.
-- `main`/`_start` may live in any imported module; the usual duplicate-name and
-  entry-point rules apply.
+- `main`/`_start` must be defined in the root unit. A `main` in a `mod`
+  file-module is an ordinary item with a mangled symbol (§12.6).
 
 ### 4.6 Functions
 
@@ -252,10 +254,10 @@ fn name(param: Type, ...) { ... }          // returns nothing
 - Parameters are immutable unless the function copies them into a `let mut`
   binding.
 - Top-level items are functions, `const` declarations, `static` globals, enums,
-  structs, and `import` declarations. There are no `extern` declarations or FFI.
-  Imports share one flat namespace (§4.5).
-- Function pointers are not implemented; the current compiler-style programs
-  dispatch through enums and conditionals instead.
+  structs/unions, `typedef`s, `extern "C"` declarations and definitions (§12.5),
+  and `import`/`mod` declarations. `import` shares one flat namespace (§4.5);
+  `mod` gives each file module its own mangled symbols (§12.6).
+- Function pointers (`fn(T) -> U`) are first-class values; see §12.1.
 
 ### 4.7 Entry point
 
@@ -279,18 +281,23 @@ no entry point is `E0212`.
 - `while condition { }` — condition re-evaluated before each iteration.
 - `loop { }` — infinite loop; without a reachable `break` it diverges, which
   satisfies the return analysis of a non-void function.
-- `break;` / `continue;` — target the innermost enclosing loop only
-  (`E0207` / `E0208` outside a loop). No labels.
+- `break;` — exits the innermost enclosing loop or `switch` (`E0207` when
+  neither encloses it).
+- `continue;` — jumps to the next iteration of the innermost enclosing loop
+  (`E0208` outside a loop; inside a `switch` it targets the surrounding loop).
 - `return expression;` — expression required when the function returns a value
   (`E0206`), forbidden when it returns nothing (`E0219`).
 - `unsafe { ... }` — a lexical region enabling unsafe operations (§8).
 - `{ ... }` — a bare block statement introduces a new scope.
 - `expression;` — evaluates and discards the value (used for calls).
-- Parser recursion is capped at 256 levels; deeper input is rejected with
-  `E0111`, so no input can overflow the compiler's stack. A parenthesized
-  expression consumes two levels, so about 126 nested parentheses are accepted;
-  unary chains and nested blocks allow about 253 levels, and pointer type chains
-  255. The limit is an implementation bound, not a language rule.
+- Parser recursion is capped at 128 levels and semantic-expression nesting at
+  64 levels; deeper input is rejected with `E0111`, so no input can overflow the
+  compiler's stack. A parenthesized expression consumes two parser levels, so
+  about 62 nested parentheses are accepted; chained unary operators and nested
+  blocks consume one level each (about 125). Semantic analysis walks the
+  expression tree recursively, so flat operator chains, cast chains, and nested
+  calls are limited to 64 levels. The limits are implementation bounds, not
+  language rules.
 - Assignment is a statement, not an expression: `a = b = c` does not parse.
   The left side must be a place (identifier, dereference, index, or field) and
   mutable (`E0205`). Compound assignment (`+= -= *= /= %= &= |= ^= <<= >>=`) is
@@ -308,7 +315,8 @@ A body "diverges" when every path ends in one of these:
 - `if`/`else` where both branches diverge;
 - `switch` with a `default` arm where every arm body diverges and no arm
   contains a `break` that exits the switch (so no arm can fall out);
-- an `unsafe` block or bare block whose body diverges;
+- an `unsafe` block or bare block whose body diverges, and a labeled statement
+  whose statement diverges;
 - a call to `syscall` with the constant syscall number 60 (`exit`) or 231
   (`exit_group`) as the last statement — those never return.
 
@@ -521,10 +529,11 @@ arithmetic; unsigned `>>` is logical.
   is true for NaN.
 - Integer→float and float→integer casts follow §6.6. Out-of-range float→integer
   conversion is not checked.
-- `print` formats finite floats with six fractional digits without rounding
-  guarantees beyond binary floating-point precision; values with magnitude
-  ≥ 1e18 abort with `corex: float too large to print` (exit 101), and
-  `nan`/`inf`/`-inf` are printed for non-finite values.
+- `print` truncates finite floats toward zero to six fractional digits; it does
+  not round (`print(3.14159265)` prints `3.141592`, `print(0.0000015)` prints
+  `0.000001`). Values with magnitude ≥ 1e18 abort with
+  `corex: float too large to print` (exit 101), and `nan`/`inf`/`-inf` are
+  printed for non-finite values.
 - There is no implicit integer/float mixing, no `%` on aggregates, and no
   decimal type.
 
@@ -710,14 +719,14 @@ error[E0203]: type mismatch in assignment: expected `i32`, found `u8`
 | `E0100` | unexpected token / expected token |
 | `E0101` | expected expression |
 | `E0110` | empty array literal or zero repeat count |
-| `E0111` | parser recursion depth exceeds 256 levels (≈126 nested parentheses) |
+| `E0111` | nesting exceeds the implementation limit (parser: 128 levels, ≈62 nested parentheses; expressions: 64 levels) |
 | `E0201` | undefined name, function, type, enum, or struct |
 | `E0202` | duplicate declaration or reserved name |
 | `E0203` | type mismatch |
 | `E0204` | wrong argument count (`print`, `len`, or a user function) |
 | `E0205` | assignment to an immutable place |
 | `E0206` | missing return / missing return value |
-| `E0207` | `break` outside a loop |
+| `E0207` | `break` outside a loop or `switch` |
 | `E0208` | `continue` outside a loop |
 | `E0209` | unsafe operation outside `unsafe` |
 | `E0210` | invalid operator, cast, or comparison for the type |
@@ -876,7 +885,9 @@ struct Blob { len: u64, data: [u8; 0] }        // flexible array member
 - Cross-module references use `::`: `math::add`, `math::Point`,
   `math::Kind::Variant`, `math::CONST`.
 - Symbols are mangled deterministically as `module$item`; `extern "C"` items
-  keep their exact symbol. Entry points `main` and `_start` are never mangled.
+  keep their exact symbol. Entry points `main` and `_start` are never mangled in
+  the root unit; in a module they are ordinary items (`a$main`), so a module
+  cannot collide with or replace the program entry point.
 - Each unit is compiled independently to an object. For every unit the compiler
   emits an interface (`module.cxi`, printable with `COREX_DUMP_INTERFACES=1`)
   containing public structs/unions/enums/typedefs/consts, `extern static`
@@ -905,6 +916,9 @@ output = "build/app"
 
 `corex build <directory>` builds the manifest. `kind = "staticlib"` produces
 `lib<name>.a` with `llvm-ar rcs`; `kind = "shared"` links with `cc -shared`.
+Object files for both are compiled position-independent (`llc
+-relocation-model=pic`) so globals and string constants can be linked into a
+shared object.
 - Conditional compilation: `#[cfg(...)]` before an item. Conditions are
   `key = "value"`, `not(...)`, `all(...)`, `any(...)`. Keys are supplied with
   `--cfg name=value` and manifest `features` (as `feature=value`); the driver
@@ -919,7 +933,7 @@ The language never allocates implicitly. `alloc(bytes)` and
 
 | Module | Contents |
 |---|---|
-| `std_alloc` | `malloc`, `calloc`, `realloc`, `free` (C semantics, 16-byte alignment, size headers), `aligned_alloc`, `Allocator` (context + function pointers), `c_allocator`, `Arena` (`arena_new`, `arena_alloc`, `arena_reset`, `arena_free`) |
+| `std_alloc` | `malloc`, `calloc`, `realloc`, `free` (C semantics, 16-byte alignment, size headers; size arithmetic that would overflow returns `null`), `aligned_alloc`, `Allocator` (context + function pointers), `c_allocator`, `Arena` (`arena_new`, `arena_alloc`, `arena_reset`, `arena_free`) |
 | `std_mem` | `memcpy`, `memmove`, `memset`, `memzero`, `memcmp`, `memchr` |
 | `std_str` | `strlen`, `strcmp`, `strncmp`, `strcpy`, `strncpy`, `strcat`, `strchr`, `str_eq`, `str_find`, `str_copy_cstr` |
 | `std_io` | fd constants and flags, `open`, `read`, `write`, `seek`, `close`, `pipe`, `dup2`, `read_all`, `write_all`, `puts`, `eputs`, `getbyte`, `putbyte` |
@@ -934,7 +948,7 @@ The language never allocates implicitly. `alloc(bytes)` and
 | `std_sync` | `Mutex`, `mutex_lock`/`try_lock`/`unlock`, `Condvar`, `condvar_wait`/`signal`/`broadcast`, `SpinLock` (futex syscalls 202) |
 | `std_thread` | `Thread`, `spawn(entry, arg, stack_size)`, `gettid`, `yield_now`, `thread_exit` |
 | `std_tls` | explicit thread-local blocks: `tls_alloc`, `tls_get`, `tls_release`, `tls_thread_id` |
-| `std_dl` | hosted `dlopen`/`dlsym`/`dlclose`/`dlerror` wrappers (`open`, `sym`, `close`, `error`) |
+| `std_dl` | hosted `dlopen`/`dlsym`/`dlclose`/`dlerror` wrappers: `open` (`RTLD_LAZY`), `open_now` (`RTLD_NOW`), `sym`, `close`, `error` |
 
 The library is freestanding except `std_dl`, which requires `--hosted`.
 `std_alloc` on `--sanitize` poisons freed payloads, keeps mappings so a second

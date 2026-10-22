@@ -41,10 +41,18 @@ fn align_up(value: usize, alignment: usize) -> usize {
 }
 
 /// Allocate `size` bytes aligned to `alignment` (a power of two).
+///
+/// Returns `null` when the size or the alignment cannot be accounted for
+/// without wrapping `usize` arithmetic.
 pub fn aligned_alloc(size: usize, alignment: usize) -> *mut u8 {
     let mut a: usize = alignment;
     if a < 16 {
         a = 16;
+    }
+    // `size + HEADER + a` must not wrap; C returns NULL on overflow.
+    let limit: usize = 0 - 1;
+    if a > limit - HEADER || size > limit - HEADER - a {
+        return null;
     }
     let total: usize = size + HEADER + a;
     unsafe {
@@ -68,6 +76,11 @@ pub fn malloc(size: usize) -> *mut u8 {
 }
 
 pub fn calloc(count: usize, size: usize) -> *mut u8 {
+    // `count * size` must not wrap; C returns NULL on overflow.
+    let limit: usize = 0 - 1;
+    if count != 0 && size > limit / count {
+        return null;
+    }
     let total: usize = count * size;
     let p: *mut u8 = malloc(total);
     if p != null {

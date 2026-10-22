@@ -191,12 +191,71 @@ pub fn llvm_tool(name: &str) -> Option<PathBuf> {
     None
 }
 
+fn random_suffix() -> Option<u64> {
+    use std::io::Read;
+    let mut bytes = [0u8; 8];
+    let mut file = std::fs::File::open("/dev/urandom").ok()?;
+    file.read_exact(&mut bytes).ok()?;
+    Some(u64::from_le_bytes(bytes))
+}
+
+/// Create a private scratch directory under the system temp directory.
+///
+/// The name carries a random suffix (no pid/time prediction) and the directory
+/// is created exclusively: an existing path is never reused, so a local
+/// attacker cannot pre-create it and substitute build inputs. On Unix the mode
+/// is forced to 0700.
 pub fn temp_dir(prefix: &str) -> PathBuf {
-    let stamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_nanos())
-        .unwrap_or(0);
-    std::env::temp_dir().join(format!("{prefix}-{}-{stamp}", std::process::id()))
+    let fallback = || {
+        let stamp = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        std::env::temp_dir().join(format!("{prefix}-{}-{stamp}", std::process::id()))
+    };
+    for _ in 0..64 {
+        let Some(suffix) = random_suffix() else { break };
+        let path = std::env::temp_dir().join(format!("{prefix}-{suffix:016x}"));
+        match std::fs::create_dir(&path) {
+            Ok(()) => {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700));
+                }
+                return path;
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(_) => break,
+        }
+    }
+    fallback()
+}
+
+/// Owns a scratch directory and removes it on drop unless `COREX_KEEP_TEMP` is
+/// set, so every error path in a build cleans up.
+pub struct TempDir {
+    path: PathBuf,
+}
+
+impl TempDir {
+    pub fn new(prefix: &str) -> TempDir {
+        TempDir {
+            path: temp_dir(prefix),
+        }
+    }
+
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        if std::env::var("COREX_KEEP_TEMP").is_err() {
+            let _ = std::fs::remove_dir_all(&self.path);
+        }
+    }
 }
 
 fn tool_error(tool: &str, stderr: &str) -> Diagnostic {
@@ -677,6 +736,7 @@ fn assemble_and_lower(
     work: &Path,
     opt_level: u8,
     tag: &str,
+    pic: bool,
 ) -> Result<PathBuf, Vec<Diagnostic>> {
     let ir_path = work.join(format!("{tag}.ll"));
     std::fs::write(&ir_path, ir).map_err(|e| {
@@ -741,10 +801,15 @@ fn assemble_and_lower(
         )
     })?;
     let obj_path = work.join(format!("{tag}.o"));
+    let relocation = if pic {
+        "-relocation-model=pic"
+    } else {
+        "-relocation-model=static"
+    };
     let out = Command::new(&llc)
         .arg("-filetype=obj")
         .arg(format!("-O{}", opt_level.min(3)))
-        .arg("-relocation-model=static")
+        .arg(relocation)
         .arg(&object_input)
         .arg("-o")
         .arg(&obj_path)
@@ -854,6 +919,7 @@ pub fn compile_units(
     work: &Path,
     opt_level: u8,
     config: &BuildConfig,
+    pic: bool,
 ) -> Result<(Vec<PathBuf>, String), Vec<Diagnostic>> {
     if roots.is_empty() {
         return Err(source_error("E0300", "no input files"));
@@ -962,7 +1028,7 @@ pub fn compile_units(
                 )]);
             }
         }
-        mangle::mangle_unit(&mut program, unit_start, &prefix);
+        mangle::mangle_unit(&mut program, unit_start, &prefix, unit.is_root);
 
         let require_entry =
             unit.is_root && config.require_entry && !config.test_mode;
@@ -1020,7 +1086,7 @@ pub fn compile_units(
                 config.hosted,
             ),
         };
-        let object = assemble_and_lower(&ir, work, opt_level, &tag)?;
+        let object = assemble_and_lower(&ir, work, opt_level, &tag, pic)?;
         objects.push(object);
         if unit.is_root && entry_ir.is_empty() {
             entry_ir = ir;
@@ -1041,15 +1107,12 @@ pub fn build_units(
     inputs: &LinkInputs,
     config: &BuildConfig,
 ) -> Result<Artifacts, Vec<Diagnostic>> {
-    let work = temp_dir("corex-build");
-    let (objects, entry_ir) = compile_units(roots, &work, opt_level, config)?;
+    let work = TempDir::new("corex-build");
+    let (objects, entry_ir) = compile_units(roots, work.path(), opt_level, config, false)?;
     link_objects(&objects, output, inputs)?;
     if keep_ir {
         let kept = output.with_extension("ll");
         let _ = std::fs::write(&kept, &entry_ir);
-    }
-    if std::env::var("COREX_KEEP_TEMP").is_err() {
-        let _ = std::fs::remove_dir_all(&work);
     }
     Ok(Artifacts {
         ir: entry_ir,
@@ -1066,8 +1129,11 @@ pub fn build_project(
     config: &BuildConfig,
     kind: OutputKind,
 ) -> Result<Artifacts, Vec<Diagnostic>> {
-    let work = temp_dir("corex-project");
-    let (objects, entry_ir) = compile_units(roots, &work, opt_level, config)?;
+    let work = TempDir::new("corex-project");
+    // Shared objects and archive members must be position-independent so the
+    // linker can resolve `R_X86_64_32` references against `.rodata`/globals.
+    let pic = kind != OutputKind::Executable;
+    let (objects, entry_ir) = compile_units(roots, work.path(), opt_level, config, pic)?;
     match kind {
         OutputKind::Executable => link_objects(&objects, output, inputs)?,
         OutputKind::Shared => {
@@ -1076,9 +1142,6 @@ pub fn build_project(
             link_objects(&objects, output, &shared)?;
         }
         OutputKind::StaticLibrary => archive_objects(&objects, output)?,
-    }
-    if std::env::var("COREX_KEEP_TEMP").is_err() {
-        let _ = std::fs::remove_dir_all(&work);
     }
     Ok(Artifacts {
         ir: entry_ir,
@@ -1338,17 +1401,15 @@ pub fn run(exe: &Path, args: &[String]) -> Result<ExitStatus, String> {
 pub fn verify_ir(ir: &str) -> Result<(), String> {
     let llvm_as = llvm_tool("llvm-as")
         .ok_or_else(|| "`llvm-as` not found (set COREX_LLVM_BIN)".to_string())?;
-    let dir = temp_dir("corex-verify");
-    std::fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
-    let path = dir.join("module.ll");
+    let dir = TempDir::new("corex-verify");
+    let path = dir.path().join("module.ll");
     std::fs::write(&path, ir).map_err(|e| e.to_string())?;
     let out = Command::new(llvm_as)
         .arg(&path)
         .arg("-o")
-        .arg(dir.join("module.bc"))
+        .arg(dir.path().join("module.bc"))
         .output()
         .map_err(|e| e.to_string())?;
-    let _ = std::fs::remove_dir_all(&dir);
     if out.status.success() {
         Ok(())
     } else {

@@ -316,12 +316,12 @@ impl Session {
         let text = self.combined();
         let file = SourceFile::new("<repl>", text);
 
-        let work = driver::temp_dir("corex-repl");
-        if let Err(e) = std::fs::create_dir_all(&work) {
-            eprintln!("[repl] cannot create {}: {e}", work.display());
+        let work = driver::TempDir::new("corex-repl");
+        if let Err(e) = std::fs::create_dir_all(work.path()) {
+            eprintln!("[repl] cannot create {}: {e}", work.path().display());
             return;
         }
-        let exe = work.join("program");
+        let exe = work.path().join("program");
 
         match driver::build(&file, &exe, self.opt, false) {
             Ok(artifacts) => match driver::run(&artifacts.executable, &[]) {
@@ -343,8 +343,6 @@ impl Session {
                 }
             }
         }
-
-        let _ = std::fs::remove_dir_all(&work);
     }
 }
 

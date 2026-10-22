@@ -204,3 +204,43 @@ fn non_constant_aggregate_initializers_are_rejected() {
     // Non-constant array lengths keep the existing parse-level code.
     expect_error("static A: [u8; Q] = [1];\nfn main() -> i32 { return 0; }", "E0100");
 }
+
+/// Calls through a function pointer must use the same lowered signature as the
+/// definition: aggregates pass as `ptr` (slices as `{ptr,i64}` lowered to
+/// `ptr`), and an aggregate return takes a leading `sret` pointer. Building the
+/// call site from surface types produced IR the verifier rejected.
+#[test]
+fn function_pointers_lower_aggregates_through_the_internal_abi() {
+    const SOURCE: &str = r#"
+struct P { a: i64, b: i64 }
+
+fn add_pair(p: P) -> i64 { return p.a + p.b; }
+fn make_pair(a: i64, b: i64) -> P { return P { a: a, b: b }; }
+fn first_two(xs: [i64]) -> i64 { return xs[0] + xs[1]; }
+fn text_len(s: str) -> i64 { return len(s) as i64; }
+
+fn main() -> i32 {
+    let pair_sum: fn(P) -> i64 = &add_pair;
+    print(pair_sum(P { a: 1, b: 2 }));
+
+    let pair_make: fn(i64, i64) -> P = &make_pair;
+    let p: P = pair_make(3, 4);
+    print(p.a);
+    print(p.b);
+
+    let xs: [i64; 2] = [10, 20];
+    let slice_sum: fn([i64]) -> i64 = &first_two;
+    print(slice_sum(xs[..]));
+
+    let len_of: fn(str) -> i64 = &text_len;
+    print(len_of("hello"));
+    return 0;
+}
+"#;
+
+    for opt in 0..=3 {
+        let r = build_and_run_opt(SOURCE, opt);
+        assert_eq!(r.stdout, "3\n3\n4\n30\n5\n", "stdout differs at --opt {opt}");
+        assert_eq!(r.code, 0, "--opt {opt} stderr: {}", r.stderr);
+    }
+}

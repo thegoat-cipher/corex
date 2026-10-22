@@ -259,3 +259,109 @@ fn main() -> i32 {
     }
     assert!(stdout.contains("[exit 0]"), "stdout: {stdout}");
 }
+
+/// A build directory must not survive any failing path: analysis errors,
+/// tool failures, and link failures all returned before the old cleanup.
+#[test]
+fn failed_builds_remove_their_temp_directories() {
+    let tmp = std::env::temp_dir().join(format!("corex-cli-tmp-fail-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create tmp");
+    let out_path = tmp.join("app");
+
+    // Analysis error.
+    let src = tmp.join("bad.cx");
+    std::fs::write(&src, "fn main() -> i32 { return missing; }\n").expect("write");
+    let out = corex()
+        .env("TMPDIR", &tmp)
+        .args(["build", src.to_str().unwrap(), "-o", out_path.to_str().unwrap()])
+        .output()
+        .expect("run corex");
+    assert!(!out.status.success());
+    assert_no_build_dirs(&tmp, "analysis error");
+
+    // Link error: the objects were already written to the work directory.
+    let link_bad = tmp.join("link-bad.cx");
+    std::fs::write(
+        &link_bad,
+        "extern \"C\" fn missing_symbol() -> i32;\nfn main() -> i32 { return missing_symbol(); }\n",
+    )
+    .expect("write");
+    let out = corex()
+        .env("TMPDIR", &tmp)
+        .args(["build", link_bad.to_str().unwrap(), "-o", out_path.to_str().unwrap()])
+        .output()
+        .expect("run corex");
+    assert!(!out.status.success());
+    assert_no_build_dirs(&tmp, "link error");
+    let _ = std::fs::remove_dir_all(&tmp);
+}
+
+fn assert_no_build_dirs(tmp: &std::path::Path, context: &str) {
+    let leftovers: Vec<String> = std::fs::read_dir(tmp)
+        .expect("read tmp")
+        .map(|e| e.expect("entry").file_name().to_string_lossy().to_string())
+        .filter(|name| name.starts_with("corex-"))
+        .collect();
+    assert!(
+        leftovers.is_empty(),
+        "{context} leaked temp directories: {leftovers:?}"
+    );
+}
+
+/// Scratch directories carry a random name (no pid or timestamp that a local
+/// attacker can predict), are created 0700, and are only kept when asked.
+#[test]
+fn temp_directories_are_private_and_unpredictable() {
+    let tmp = std::env::temp_dir().join(format!("corex-cli-tmp-keep-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&tmp);
+    std::fs::create_dir_all(&tmp).expect("create tmp");
+    let src = tmp.join("ok.cx");
+    std::fs::write(&src, "fn main() -> i32 { return 0; }\n").expect("write");
+    let out = corex()
+        .env("TMPDIR", &tmp)
+        .env("COREX_KEEP_TEMP", "1")
+        .args([
+            "build",
+            src.to_str().unwrap(),
+            "-o",
+            tmp.join("app").to_str().unwrap(),
+        ])
+        .output()
+        .expect("run corex");
+    assert!(
+        out.status.success(),
+        "stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    let build_dirs: Vec<std::path::PathBuf> = std::fs::read_dir(&tmp)
+        .expect("read tmp")
+        .filter_map(|e| {
+            let path = e.expect("entry").path();
+            let name = path.file_name()?.to_string_lossy().to_string();
+            name.starts_with("corex-build-").then_some(path)
+        })
+        .collect();
+    assert_eq!(build_dirs.len(), 1, "expected one kept build directory");
+    let name = build_dirs[0]
+        .file_name()
+        .expect("name")
+        .to_string_lossy()
+        .to_string();
+    assert!(
+        !name.contains(&std::process::id().to_string()),
+        "temp name leaks the pid: {name}"
+    );
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&build_dirs[0])
+            .expect("metadata")
+            .permissions()
+            .mode()
+            & 0o777;
+        assert_eq!(mode, 0o700, "temp directory mode is {mode:o}");
+    }
+    let _ = std::fs::remove_dir_all(&tmp);
+}

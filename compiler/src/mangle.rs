@@ -6,14 +6,16 @@
 //! modules (`math::add`) become `math$add` so a generated interface can declare
 //! them with plain CoreX syntax.
 //!
-//! Entry points (`main`, `_start`) are never mangled, so the operating system
-//! can always find them.
+//! Entry points (`main`, `_start`) are never mangled in the root unit, so the
+//! operating system can always find them. In a non-root module they are
+//! ordinary items and are mangled like everything else; otherwise a module
+//! `pub fn main` would collide with the program's entry point at link time.
 
 use std::collections::{HashMap, HashSet};
 
 use crate::ast::*;
 
-pub fn mangle_unit(program: &mut Program, unit_start: usize, prefix: &str) {
+pub fn mangle_unit(program: &mut Program, unit_start: usize, prefix: &str, is_root: bool) {
     if prefix.is_empty() {
         // Still rewrite qualified paths inside the unit.
         let mut mapper = Mapper::new(HashMap::new());
@@ -24,9 +26,10 @@ pub fn mangle_unit(program: &mut Program, unit_start: usize, prefix: &str) {
     let mut locals = HashSet::new();
     for f in &program.fns {
         // C-ABI functions keep their exact symbol; it is the interface to C.
+        // `main`/`_start` are entry points only in the root unit.
+        let is_entry = is_root && (f.name == "main" || f.name == "_start");
         if f.span.start >= unit_start
-            && f.name != "main"
-            && f.name != "_start"
+            && !is_entry
             && f.extern_abi.as_deref() != Some("C")
         {
             locals.insert(f.name.clone());

@@ -4,8 +4,8 @@ Status values: NOT STARTED, IN PROGRESS, BLOCKED, COMPLETED. Validated status
 changed only after the acceptance criteria passed. Evidence names the command or
 test that proves completion; counts are from the run on 2026-10-21.
 
-Test totals (v0.3, 2026-10-22): `cargo test` → **194 passed, 0 failed**
-(68 unit, 126 integration).
+Test totals (v0.3, 2026-10-22): `cargo test` → **205 passed, 0 failed**
+(68 unit, 137 integration).
 
 | ID | Description | Workstream | Priority | Depends on | Status | Acceptance criteria | Validation evidence |
 |---|---|---|---|---|---|---|---|
@@ -102,6 +102,7 @@ All tasks below are COMPLETED and validated by the named test or command on
 | T-076 | Shared libraries and `dlopen` | Runtime + Driver | P1 | COMPLETED | `tests/modules.rs::shared_library_can_be_loaded_with_dlopen` |
 | T-077 | Benchmark suite and measured results | Performance | P1 | COMPLETED | `scripts/bench.sh`; `docs/benchmarks.md` (5 kernels + compiler throughput) |
 | T-078 | Self-hosting P0 blockers: static aggregate constants, `const` array lengths, `std_map` (with `Set`)/`std_builder`, driver helpers (`std_env`, `pipe`/`dup2`, `spawn_argv`/`run_argv`), nested `vec<vec<T>>` syntax, `switch` divergence | Language + Backend + Runtime | P0 | COMPLETED | Static arrays/structs/function pointers emit LLVM globals at `--opt 0..3`; `lib/corex` has insertion-ordered map/set and a growable builder; a CoreX program forks `/bin/echo`, captures stdout through a pipe, and reports exit status; `vec<vec<u8>>` parses without whitespace while `>>`/`>>=` stay shifts; a `switch` with `default` satisfies return analysis | `tests/aggregates.rs` (5), `tests/collections.rs` (2), `tests/driver_helpers.rs` (2), `tests/modules.rs::module_const_is_a_valid_array_length`, `tests/features.rs::nested_generic_types_and_shift_operators`, `tests/extended.rs::switch_with_default_satisfies_return_analysis`, 4 parser unit tests, 3 semantic unit tests; `llvm-as` verifies the aggregate IR |
+| T-079 | Audit fixes: linear `+`/`-` type checking, expression-depth guard, signed bitfield sign extension, indirect-call internal ABI for aggregates, labeled `break`/`return` analysis, PIC shared/static objects, RAII temp directories, module-level `main` mangling, spec wording, `std_dl` lazy/eager split, `std_alloc` overflow checks, float-print docs | Semantic + Codegen + Driver + Runtime | P0/P1/P2 | COMPLETED | A 60-term `+`/`-` chain checks in linear time; 4,500-term flat `+`/`-`/`*`/`as` chains report `E0111` instead of aborting; signed bitfields read negative values; struct/slice/`str` function-pointer calls verify and run at `--opt 0..3`; a labeled `break` under `while true` is rejected with `E0206` and a labeled `return` is accepted; `--emit shared` links with a string and global; failed builds leave no temp directory; temp dirs are 0700 with a random name; a module `pub fn main` no longer collides with the entry point | `tests/robustness.rs` (2 new), `tests/extended.rs` (2 new), `tests/aggregates.rs::function_pointers_lower_aggregates_through_the_internal_abi`, `tests/modules.rs` (2 new: module `main`, lazy/now `dlopen`), `tests/cli.rs` (2 new: cleanup, private temp dirs), `tests/driver_helpers.rs::scratch_directories_are_private_and_self_removing`, `tests/stdlib.rs::allocator_returns_null_when_size_arithmetic_overflows`; 11 new tests, 205 total |
 
 ### Known gaps (explicit)
 
@@ -114,6 +115,6 @@ All tasks below are COMPLETED and validated by the named test or command on
 
 ## Status summary (v0.3)
 
-- COMPLETED: T-001 … T-028, T-041 … T-046, T-049 … T-055, T-056 … T-078.
+- COMPLETED: T-001 … T-028, T-041 … T-046, T-049 … T-055, T-056 … T-079.
 - IN PROGRESS: none.
 - BLOCKED: none.
