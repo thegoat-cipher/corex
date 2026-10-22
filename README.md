@@ -375,6 +375,7 @@ and runtime aborts for dynamic bounds and division by zero. See
 | [`docs/tasks.md`](docs/tasks.md) | Task tracker with validation evidence |
 | [`docs/request-log.md`](docs/request-log.md) | Append-only record of requests and outcomes |
 | [`docs/benchmarks.md`](docs/benchmarks.md) | Measured performance with methodology |
+| [`docs/self-hosting.md`](docs/self-hosting.md) | Self-hosting assessment: verdict, component mapping, blockers, bootstrap plan, effort and risk |
 | [`lib/corex`](lib/corex) | Freestanding standard library source (modules listed in spec §12.7) |
 
 ## AI assistance
