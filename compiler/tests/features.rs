@@ -242,6 +242,46 @@ fn runtime_slice_bounds_abort() {
 }
 
 #[test]
+fn nested_generic_types_and_shift_operators() {
+    let r = build_and_run(
+        r#"
+        fn main() -> i32 {
+            let mut v: vec<vec<u8>> = vec_new(2);
+            let mut a: vec<u8> = vec_new(2);
+            vec_push(&mut a, 1);
+            vec_push(&mut a, 2);
+            vec_push(&mut v, a);
+            let mut b: vec<u8> = vec_new(1);
+            vec_push(&mut b, 9);
+            vec_push(&mut v, b);
+            print(v[0][1]);
+            print(v[1][0]);
+            vec_free(&mut v);
+
+            let mut deep: vec<vec<vec<i32>>> = vec_new(1);
+            let mut mid: vec<vec<i32>> = vec_new(1);
+            let mut leaf: vec<i32> = vec_new(1);
+            vec_push(&mut leaf, 7);
+            vec_push(&mut mid, leaf);
+            vec_push(&mut deep, mid);
+            print(deep[0][0][0]);
+            vec_free(&mut deep);
+
+            // `>>` and `>>=` stay shift operators in expressions.
+            let mut x: i32 = 64;
+            let y: i32 = x >> 3;
+            x >>= 2;
+            print(y);
+            print(x);
+            return 0;
+        }
+        "#,
+    );
+    assert_eq!(r.stdout, "2\n9\n7\n8\n16\n");
+    assert_eq!(r.code, 0, "stderr: {}", r.stderr);
+}
+
+#[test]
 fn features_example_runs() {
     let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples/features.cx");
     let source = std::fs::read_to_string(&path)

@@ -208,6 +208,25 @@ fn switch_works_at_every_optimization_level() {
 }
 
 #[test]
+fn switch_with_default_satisfies_return_analysis() {
+    let source = r#"
+        enum K { A, B }
+        fn f(k: K) -> i32 {
+            switch k {
+            case K::A: { return 1; }
+            default:  { return 2; }
+            }
+        }
+        fn main() -> i32 { return f(K::B); }
+    "#;
+    for opt in 0..=3 {
+        let r = build_and_run_opt(source, opt);
+        assert_eq!(r.stdout, "", "at --opt {opt}");
+        assert_eq!(r.code, 2, "at --opt {opt}: {}", r.stderr);
+    }
+}
+
+#[test]
 fn declarative_macros_expand_at_compile_time() {
     let r = build_and_run(
         r#"
