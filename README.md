@@ -39,7 +39,8 @@ See [Limitations](#limitations).
 ## Quick start
 
 For a step-by-step toolchain setup, verification, and troubleshooting, see
-[`docs/installation.md`](docs/installation.md). Short version:
+[`docs/installation.md`](docs/installation.md). For the language itself, read
+the [`syntax tutorial`](docs/tutorial.md). Short version:
 
 Prerequisites:
 
@@ -381,6 +382,7 @@ and runtime aborts for dynamic bounds and division by zero. See
 
 | Document | Contents |
 |---|---|
+| [`docs/tutorial.md`](docs/tutorial.md) | Complete syntax tutorial: types, values, control flow, modules, FFI, tooling |
 | [`docs/installation.md`](docs/installation.md) | Toolchain setup, build, verification, environment variables, troubleshooting |
 | [`CHANGELOG.md`](CHANGELOG.md) | Release notes and version history |
 | [`docs/resources.md`](docs/resources.md) | Curated project docs, examples, tests, source map, and external references |
