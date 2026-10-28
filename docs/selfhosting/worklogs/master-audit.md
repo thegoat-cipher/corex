@@ -1,5 +1,10 @@
 # P0–P3 Master Audit — Integrated Self-Hosting Tree
 
+> **Post-fix status (2026-10-28):** every finding below was fixed on
+> `room/corex-audit-fixes-6cmw` and independently re-verified on merged `main`
+> (`d6983fd`). This file is the pre-fix snapshot; see §7 for the follow-up
+> evidence and residual blockers.
+
 Date: 2026-10-28
 Audited commit: `084f1f3` (`main`), baseline `0c55d59`
 Worktree: `room/corex-p0-p3-master-audit-auz3`
@@ -209,3 +214,56 @@ is required.
    `(cd compiler && cargo test)`, `tests/selfhosting/{run,cli,dump,fuzz}.sh`,
    and the example/lib matrices. SH-046 still waits on SH-033, SH-037, SH-039,
    and SH-043 after these correctness fixes.
+
+## 7. Follow-up verification (post-fix)
+
+Fix branch: `room/corex-audit-fixes-6cmw` (`11ae908`, `6dce8c1`, `f942403`),
+merged into `main` at `d6983fd`. Fixer commits were reviewed by the master
+auditor; all behavior changes were re-run independently, not trusted from the
+fixer report.
+
+### Finding status
+
+| Finding | Status | Independent evidence |
+|---|---|---|
+| F-01 build exit | FIXED | `build -o /nonexistent-dir/out` → rc 3, no `compiled`, no output |
+| F-02 signal status | FIXED | fake `COREX_CC` (`kill -SEGV $$`) → rc 3, no `compiled`, no output |
+| F-03 non-plain statics | FIXED (coded rejection) | packed static → `error[E0226]`; `emit-ir --verify` rc 1; plain `statics.cx` passes |
+| F-04 float compound | FIXED | `features.cx` builds and matches the oracle; float `+= -= *= /= %=` corpus case |
+| F-05 cfg defaults | FIXED | `target_os=linux` branch selected by default; `--sanitize` seeds `sanitize=true` |
+| F-06 frontend options | FIXED | `check`/`emit-ir` accept `--cfg`/`-I`; stdin `build`/`run` honor them |
+| F-07 dead labels | FIXED | block/if/while/switch labels after a non-label statement all pass `emit-ir --verify`; goto executes |
+| F-08 negative codes | FIXED | 56 `.code` files; runner rejects uncoded negatives; 56/56 match |
+| F-09 ASan gate | FIXED | `COREX_REQUIRE_ASAN=1` passes; CI asserts 327 + `ASan: enabled` |
+| F-10 bootstrap usage | FIXED | `[--jobs N]` removed |
+| F-11 architecture docs | FIXED | integrated subset, counts, CLI |
+| F-12 memory docs | FIXED | bounds/ASan policy and residual risks |
+| F-13 performance docs | FIXED | one integrated table (708 ms, 64 ms, 7.04 MB/s, RSS) |
+| F-14 SH-034 matrix | FIXED | 13/16; `std_math` unblocked; SH-033 blocks sync/TLS/thread |
+| F-15 SH-036 `-g` | FIXED | rejected by contract, exit 2 |
+
+### Final merged gates
+
+```text
+check: ok: 474 function(s), entry `main`; 15,228 lines
+stage1 f4192f40a4571bdfec5f4514bf035a1246486f80ad94fa54e2fedf79a17af884
+stage2 c33aff55ae3c74ab87358b4db50062a548fed238b7cae4cd9e7ac8f202eb5f78
+stage3 c33aff55ae3c74ab87358b4db50062a548fed238b7cae4cd9e7ac8f202eb5f78
+stage4 c33aff55ae3c74ab87358b4db50062a548fed238b7cae4cd9e7ac8f202eb5f78
+reproducible: stage2 == stage3 == stage4
+selfhosting tests: 249 passed, 0 failed (Stage 1/2/3)
+cli tests: 80 passed, 0 failed
+dump tests: 75 passed, 0 failed
+fuzz tests: 327 passed, 0 failed; ASan: enabled
+cargo test: 205 passed, 0 failed
+examples: 8/8 match the oracle at --opt 0..3
+lib/corex: 13/16 build
+repro-opt: opt1 0f6bd235…, opt2 eda405ad…, opt3 58067778…
+```
+
+### Remaining blockers
+
+SH-033 (threads/atomics/volatile/TLS/inline asm), SH-034 (`lib/corex` 13/16),
+SH-037 (LSP/line editor), SH-039 (full 205-test port), SH-043 (remote push/CI),
+SH-044 (P3 cleanup not merged), SH-046 (full acceptance). These are scope
+blockers, not defects in the fixed tree.
