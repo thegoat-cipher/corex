@@ -1,0 +1,4 @@
+fn main() -> i32 {
+    let r: i32 = write_file("/tmp/x.bin", 5);
+    return r;
+}

@@ -1323,6 +1323,8 @@ fn builtin_id(name: str) -> i32 {
     if rt_eq(name, "vec_push") { return 14; }
     if rt_eq(name, "vec_free") { return 15; }
     if rt_eq(name, "vec_slice") { return 16; }
+    if rt_eq(name, "read_file") { return 17; }
+    if rt_eq(name, "write_file") { return 18; }
     return 0;
 
     }
@@ -1645,6 +1647,55 @@ fn check_call(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
         (*st).elem = elem4;
         (*e).ty = st;
         return st;
+    }
+    if bid == 17 {
+        let arg: *mut Expr = (*e).args;
+        let u8r: *mut Type = type_new((*s).a, K::U8);
+        let path_ty: *mut Type = type_new((*s).a, K::Slice);
+        (*path_ty).elem = u8r;
+        if arg == null || (*arg).next != null {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "read_file takes one argument");
+        }
+        if arg != null {
+            let at: *mut Type = resolve_type(s, check_expr(s, arg, path_ty));
+            let kk: K = (*at).kind;
+            let okp: bool = kk == K::Str || (kk == K::Slice && (*at).elem != null && (*(*at).elem).kind == K::U8);
+            if !okp {
+                sdiag(s, (*arg).file, (*arg).line, (*arg).col, "read_file path must be str or [u8]");
+            }
+        }
+        let vt: *mut Type = type_vec((*s).a, u8r);
+        (*e).ty = vt;
+        return vt;
+    }
+    if bid == 18 {
+        let arg: *mut Expr = (*e).args;
+        let u8w: *mut Type = type_new((*s).a, K::U8);
+        let bytes_ty: *mut Type = type_new((*s).a, K::Slice);
+        (*bytes_ty).elem = u8w;
+        if arg == null || (*arg).next == null || (*(*arg).next).next != null {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "write_file takes two arguments");
+        }
+        if arg != null {
+            let pt: *mut Type = resolve_type(s, check_expr(s, arg, bytes_ty));
+            let pk: K = (*pt).kind;
+            let okp2: bool = pk == K::Str || (pk == K::Slice && (*pt).elem != null && (*(*pt).elem).kind == K::U8);
+            if !okp2 {
+                sdiag(s, (*arg).file, (*arg).line, (*arg).col, "write_file path must be str or [u8]");
+            }
+            let de: *mut Expr = (*arg).next;
+            if de != null {
+                let dt: *mut Type = resolve_type(s, check_expr(s, de, bytes_ty));
+                let dk: K = (*dt).kind;
+                let okd: bool = dk == K::Str || (dk == K::Slice && (*dt).elem != null && (*(*dt).elem).kind == K::U8);
+                if !okd {
+                    sdiag(s, (*de).file, (*de).line, (*de).col, "write_file expects str or [u8] data");
+                }
+            }
+        }
+        let rt2: *mut Type = type_new((*s).a, K::I32);
+        (*e).ty = rt2;
+        return rt2;
     }
     let u8t: *mut Type = type_new((*s).a, K::U8);
     let pm: *mut Type = type_ptr((*s).a, u8t, true);

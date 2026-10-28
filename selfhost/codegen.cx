@@ -35,6 +35,7 @@ struct Cg {
     used_print_char: bool,
     used_print_str: bool,
     used_print_f64: bool,
+    used_file_io: bool,
     used_fatal: bool,
     used_cstr_len: bool,
     used_cstr_str: bool,
@@ -1549,6 +1550,41 @@ fn gen_call(f: *mut Fn, e: *mut Expr) -> Val {
         fs(f, ", ptr "); fs(f, slot); fnewline(f);
         return v_addr((*e).ty, slot);
     }
+    if bid == 12 {
+        let buf_e: *mut Expr = (*e).args;
+        let cap_e: *mut Expr = (*buf_e).next;
+        let str_e: *mut Expr = (*cap_e).next;
+        let bv: Val = gen_expr(f, buf_e);
+        let cv: Val = gen_expr(f, cap_e);
+        let sv: Val = gen_expr(f, str_e);
+        let cap: str = cast_operand_to_i64(f, cv, (*cap_e).ty);
+        let buf: str = operand(f, bv, (*buf_e).ty);
+        let st: str = materialize(f, sv, (*str_e).ty);
+        let dp: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, dp as i64);
+        fs(f, " = extractvalue { ptr, i64 } "); fs(f, st); fs(f, ", 0\n");
+        let ln: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, ln as i64);
+        fs(f, " = extractvalue { ptr, i64 } "); fs(f, st); fs(f, ", 1\n");
+        let need: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, need as i64);
+        fs(f, " = add i64 %t"); fi(f, ln as i64); fs(f, ", 1\n");
+        let okc: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, okc as i64);
+        fs(f, " = icmp ule i64 %t"); fi(f, need as i64); fs(f, ", "); fs(f, cap); fnewline(f);
+        gen_abort_if(f, reg_of(f, okc), "corex: cstr buffer too small\n");
+        let mr: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, mr as i64);
+        fs(f, " = call ptr @memcpy(ptr "); fs(f, buf); fs(f, ", ptr %t"); fi(f, dp as i64);
+        fs(f, ", i64 %t"); fi(f, ln as i64); fs(f, ")\n");
+        let endp: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, endp as i64);
+        fs(f, " = getelementptr inbounds i8, ptr "); fs(f, buf);
+        fs(f, ", i64 %t"); fi(f, ln as i64); fs(f, "\n");
+        fs(f, "  store i8 0, ptr %t"); fi(f, endp as i64); fs(f, ", align 1\n");
+        (*(*f).cg).used_fatal = true;
+        return v_ssa((*e).ty, buf);
+    }
     if bid == 13 {
         let arg: *mut Expr = (*e).args;
         let v: Val = gen_expr(f, arg);
@@ -1731,6 +1767,59 @@ fn gen_call(f: *mut Fn, e: *mut Expr) -> Val {
         fs(f, "  store { ptr, i64 } %t"); fi(f, s2 as i64);
         fs(f, ", ptr "); fs(f, slot); fnewline(f);
         return v_addr((*e).ty, slot);
+    }
+    if bid == 17 {
+        let pe: *mut Expr = (*e).args;
+        let pv: Val = gen_expr(f, pe);
+        let ps: str = materialize(f, pv, (*pe).ty);
+        let dp2: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, dp2 as i64);
+        fs(f, " = extractvalue { ptr, i64 } "); fs(f, ps); fs(f, ", 0\n");
+        let ln2: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, ln2 as i64);
+        fs(f, " = extractvalue { ptr, i64 } "); fs(f, ps); fs(f, ", 1\n");
+        let res: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, res as i64);
+        fs(f, " = call { ptr, i64, i64 } @_cx_read_file(ptr %t"); fi(f, dp2 as i64);
+        fs(f, ", i64 %t"); fi(f, ln2 as i64); fs(f, ")\n");
+        let ty: *mut Type = (*e).ty;
+        let slot2: str = ftemp(f, ty);
+        fs(f, "  store { ptr, i64, i64 } %t"); fi(f, res as i64);
+        fs(f, ", ptr "); fs(f, slot2); fnewline(f);
+        (*(*f).cg).used_file_io = true;
+        (*(*f).cg).used_alloc = true;
+        (*(*f).cg).used_free = true;
+        return v_addr(ty, slot2);
+    }
+    if bid == 18 {
+        let pe2: *mut Expr = (*e).args;
+        let de2: *mut Expr = (*pe2).next;
+        let pv2: Val = gen_expr(f, pe2);
+        let dv2: Val = gen_expr(f, de2);
+        let ps2: str = materialize(f, pv2, (*pe2).ty);
+        let ds2: str = materialize(f, dv2, (*de2).ty);
+        let pd: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, pd as i64);
+        fs(f, " = extractvalue { ptr, i64 } "); fs(f, ps2); fs(f, ", 0\n");
+        let pl: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, pl as i64);
+        fs(f, " = extractvalue { ptr, i64 } "); fs(f, ps2); fs(f, ", 1\n");
+        let dd: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, dd as i64);
+        fs(f, " = extractvalue { ptr, i64 } "); fs(f, ds2); fs(f, ", 0\n");
+        let dl: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, dl as i64);
+        fs(f, " = extractvalue { ptr, i64 } "); fs(f, ds2); fs(f, ", 1\n");
+        let wr: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, wr as i64);
+        fs(f, " = call i32 @_cx_write_file(ptr %t"); fi(f, pd as i64);
+        fs(f, ", i64 %t"); fi(f, pl as i64);
+        fs(f, ", ptr %t"); fi(f, dd as i64);
+        fs(f, ", i64 %t"); fi(f, dl as i64); fs(f, ")\n");
+        (*(*f).cg).used_file_io = true;
+        (*(*f).cg).used_alloc = true;
+        (*(*f).cg).used_free = true;
+        return v_ssa((*e).ty, reg_of(f, wr));
     }
     return v_void();
 
@@ -2488,6 +2577,11 @@ fn gen_helpers(cg: *mut Cg) {
         rt_i(hp, len(msg) as i64);
         rt_s(hp, ")\n  unreachable\nok:\n  %p = inttoptr i64 %r to ptr\n  ret ptr %p\n}\n\n");
     }
+    if (*cg).used_file_io {
+        rt_s(hp, "define internal ptr @_cx_cstr(ptr %data, i64 %len) {\nentry:\n  %n = add i64 %len, 1\n  %p = call ptr @_cx_alloc(i64 %n)\n  %r = call ptr @memcpy(ptr %p, ptr %data, i64 %len)\n  %end = getelementptr inbounds i8, ptr %p, i64 %len\n  store i8 0, ptr %end, align 1\n  ret ptr %p\n}\n\ndefine internal i32 @_cx_write_all(i64 %fd, ptr %data, i64 %len) {\nentry:\n  br label %loop\nloop:\n  %off = phi i64 [ 0, %entry ], [ %next, %more ]\n  %left = sub i64 %len, %off\n  %done = icmp eq i64 %left, 0\n  br i1 %done, label %finish, label %body\nbody:\n  %p = getelementptr inbounds i8, ptr %data, i64 %off\n  %pi = ptrtoint ptr %p to i64\n  %w = call i64 @_cx_syscall(i64 1, i64 %fd, i64 %pi, i64 %left, i64 0, i64 0, i64 0)\n  %bad = icmp sle i64 %w, 0\n  br i1 %bad, label %fail, label %more\nmore:\n  %next = add i64 %off, %w\n  br label %loop\nfinish:\n  ret i32 0\nfail:\n  ret i32 -1\n}\n\n");
+        rt_s(hp, "define internal { ptr, i64, i64 } @_cx_read_file(ptr %path, i64 %plen) {\nentry:\n  %c = call ptr @_cx_cstr(ptr %path, i64 %plen)\n  %ci = ptrtoint ptr %c to i64\n  %fd = call i64 @_cx_syscall(i64 2, i64 %ci, i64 0, i64 0, i64 0, i64 0, i64 0)\n  %bad = icmp slt i64 %fd, 0\n  br i1 %bad, label %fail, label %ok\nfail:\n  %clen0 = add i64 %plen, 1\n  call void @_cx_free(ptr %c, i64 %clen0)\n  ret { ptr, i64, i64 } zeroinitializer\nok:\n  %size = call i64 @_cx_syscall(i64 8, i64 %fd, i64 0, i64 2, i64 0, i64 0, i64 0)\n  %back = call i64 @_cx_syscall(i64 8, i64 %fd, i64 0, i64 0, i64 0, i64 0, i64 0)\n  %empty = icmp sle i64 %size, 0\n  br i1 %empty, label %none, label %alloc\nnone:\n  %cl0 = call i64 @_cx_syscall(i64 3, i64 %fd, i64 0, i64 0, i64 0, i64 0, i64 0)\n  %clen1 = add i64 %plen, 1\n  call void @_cx_free(ptr %c, i64 %clen1)\n  ret { ptr, i64, i64 } zeroinitializer\nalloc:\n  %data = call ptr @_cx_alloc(i64 %size)\n  %datapi = ptrtoint ptr %data to i64\n  %r = call i64 @_cx_syscall(i64 0, i64 %fd, i64 %datapi, i64 %size, i64 0, i64 0, i64 0)\n  %cl = call i64 @_cx_syscall(i64 3, i64 %fd, i64 0, i64 0, i64 0, i64 0, i64 0)\n  %clen2 = add i64 %plen, 1\n  call void @_cx_free(ptr %c, i64 %clen2)\n  %neg = icmp slt i64 %r, 0\n  %len = select i1 %neg, i64 0, i64 %r\n  %v0 = insertvalue { ptr, i64, i64 } zeroinitializer, ptr %data, 0\n  %v1 = insertvalue { ptr, i64, i64 } %v0, i64 %len, 1\n  %v2 = insertvalue { ptr, i64, i64 } %v1, i64 %size, 2\n  ret { ptr, i64, i64 } %v2\n}\n\n");
+        rt_s(hp, "define internal i32 @_cx_write_file(ptr %path, i64 %plen, ptr %data, i64 %dlen) {\nentry:\n  %c = call ptr @_cx_cstr(ptr %path, i64 %plen)\n  %ci = ptrtoint ptr %c to i64\n  %fd = call i64 @_cx_syscall(i64 2, i64 %ci, i64 577, i64 420, i64 0, i64 0, i64 0)\n  %bad = icmp slt i64 %fd, 0\n  br i1 %bad, label %fail, label %ok\nfail:\n  %clen0 = add i64 %plen, 1\n  call void @_cx_free(ptr %c, i64 %clen0)\n  ret i32 -1\nok:\n  %wr = call i32 @_cx_write_all(i64 %fd, ptr %data, i64 %dlen)\n  %cl = call i64 @_cx_syscall(i64 3, i64 %fd, i64 0, i64 0, i64 0, i64 0, i64 0)\n  %clen1 = add i64 %plen, 1\n  call void @_cx_free(ptr %c, i64 %clen1)\n  ret i32 %wr\n}\n\n");
+    }
     let mut need_nl: bool = (*cg).used_print_i64 || (*cg).used_print_u64 || (*cg).used_print_bool || (*cg).used_print_char || (*cg).used_print_str || (*cg).used_print_f64;
     if need_nl {
         let nl: i32 = add_string(cg, "\n");
@@ -2645,6 +2739,7 @@ fn cg_run(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program, 
     (*cg).used_print_char = false;
     (*cg).used_print_str = false;
     (*cg).used_print_f64 = false;
+    (*cg).used_file_io = false;
     (*cg).used_fatal = false;
     (*cg).used_cstr_len = false;
     (*cg).used_cstr_str = false;
