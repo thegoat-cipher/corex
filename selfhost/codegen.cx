@@ -2177,34 +2177,175 @@ fn gen_types(cg: *mut Cg) {
     }
 }
 
-fn const_init(cg: *mut Cg, d: *mut Decl) -> str {
+// Escape a byte string as an LLVM `c"..."` constant.
+fn cstr_literal(b: *mut Buf, s: str) {
     unsafe {
-    unsafe {
-    let t: *mut Type = (*d).ty;
-    let e: *mut Expr = (*d).init;
-    if (*t).kind == K::Str {
-        if e != null && (*e).kind == E::StrLit {
-            let id: i32 = add_string(cg, (*e).text);
-            let mut b: Buf = rt_buf((*cg).a);
-            let bp: *mut Buf = &mut b;
-            rt_s(bp, "{ ptr @.str");
-            rt_i(bp, id as i64);
-            rt_s(bp, ", i64 ");
-            rt_i(bp, len((*e).text) as i64);
-            rt_s(bp, " }");
-            return rt_view(bp);
+    rt_b(b, 99);
+    rt_b(b, 34);
+    let mut i: usize = 0;
+    while i < len(s) {
+        let c: u8 = s[i];
+        if c == 34 {
+            rt_s(b, "\\22");
+        } else if c == 92 {
+            rt_s(b, "\\5C");
+        } else if c >= 32 && c <= 126 {
+            rt_b(b, c);
+        } else {
+            add_hex_byte(b, c);
         }
+        i = i + 1;
+    }
+    rt_b(b, 34);
+
+    }
+}
+
+// Render a static initializer as a structural LLVM constant. `e == null`
+// yields the zero value of `ty` so missing struct fields stay well-typed.
+// Aggregates are emitted as `[elem-typed...]` and `{ field-typed... }`;
+// scalars are bare values, matching the oracle's `llvm_const` layout.
+fn const_value(cg: *mut Cg, ty: *mut Type, e: *mut Expr, depth: i32) -> str {
+    unsafe {
+    if ty == null || depth > 16 {
         return "zeroinitializer";
     }
+    let k: K = (*ty).kind;
+    // A global initialized from an earlier global copies its constant value.
+    if e != null && (*e).kind == E::Ident && (*e).decl != null
+        && (*(*e).decl).kind == D::Global && depth < 16 {
+        let gd: *mut Decl = (*e).decl;
+        return const_value(cg, ty, (*gd).init, depth + 1);
+    }
+    if k == K::Array {
+        let elem: *mut Type = (*ty).elem;
+        let n: usize = (*ty).len;
+        if e != null && (*e).kind == E::StrLit && elem != null && (*elem).kind == K::U8
+            && len((*e).text) == n {
+            let mut sb: Buf = rt_buf((*cg).a);
+            let sbp: *mut Buf = &mut sb;
+            cstr_literal(sbp, (*e).text);
+            return rt_view(sbp);
+        }
+        let mut ab: Buf = rt_buf((*cg).a);
+        let abp: *mut Buf = &mut ab;
+        rt_b(abp, 91);
+        let mut rep: *mut Expr = null;
+        let mut arg: *mut Expr = null;
+        if e != null && (*e).kind == E::ArrayLit {
+            if (*e).index == 1 {
+                rep = (*e).args;
+            } else {
+                arg = (*e).args;
+            }
+        }
+        let mut i: usize = 0;
+        while i < n {
+            if i > 0 {
+                rt_s(abp, ", ");
+            }
+            rt_s(abp, llty(cg, elem));
+            rt_s(abp, " ");
+            if rep != null {
+                rt_s(abp, const_value(cg, elem, rep, depth + 1));
+            } else {
+                let mut ae: *mut Expr = null;
+                if arg != null {
+                    ae = arg;
+                    arg = (*arg).next;
+                }
+                rt_s(abp, const_value(cg, elem, ae, depth + 1));
+            }
+            i = i + 1;
+        }
+        rt_b(abp, 93);
+        return rt_view(abp);
+    }
+    if k == K::Struct {
+        let d: *mut Decl = (*ty).decl;
+        let mut ob: Buf = rt_buf((*cg).a);
+        let obp: *mut Buf = &mut ob;
+        rt_s(obp, "{ ");
+        let mut fld: *mut Field = null;
+        if d != null {
+            fld = (*d).fields;
+        }
+        let mut first: bool = true;
+        while fld != null {
+            if !first {
+                rt_s(obp, ", ");
+            }
+            first = false;
+            rt_s(obp, llty(cg, (*fld).ty));
+            rt_s(obp, " ");
+            let mut found: *mut Expr = null;
+            if e != null && (*e).kind == E::StructLit {
+                let mut a: *mut Expr = (*e).args;
+                while a != null {
+                    if rt_eq((*a).field, (*fld).name) {
+                        found = a;
+                    }
+                    a = (*a).next;
+                }
+            }
+            rt_s(obp, const_value(cg, (*fld).ty, found, depth + 1));
+            fld = (*fld).next;
+        }
+        rt_s(obp, " }");
+        return rt_view(obp);
+    }
+    if k == K::Str {
+        let mut text: str = "";
+        if e != null {
+            text = eval_str((*cg).sem, e);
+        }
+        let id: i32 = add_string(cg, text);
+        let mut sb2: Buf = rt_buf((*cg).a);
+        let sb2p: *mut Buf = &mut sb2;
+        rt_s(sb2p, "{ ptr @.str");
+        rt_i(sb2p, id as i64);
+        rt_s(sb2p, ", i64 ");
+        rt_i(sb2p, len(text) as i64);
+        rt_s(sb2p, " }");
+        return rt_view(sb2p);
+    }
+    if k == K::F32 || k == K::F64 {
+        let mut bits: i64 = 0;
+        if e != null {
+            bits = eval_float_bits((*cg).sem, e);
+        }
+        return float_ll((*cg).a, ty, bits);
+    }
+    if k == K::Ptr || k == K::CStr {
+        if e != null && (*e).kind == E::NullLit {
+            return "null";
+        }
+        if e != null && (*e).kind == E::Unary && (*e).op == T::Amp
+            && (*e).lhs != null && (*(*e).lhs).kind == E::Ident
+            && (*(*e).lhs).decl != null && (*(*(*e).lhs).decl).kind == D::Global {
+            let mut pb: Buf = rt_buf((*cg).a);
+            let pbp: *mut Buf = &mut pb;
+            rt_b(pbp, 64);
+            rt_s(pbp, (*(*(*e).lhs).decl).name);
+            return rt_view(pbp);
+        }
+        return "null";
+    }
     if e == null {
-        return "zeroinitializer";
+        return "0";
     }
     let v: i64 = eval_int((*cg).sem, e);
     let mut b: Buf = rt_buf((*cg).a);
     let bp: *mut Buf = &mut b;
     rt_i(bp, v);
     return rt_view(bp);
+
     }
+}
+
+fn const_init(cg: *mut Cg, d: *mut Decl) -> str {
+    unsafe {
+    return const_value(cg, (*d).ty, (*d).init, 0);
 
     }
 }
@@ -2225,6 +2366,8 @@ fn gen_globals(cg: *mut Cg) {
             rt_s((*cg).globals, llty(cg, (*d).ty));
             rt_s((*cg).globals, " ");
             rt_s((*cg).globals, const_init(cg, d));
+            rt_s((*cg).globals, ", align ");
+            rt_i((*cg).globals, type_align((*cg).sem, (*d).ty) as i64);
             rt_s((*cg).globals, "\n");
         }
         d = (*d).next;

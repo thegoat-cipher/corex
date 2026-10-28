@@ -1,0 +1,2 @@
+static C: cstr = c"hi";
+fn main() -> i32 { print(cstr_len(C)); return 0; }

@@ -594,6 +594,88 @@ fn eval_float_bits(s: *mut Sem, e: *mut Expr) -> i64 {
     }
 }
 
+// True when `cand` is declared before `cur` in the global list. A static
+// initializer may only copy globals that are already initialized, which also
+// rules out self-reference and cycles.
+fn global_before(s: *mut Sem, cand: *mut Decl, cur: *mut Decl) -> bool {
+    unsafe {
+    let mut d: *mut Decl = (*s).globals;
+    while d != null {
+        if d == cur {
+            return false;
+        }
+        if d == cand {
+            return true;
+        }
+        d = (*d).next;
+    }
+    return false;
+
+    }
+}
+
+// Constant expressions accepted in global initializers: literals, enum
+// variants, previously declared globals and constants, `sizeof`/`alignof`/
+// `offsetof`, `&global`, unary/binary arithmetic, casts, and aggregate
+// literals built from those. Nothing here runs at load time.
+fn is_const_expr(s: *mut Sem, e: *mut Expr, cur: *mut Decl) -> bool {
+    unsafe {
+    if e == null {
+        return true;
+    }
+    let k: E = (*e).kind;
+    if k == E::IntLit || k == E::FloatLit || k == E::StrLit || k == E::CharLit
+        || k == E::BoolLit || k == E::NullLit || k == E::Path
+        || k == E::Sizeof || k == E::Alignof || k == E::Offsetof {
+        return true;
+    }
+    if k == E::Ident {
+        if (*e).decl == null {
+            return false;
+        }
+        let d: *mut Decl = (*e).decl;
+        if (*d).kind == D::Const {
+            return true;
+        }
+        if (*d).kind == D::Global {
+            return global_before(s, d, cur);
+        }
+        return false;
+    }
+    if k == E::Unary {
+        if (*e).op == T::Amp {
+            if (*e).lhs != null && (*(*e).lhs).kind == E::Ident
+                && (*(*e).lhs).decl != null && (*(*(*e).lhs).decl).kind == D::Global {
+                return true;
+            }
+            return false;
+        }
+        return is_const_expr(s, (*e).lhs, cur);
+    }
+    if k == E::Binary {
+        return is_const_expr(s, (*e).lhs, cur) && is_const_expr(s, (*e).rhs, cur);
+    }
+    if k == E::Cast {
+        return is_const_expr(s, (*e).lhs, cur);
+    }
+    if k == E::StructLit || k == E::ArrayLit {
+        let mut a: *mut Expr = (*e).args;
+        while a != null {
+            if !is_const_expr(s, a, cur) {
+                return false;
+            }
+            a = (*a).next;
+        }
+        if k == E::ArrayLit && (*e).rhs != null {
+            return is_const_expr(s, (*e).rhs, cur);
+        }
+        return true;
+    }
+    return false;
+
+    }
+}
+
 fn is_untyped(e: *mut Expr) -> bool {
     unsafe {
     if e == null {
@@ -1983,6 +2065,11 @@ fn sem_run(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program)
                 sdiag(s, (*g).file, (*g).line, (*g).col, "vec constants are not supported by the bootstrap compiler");
                 (*g).cval_kind = 1;
                 (*g).cval = 0;
+            } else if (*((*g).ty)).kind == K::Array || (*((*g).ty)).kind == K::Struct
+                || (*((*g).ty)).kind == K::Slice {
+                sdiag(s, (*g).file, (*g).line, (*g).col, "const values must be scalar, str, or a pointer");
+                (*g).cval_kind = 1;
+                (*g).cval = 0;
             } else {
                 (*g).cval_kind = 1;
                 (*g).cval = eval_int(s, (*g).init);
@@ -2020,6 +2107,9 @@ fn sem_run(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program)
                 let at: *mut Type = resolve_type(s, check_expr(s, (*g).init, gt));
                 if !type_compat(gt, at) {
                     sdiag(s, (*g).file, (*g).line, (*g).col, "global initializer type mismatch");
+                }
+                if !is_const_expr(s, (*g).init, g) {
+                    sdiag(s, (*g).file, (*g).line, (*g).col, "global initializers must be constant expressions");
                 }
             }
         }

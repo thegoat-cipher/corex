@@ -1,0 +1,3 @@
+fn make() -> i32 { return 1; }
+static X: i32 = make();
+fn main() -> i32 { print(X); return 0; }
