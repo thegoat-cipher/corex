@@ -11,7 +11,7 @@ bootstrap.
 ## 2. Current stage
 
 **Stage 3 reproducibility verified (fixed point: Stage 2 == Stage 3 == Stage 4).**
-The integrated compiler is **469 functions / 15,065 lines** across 14
+The integrated compiler is **473 functions / 15,214 lines** across 14
 `selfhost/*.cx` files.
 
 | Stage | Compiler | Output | Status |
@@ -24,14 +24,14 @@ The integrated compiler is **469 functions / 15,065 lines** across 14
 Hashes (final integrated run, `--opt 0`):
 
 ```text
-stage1 ccffc9721da61cd5cf880a1616e01f7c762fba53939e7618c29b299321447032
-stage2 d270cd6707df85fd01f5c2cb746e76900f1b5f6a9aaa64c5c667286a15711e20
-stage3 d270cd6707df85fd01f5c2cb746e76900f1b5f6a9aaa64c5c667286a15711e20
-stage4 d270cd6707df85fd01f5c2cb746e76900f1b5f6a9aaa64c5c667286a15711e20
+stage1 66d54c00f4428390d5a056024a020c8ef668c8bcb0f0c9fd467bc1221754b4f3
+stage2 9c38d50db6043280b4db19fae20c056bb2defd9d2a9010c20f02aaebf30b5907
+stage3 9c38d50db6043280b4db19fae20c056bb2defd9d2a9010c20f02aaebf30b5907
+stage4 9c38d50db6043280b4db19fae20c056bb2defd9d2a9010c20f02aaebf30b5907
 ```
 
 Stage 2/3/4 are byte-identical. Stage 1 is Rust-compiled and differs by design
-(backend/ABI), but passes the same 241-check behavioural corpus.
+(backend/ABI), but passes the same 249-check behavioural corpus.
 
 ## 3. Completed milestones
 
@@ -41,25 +41,32 @@ Stage 2/3/4 are byte-identical. Stage 1 is Rust-compiled and differs by design
 - Lexer, AST, parser, type model, semantic analysis, LLVM IR backend, driver.
 - Stage 1, Stage 2, Stage 3, Stage 4 builds.
 - Reproducibility gate: Stage 2 == Stage 3 == Stage 4 at `--opt 0`.
-- Behavioural corpus: 241 checks per stage on Stage 1/2/3.
+- Behavioural corpus: 249 checks per stage on Stage 1/2/3.
 - Slices and `vec<T>`: bounds checks, range slicing, `str`/`[u8]` compatibility,
   shallow headers, nested/slice/str elements.
 - Floats: `f32`/`f64` literals, arithmetic, comparisons, casts, ABI, six-digit
-  `print`, special values.
+  `print`, special values, and compound assignment (`+= -= *= /=`, plus
+  `%=` via `frem` when libm is linked).
 - Checked division/remainder (zero and `MIN/-1` abort 101).
-- Static aggregate/global initializers, `str_to_cstr`, `read_file`,
-  `write_file`.
-- Diagnostics with stable codes, parser recovery, malformed-input robustness.
+- Static aggregate/global initializers for plain layouts; non-plain
+  (packed/union/bitfield/`align`) statics are rejected with E0226, matching the
+  oracle.
+- `str_to_cstr`, `read_file`, `write_file`.
+- Diagnostics: all 52 negative cases assert a code and match the oracle.
 - Function types/pointers, indirect calls, struct fields and dispatch tables.
-- `for`/`do while`/labels/`goto`, union/bitfield/FAM/packed/`align(N)` layout.
-- File modules, mangling, `corex.toml`, `#[cfg]`, visibility, macros.
+- `for`/`do while`/labels/`goto`, union/bitfield/FAM/packed/`align(N)` layout;
+  labels in unreachable regions are emitted so `goto` targets stay defined.
+- File modules, mangling, `corex.toml`, `#[cfg]` with built-in
+  `target_os`/`target_arch`/`sanitize` keys, visibility, macros.
 - C `extern`, variadics, `--hosted`, shared/static libraries, `--emit obj`.
 - CLI parity: `run`, `exec`, `fmt`, `lint`, `doc`, `test`, `repl`, stdin,
-  `emit-ir --verify`, emit/link flags (`-g` rejected: no DWARF).
+  `emit-ir --verify`, emit/link flags, frontend `--cfg`/`-I` everywhere;
+  failed builds and signal-killed tools exit nonzero.
 - Differential token/AST/IR dumps with a Rust oracle; known IR ABI divergences
   recorded in `tests/selfhosting/dump-ir-expected.txt`.
-- Fuzzing/ASan: 326 checks, no signals or sanitizer reports.
-- Performance baseline: 496 ms self-compile, 10.08 MB/s frontend.
+- Fuzzing/ASan: 327 checks, no signals or sanitizer reports; CI requires ASan.
+- Performance baseline: see the single integrated table in
+  `bootstrap-results.md` §3.
 - Optimized reproducibility gate: `repro-opt.sh --corpus` passes at `--opt 1..3`.
 - CI updated for the integrated gates.
 
@@ -75,8 +82,9 @@ merged), **SH-046** (full acceptance).
 - SH-033: no `volatile`, atomic intrinsics, thread/TLS grammar, or inline asm in
   the bootstrap; this blocks `std_sync`, `std_tls`, `std_thread`, and the
   concurrency portion of the 205-test port.
-- SH-034: 10/16 `lib/corex` modules built at P1 time; floats are now integrated,
-  but SH-033 and remaining attribute/tooling gaps remain.
+- SH-034: 13/16 `lib/corex` modules build; `std_sync`, `std_tls`, and
+  `std_thread` need SH-033. `std_math` is unblocked by float compound
+  assignment.
 - SH-037: LSP/line-editor parity is not ported.
 - SH-039: full behavioural-suite harvest requires SH-033 and remaining tooling.
 - SH-043: commits are local; remote CI has not run.
@@ -104,17 +112,18 @@ selfhost/repro-opt.sh --corpus         # --opt 1..3 determinism/fixed point
 (cd compiler && cargo test)            # Rust reference suite 205/205
 ```
 
-Final observed gates:
+Final observed gates (see `bootstrap-results.md` for hashes and the integrated
+performance table):
 
 ```text
-check: ok: 469 function(s), entry `main`
-stage2 == stage3 == stage4 (d270cd67…)
-selfhosting tests: 241 passed, 0 failed (Stage 1/2/3)
-cli tests: 62 passed, 0 failed
-dump tests: 73 passed, 0 failed
-fuzz tests: 326 passed, 0 failed
+check: ok: 473 function(s), entry `main`
+stage2 == stage3 == stage4
+selfhosting tests: 249 passed, 0 failed (Stage 1/2/3)
+cli tests: 80 passed, 0 failed
+dump tests: 75 passed, 0 failed
+fuzz tests: 327 passed, 0 failed
 cargo test: 205 passed, 0 failed
-repro-opt: opt1 a5a09716…, opt2 e076f652…, opt3 76445b56…
+repro-opt: deterministic and self-reproducing at --opt 1..3
 ```
 
 `file build/stage2/corexc` → static ELF x86-64; `ldd` → not a dynamic
@@ -135,11 +144,12 @@ executable.
 
 Still absent from the bootstrap: threads, atomics, `volatile`, TLS, inline asm,
 LSP/line-editor parity, DWARF (`-g`), and full Rust-suite parity. Module builds
-are whole-program (no separate interface files). `examples/features.cx` still
-fails because float compound assignment (`ratio *= 2.0`) is rejected by
-semantic analysis; the other seven examples match the oracle. Aggregate/bool calling
+are whole-program (no separate interface files). All 8 examples match the
+oracle after the float compound-assignment fix; `lib/corex` builds 13/16, with
+`std_sync`/`std_tls`/`std_thread` blocked by SH-033. Static initializers for
+non-plain aggregates are rejected (E0226). Aggregate/bool calling
 conventions differ from the Rust compiler, so objects from the two compilers are
 not link-compatible for aggregate parameters. Vec constants/globals are
 rejected; vec headers copy shallowly. REPL prints no prompts. See
-`bootstrap-architecture.md` §4`, `memory-audit.md` §5, and the worklogs for
+`bootstrap-architecture.md` §4, `memory-audit.md` §5, and the worklogs for
 details.
