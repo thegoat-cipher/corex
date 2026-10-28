@@ -41,7 +41,14 @@ fn dr_diags(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList) {
             rt_i(bp, (*dg).line as i64);
             rt_s(bp, ":");
             rt_i(bp, (*dg).col as i64);
-            rt_s(bp, ": error: ");
+            rt_s(bp, ": ");
+            if len((*dg).code) > 0 {
+                rt_s(bp, "error[");
+                rt_s(bp, (*dg).code);
+                rt_s(bp, "]: ");
+            } else {
+                rt_s(bp, "error: ");
+            }
             rt_s(bp, (*dg).msg);
             rt_s(bp, "\n");
             let msg: str = rt_view(bp);
