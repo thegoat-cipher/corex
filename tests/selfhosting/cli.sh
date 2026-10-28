@@ -430,13 +430,54 @@ rc=$?
 set -e
 expect_rc 4 "$rc" "stdin build honours --sanitize cfg"
 
-# --- label defined in an unreachable nested block -------------------------
+# --- labels inside unreachable regions ------------------------------------
+# The label is not the first statement of its block/if/loop/switch arm, so
+# the whole dead region must be scanned and emitted.
 cat >"$TMP/deadlabel.cx" <<'CXEOF'
-fn main() -> i32 {
+fn block_label() -> i32 {
     goto done;
     {
+        let x: i32 = 1;
         done: return 7;
     }
+}
+
+fn if_label() -> i32 {
+    goto done;
+    if 1 == 1 {
+        let x: i32 = 2;
+        done: return 8;
+    }
+    return 0;
+}
+
+fn loop_label() -> i32 {
+    goto done;
+    while false {
+        let x: i32 = 3;
+        done: return 9;
+    }
+    return 0;
+}
+
+fn switch_label() -> i32 {
+    goto done;
+    switch 1 {
+        case 1 {
+            let x: i32 = 4;
+            done: return 10;
+        }
+        default { return 0; }
+    }
+    return 0;
+}
+
+fn main() -> i32 {
+    if block_label() != 7 { return 1; }
+    if if_label() != 8 { return 2; }
+    if loop_label() != 9 { return 3; }
+    if switch_label() != 10 { return 4; }
+    return 0;
 }
 CXEOF
 set +e
@@ -449,7 +490,7 @@ set +e
 "$COMPILER" run "$TMP/deadlabel.cx" >/dev/null 2>&1
 rc=$?
 set -e
-expect_rc 7 "$rc" "goto into unreachable label executes"
+expect_rc 0 "$rc" "goto into unreachable label executes"
 
 # Float `%=` lowers to frem; it needs libm, so exercise it hosted.
 cat >"$TMP/fmod.cx" <<'CXEOF'

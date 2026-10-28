@@ -2676,10 +2676,24 @@ fn gen_switch(f: *mut Fn, st: *mut Stmt) {
     }
 }
 
-// True when the statement (or a nested block) contains a label. Unreachable
-// regions that define a `goto` target must still be emitted, or the branch
-// references an undefined block.
+// True when the statement list (or any nested block/if/loop/switch arm)
+// contains a label. Unreachable regions that define a `goto` target must still
+// be emitted, or the branch references an undefined block.
 fn stmt_has_label(st: *mut Stmt) -> bool {
+    unsafe {
+    let mut q: *mut Stmt = st;
+    while q != null {
+        if stmt_has_label_one(q) {
+            return true;
+        }
+        q = (*q).next;
+    }
+    return false;
+
+    }
+}
+
+fn stmt_has_label_one(st: *mut Stmt) -> bool {
     unsafe {
     if st == null {
         return false;
