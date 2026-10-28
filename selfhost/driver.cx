@@ -33,11 +33,16 @@ fn dr_usage_fd(fd: i32) {
 
 Usage:
   corexc build   <file.cx | -> [-o <output>] [--opt <0-3>]
-  corexc run     <file.cx | -> [--opt <0-3>] [-- <program args>...]
-  corexc exec    '<source>' [--opt <0-3>] [-- <program args>...]
+                 [--emit obj|shared|staticlib] [--hosted] [--shared]
+                 [--sanitize] [-I <dir>] [--cfg <key>] [--link <file>]
+                 [-L <dir>] [-l <lib>]
+  corexc run     <file.cx | -> [-I <dir>] [--cfg <key>] [--hosted]
+                 [--sanitize] [--opt <0-3>] [-- <program args>...]
+  corexc exec    '<source>' [-I <dir>] [--cfg <key>] [--opt <0-3>]
+                 [-- <program args>...]
   corexc repl    [--opt <0-3>]
-  corexc emit-ir <file.cx | -> [--verify]
-  corexc check   <file.cx | ->
+  corexc emit-ir <file.cx | -> [-o <out.ll>] [--verify] [-I <dir>] [--cfg <key>]
+  corexc check   <file.cx | -> [-I <dir>] [--cfg <key>]
   corexc fmt     <file.cx | -> [-w | --check]
   corexc lint    <file.cx | -> [--deny-warnings]
   corexc doc     <file.cx | -> [-o <out.md>]
@@ -241,6 +246,28 @@ fn dr_parse(a: *mut Arena, argv: **u8, argc: i32, start: i32, allow_out: bool,
                 i = i + 1;
                 continue;
             }
+            // `--cfg` and `-I` affect the frontend, so every command that
+            // parses source accepts them (check/emit-ir included).
+            if rt_cstr_eq(arg, "-I") || rt_cstr_eq(arg, "--include") {
+                let v: cstr = dr_need(a, argv, argc, i, "-I");
+                if cstr_len(v) == 0 {
+                    return 2;
+                }
+                rt_arg_set((*o).includes, (*o).nincs, v);
+                (*o).nincs = (*o).nincs + 1;
+                i = i + 2;
+                continue;
+            }
+            if rt_cstr_eq(arg, "--cfg") {
+                let v: cstr = dr_need(a, argv, argc, i, "--cfg");
+                if cstr_len(v) == 0 {
+                    return 2;
+                }
+                rt_arg_set((*o).cfgs, (*o).ncfgs, v);
+                (*o).ncfgs = (*o).ncfgs + 1;
+                i = i + 2;
+                continue;
+            }
             if allow_link {
                 if rt_cstr_eq(arg, "--link") {
                     let v: cstr = dr_need(a, argv, argc, i, "--link");
@@ -269,26 +296,6 @@ fn dr_parse(a: *mut Arena, argv: **u8, argc: i32, start: i32, allow_out: bool,
                     }
                     rt_arg_set((*o).libs, (*o).nlibs, v);
                     (*o).nlibs = (*o).nlibs + 1;
-                    i = i + 2;
-                    continue;
-                }
-                if rt_cstr_eq(arg, "-I") || rt_cstr_eq(arg, "--include") {
-                    let v: cstr = dr_need(a, argv, argc, i, "-I");
-                    if cstr_len(v) == 0 {
-                        return 2;
-                    }
-                    rt_arg_set((*o).includes, (*o).nincs, v);
-                    (*o).nincs = (*o).nincs + 1;
-                    i = i + 2;
-                    continue;
-                }
-                if rt_cstr_eq(arg, "--cfg") {
-                    let v: cstr = dr_need(a, argv, argc, i, "--cfg");
-                    if cstr_len(v) == 0 {
-                        return 2;
-                    }
-                    rt_arg_set((*o).cfgs, (*o).ncfgs, v);
-                    (*o).ncfgs = (*o).ncfgs + 1;
                     i = i + 2;
                     continue;
                 }
@@ -723,14 +730,33 @@ fn dr_front(a: *mut Arena, path: cstr, d: *mut Diags, srcs: *mut SrcList) -> Pro
     }
 }
 
-fn dr_front_stdin(a: *mut Arena, name: str, d: *mut Diags, srcs: *mut SrcList) -> Program {
+fn dr_front_stdin(a: *mut Arena, name: str, d: *mut Diags, srcs: *mut SrcList,
+                  o: *mut Opts) -> Program {
     let fd: FileData = rt_read_stdin(a);
-    return parse_program_text(a, d, srcs, name, fd.data);
+    unsafe {
+        return parse_program_text_all(a, d, srcs, name, fd.data,
+            (*o).includes, (*o).nincs, dr_opts_cfg(a, o));
+    }
 }
 
 fn dr_opts_cfg(a: *mut Arena, o: *mut Opts) -> *mut PathList {
     unsafe {
     let mut cfg: *mut PathList = null;
+    // Built-in target keys are always enabled, matching the Rust oracle.
+    let pl_os: *mut PathList = rt_alloc(a, sizeof(PathList)) as *mut PathList;
+    (*pl_os).path = "target_os=linux";
+    (*pl_os).next = cfg;
+    cfg = pl_os;
+    let pl_arch: *mut PathList = rt_alloc(a, sizeof(PathList)) as *mut PathList;
+    (*pl_arch).path = "target_arch=x86_64";
+    (*pl_arch).next = cfg;
+    cfg = pl_arch;
+    if (*o).sanitize {
+        let pl_san: *mut PathList = rt_alloc(a, sizeof(PathList)) as *mut PathList;
+        (*pl_san).path = "sanitize=true";
+        (*pl_san).next = cfg;
+        cfg = pl_san;
+    }
     let mut i: i32 = 0;
     while i < (*o).ncfgs {
         let cv: cstr = *((*o).cfgs + i as usize) as cstr;
@@ -747,7 +773,7 @@ fn dr_opts_cfg(a: *mut Arena, o: *mut Opts) -> *mut PathList {
 
 fn dr_load(a: *mut Arena, f: cstr, d: *mut Diags, srcs: *mut SrcList, o: *mut Opts) -> Program {
     if dr_is_stdin(f) {
-        return dr_front_stdin(a, "<stdin>", d, srcs);
+        return dr_front_stdin(a, "<stdin>", d, srcs, o);
     }
     unsafe {
         let root: str = rt_cstr_str(f as *u8);
@@ -1173,6 +1199,9 @@ fn dr_cmd_build(a: *mut Arena, envp: **u8, argv: **u8, argc: i32, o: *mut Opts) 
             return 2;
         }
         let rc: i32 = dr_build(a, envp, ll, out, (*o).opt, o, is_lib);
+        if rc != 0 {
+            return rc;
+        }
         let mut rb: Buf = rt_buf(a);
         let rbp: *mut Buf = &mut rb;
         rt_s(rbp, "compiled ");
@@ -1236,10 +1265,11 @@ fn dr_cmd_exec(a: *mut Arena, envp: **u8, argv: **u8, argc: i32, o: *mut Opts) -
         let mut srcs: SrcList = srcs_new();
         let mut prog: Program = prog_init();
         if dr_is_stdin((*o).file) {
-            prog = dr_front_stdin(a, "<exec>", &mut d, &mut srcs);
+            prog = dr_front_stdin(a, "<exec>", &mut d, &mut srcs, o);
         } else {
             let text: str = rt_cstr_str((*o).file as *u8);
-            prog = parse_program_text(a, &mut d, &mut srcs, "<exec>", text);
+            prog = parse_program_text_all(a, &mut d, &mut srcs, "<exec>", text,
+                (*o).includes, (*o).nincs, dr_opts_cfg(a, o));
         }
         return dr_run_source(a, envp, &mut d, &mut srcs, &mut prog, o, argv, argc, "exec");
     }

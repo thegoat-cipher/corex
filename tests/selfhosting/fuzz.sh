@@ -119,7 +119,11 @@ else
   echo "python3 not found: skipping mutation fuzzing" >&2
 fi
 
-# --- ASan build (optional) --------------------------------------------------
+# --- ASan build -------------------------------------------------------------
+# CI sets COREX_REQUIRE_ASAN=1: a skipped sanitizer run is a gate failure
+# there. Locally the build may be unavailable (non-Clang cc, missing runtime),
+# and the run is skipped with an explicit message.
+require_asan="${COREX_REQUIRE_ASAN:-0}"
 asan_ok=0
 if command -v cc >/dev/null 2>&1; then
   if "$COMPILER" build "$ROOT/selfhost/corexc.cx" --hosted --emit obj -o "$TMP/hosted.o" >/dev/null 2>&1 \
@@ -160,6 +164,9 @@ if [ "$asan_ok" -eq 1 ]; then
   echo "ASan: enabled (${n} mutated inputs + corpus)"
 else
   echo "ASan: unavailable (could not link with -fsanitize=address); skipped" >&2
+  if [ "$require_asan" = "1" ]; then
+    bad "ASan: required but unavailable (COREX_REQUIRE_ASAN=1)"
+  fi
 fi
 
 echo "fuzz tests: $pass passed, $fail failed (compiler: $COMPILER)"

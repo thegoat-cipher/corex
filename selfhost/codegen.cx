@@ -274,50 +274,6 @@ fn var_name(f: *mut Fn, slot: i32) -> str {
     }
 }
 
-// A struct whose layout LLVM reproduces exactly: no union, no packed, no
-// explicit alignment, no bitfields, and every field type is itself plain.
-// Non-plain aggregates are lowered to `[size x i8]` and accessed through the
-// byte offsets computed by semantic analysis.
-fn struct_plain(d: *mut Decl) -> bool {
-    unsafe {
-    if d == null {
-        return true;
-    }
-    if (*d).is_union || (*d).is_packed || (*d).explicit_align > 0 {
-        return false;
-    }
-    let mut f: *mut Field = (*d).fields;
-    while f != null {
-        if (*f).bit_width > 0 {
-            return false;
-        }
-        if !type_plain((*f).ty) {
-            return false;
-        }
-        f = (*f).next;
-    }
-    return true;
-
-    }
-}
-
-fn type_plain(t: *mut Type) -> bool {
-    unsafe {
-    if t == null {
-        return true;
-    }
-    let k: K = (*t).kind;
-    if k == K::Struct {
-        return struct_plain((*t).decl);
-    }
-    if k == K::Array {
-        return type_plain((*t).elem);
-    }
-    return true;
-
-    }
-}
-
 fn llty(cg: *mut Cg, t: *mut Type) -> str {
     unsafe {
     unsafe {
@@ -2720,12 +2676,78 @@ fn gen_switch(f: *mut Fn, st: *mut Stmt) {
     }
 }
 
+// True when the statement (or a nested block) contains a label. Unreachable
+// regions that define a `goto` target must still be emitted, or the branch
+// references an undefined block.
+fn stmt_has_label(st: *mut Stmt) -> bool {
+    unsafe {
+    if st == null {
+        return false;
+    }
+    let k: S = (*st).kind;
+    if k == S::Label {
+        return true;
+    }
+    if k == S::If {
+        if stmt_has_label((*st).body) {
+            return true;
+        }
+        return stmt_has_label((*st).els);
+    }
+    if k == S::While || k == S::Loop || k == S::For || k == S::DoWhile
+        || k == S::Unsafe || k == S::Block {
+        return stmt_has_label((*st).body);
+    }
+    if k == S::Switch {
+        let mut c: *mut Case = (*st).cases;
+        while c != null {
+            if stmt_has_label((*c).body) {
+                return true;
+            }
+            c = (*c).next;
+        }
+        return false;
+    }
+    return false;
+
+    }
+}
+
+// True when generating the statement starts with a label, in which case the
+// dead region does not need an extra entry block (two adjacent labels would
+// leave an unterminated block).
+fn stmt_starts_label(st: *mut Stmt) -> bool {
+    unsafe {
+    if st == null {
+        return false;
+    }
+    let k: S = (*st).kind;
+    if k == S::Label {
+        return true;
+    }
+    if k == S::Unsafe || k == S::Block {
+        return stmt_starts_label((*st).body);
+    }
+    return false;
+
+    }
+}
+
 fn gen_block(f: *mut Fn, head: *mut Stmt) -> bool {
     unsafe {
     unsafe {
     let mut s: *mut Stmt = head;
     while s != null {
         if !(*f).terminated || (*s).kind == S::Label {
+            gen_stmt(f, s);
+        } else if stmt_has_label(s) {
+            // Emit the unreachable region so labels targeted by `goto` exist.
+            // Generation resumes as live code: a label body that falls
+            // through must continue with the following statements.
+            if !stmt_starts_label(s) {
+                flabel(f, fnewlbl(f));
+            }
+            (*f).terminated = false;
             gen_stmt(f, s);
         }
         s = (*s).next;

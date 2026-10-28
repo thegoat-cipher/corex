@@ -503,13 +503,25 @@ fn rt_run_status(argv: *mut *u8, envp: **u8) -> i32 {
             return -1;
         }
         let mut status: i32 = 0;
-        let _ = syscall(61, pid as usize, (&mut status) as usize, 0, 0, 0, 0);
+        let wr: i32 = syscall(61, pid as usize, (&mut status) as usize, 0, 0, 0, 0) as i32;
+        if wr < 0 {
+            return -1;
+        }
         return status;
     }
 }
 
+// Map a wait status the way the Rust driver does: exit code, or 128 + signal.
+// A failed wait or fork must not read as success.
 fn rt_run(argv: *mut *u8, envp: **u8) -> i32 {
     let st: i32 = rt_run_status(argv, envp);
+    if st < 0 {
+        return 1;
+    }
+    let sig: i32 = st & 127;
+    if sig != 0 {
+        return 128 + sig;
+    }
     return (st >> 8) & 255;
 }
 
