@@ -65,7 +65,7 @@ fn type_ok(s: *mut Sem, t: *mut Type) -> bool {
     let p: usize = t as usize;
     if p < base || p + sizeof(Type) > base + cap { return false; }
     let k: i32 = (*t).kind as i32;
-    return k >= 0 && k <= 23;
+    return k >= 0 && k <= 24;
 
     }
 }
@@ -74,6 +74,17 @@ fn type_is_ptr(t: *mut Type) -> bool {
     unsafe {
     if t == null { return false; }
     return (*t).kind == K::Ptr || (*t).kind == K::CStr;
+
+    }
+}
+
+// Types whose LLVM representation is a single `ptr`: used for `null`
+// inference and `==`/`!=` on pointers and function pointers.
+fn type_is_ptr_like(t: *mut Type) -> bool {
+    unsafe {
+    if t == null { return false; }
+    let k: K = (*t).kind;
+    return k == K::Ptr || k == K::CStr || k == K::Fn;
 
     }
 }
@@ -107,6 +118,27 @@ fn type_eq(a: *mut Type, b: *mut Type) -> bool {
     }
     if k == K::Struct || k == K::Enum {
         return (*a).decl == (*b).decl;
+    }
+    if k == K::Fn {
+        if (*a).variadic && !(*b).variadic {
+            return false;
+        }
+        if !(*a).variadic && (*b).variadic {
+            return false;
+        }
+        if !type_eq((*a).ret, (*b).ret) {
+            return false;
+        }
+        let mut pa: *mut Type = (*a).params;
+        let mut pb: *mut Type = (*b).params;
+        while pa != null && pb != null {
+            if !type_eq(pa, pb) {
+                return false;
+            }
+            pa = (*pa).next;
+            pb = (*pb).next;
+        }
+        return pa == null && pb == null;
     }
     return true;
 
@@ -304,6 +336,66 @@ fn lookup(s: *mut Sem, name: str) -> *mut Decl {
     }
 }
 
+fn lookup_local(s: *mut Sem, name: str) -> *mut Decl {
+    unsafe {
+    let mut sc: *mut Scope = (*s).scope;
+    while sc != null {
+        let mut d: *mut Decl = (*sc).vars;
+        while d != null {
+            if rt_eq((*d).name, name) {
+                return d;
+            }
+            d = (*d).next_local;
+        }
+        sc = (*sc).parent;
+    }
+    return null;
+
+    }
+}
+
+// Copy a type node so parameter lists can chain it through `next` without
+// aliasing the declaration's own nodes.
+fn type_copy(s: *mut Sem, src: *mut Type) -> *mut Type {
+    unsafe {
+    let t: *mut Type = type_new((*s).a, K::Void);
+    (*t).kind = (*src).kind;
+    (*t).elem = (*src).elem;
+    (*t).len = (*src).len;
+    (*t).len_expr = (*src).len_expr;
+    (*t).decl = (*src).decl;
+    (*t).mutable = (*src).mutable;
+    (*t).name = (*src).name;
+    (*t).params = (*src).params;
+    (*t).ret = (*src).ret;
+    (*t).variadic = (*src).variadic;
+    return t;
+
+    }
+}
+
+// The `fn(T) -> R` type of a declared function, used when the function is
+// named as a value rather than called directly.
+fn decl_fn_type(s: *mut Sem, d: *mut Decl) -> *mut Type {
+    unsafe {
+    let mut head: *mut Type = null;
+    let mut tail: *mut Type = null;
+    let mut p: *mut Param = (*d).params;
+    while p != null {
+        let pt: *mut Type = type_copy(s, resolve_type(s, (*p).ty));
+        if tail == null {
+            head = pt;
+        } else {
+            (*tail).next = pt;
+        }
+        tail = pt;
+        p = (*p).next;
+    }
+    return type_fn((*s).a, head, resolve_type(s, (*d).ty), false);
+
+    }
+}
+
 fn find_field(d: *mut Decl, name: str) -> *mut Field {
     unsafe {
     let mut f: *mut Field = (*d).fields;
@@ -350,7 +442,7 @@ fn type_size(s: *mut Sem, t: *mut Type) -> usize {
     if k == K::I32 || k == K::U32 || k == K::F32 || k == K::Enum {
         return 4;
     }
-    if k == K::I64 || k == K::U64 || k == K::Usize || k == K::Isize || k == K::F64 || k == K::Ptr || k == K::CStr {
+    if k == K::I64 || k == K::U64 || k == K::Usize || k == K::Isize || k == K::F64 || k == K::Ptr || k == K::CStr || k == K::Fn {
         return 8;
     }
     if k == K::Str || k == K::Slice {
@@ -391,7 +483,7 @@ fn type_align(s: *mut Sem, t: *mut Type) -> usize {
     if k == K::I32 || k == K::U32 || k == K::F32 || k == K::Enum {
         return 4;
     }
-    if k == K::I64 || k == K::U64 || k == K::Usize || k == K::Isize || k == K::F64 || k == K::Ptr || k == K::CStr {
+    if k == K::I64 || k == K::U64 || k == K::Usize || k == K::Isize || k == K::F64 || k == K::Ptr || k == K::CStr || k == K::Fn {
         return 8;
     }
     if k == K::Str || k == K::Slice || k == K::Vec {
@@ -477,10 +569,32 @@ fn resolve_type(s: *mut Sem, t: *mut Type) -> *mut Type {
             (*t).decl = (*target).decl;
             (*t).mutable = (*target).mutable;
             (*t).name = (*target).name;
+            (*t).params = (*target).params;
+            (*t).ret = (*target).ret;
+            (*t).variadic = (*target).variadic;
             return t;
         }
         sdiag(s, 0, 0, 0, "type name does not denote a type");
         (*t).kind = K::I32;
+        return t;
+    }
+    if k == K::Fn {
+        let mut p: *mut Type = (*t).params;
+        while p != null {
+            let r: *mut Type = resolve_type(s, p);
+            // Resolving a Named parameter rewrites it in place, but resolving
+            // an alias returns its target; copy the resolved fields back.
+            (*p).kind = (*r).kind;
+            (*p).elem = (*r).elem;
+            (*p).len = (*r).len;
+            (*p).decl = (*r).decl;
+            (*p).mutable = (*r).mutable;
+            (*p).params = (*r).params;
+            (*p).ret = (*r).ret;
+            (*p).variadic = (*r).variadic;
+            p = (*p).next;
+        }
+        (*t).ret = resolve_type(s, (*t).ret);
         return t;
     }
     if k == K::Ptr || k == K::Slice || k == K::Array || k == K::Vec {
@@ -731,7 +845,7 @@ fn check_expr(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
         return t;
     }
     if k == E::NullLit {
-        if expected != null && type_is_ptr(expected) {
+        if expected != null && type_is_ptr_like(expected) {
             (*e).ty = expected;
             return expected;
         }
@@ -750,10 +864,9 @@ fn check_expr(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
         }
         (*e).decl = d;
         if (*d).kind == D::Func {
-            sdiag(s, (*e).file, (*e).line, (*e).col, "function values are not supported");
-            let t: *mut Type = type_new((*s).a, K::I32);
-            (*e).ty = t;
-            return t;
+            let ft: *mut Type = decl_fn_type(s, d);
+            (*e).ty = ft;
+            return ft;
         }
         (*e).ty = (*d).ty;
         return (*d).ty;
@@ -884,6 +997,19 @@ fn check_expr(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
     if k == E::Unary {
         let op: T = (*e).op;
         if op == T::Amp {
+            // `&name` where `name` is a function yields the function pointer,
+            // not a pointer to a place.
+            if (*e).lhs != null && (*((*e).lhs)).kind == E::Ident {
+                let fd: *mut Decl = lookup(s, (*((*e).lhs)).name);
+                if fd != null && (*fd).kind == D::Func {
+                    let ft: *mut Type = decl_fn_type(s, fd);
+                    (*((*e).lhs)).decl = fd;
+                    (*((*e).lhs)).ty = ft;
+                    (*e).opty = ft;
+                    (*e).ty = ft;
+                    return ft;
+                }
+            }
             let bt: *mut Type = resolve_type(s, check_expr(s, (*e).lhs, null));
             if (*e).is_mut && !place_mut(s, (*e).lhs) {
                 sdiag(s, (*e).file, (*e).line, (*e).col, "cannot take a mutable reference to this place");
@@ -948,8 +1074,8 @@ fn check_expr(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
         let bt: *mut Type = resolve_type(s, check_expr(s, (*e).lhs, null));
         let from_i: bool = type_is_int(bt);
         let to_i: bool = type_is_int(tt);
-        let from_p: bool = type_is_ptr(bt);
-        let to_p: bool = type_is_ptr(tt);
+        let from_p: bool = type_is_ptr_like(bt);
+        let to_p: bool = type_is_ptr_like(tt);
         if (*bt).kind == K::Enum && to_i {
             // enum -> integer
         } else if from_i && to_i {
@@ -1113,7 +1239,7 @@ fn check_binary(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
         let rhs_null: bool = (*((*e).rhs)).kind == E::NullLit;
         if lhs_null {
             t2 = resolve_type(s, ck(s, (*e).rhs, null));
-            if type_is_ptr(t2) {
+            if type_is_ptr_like(t2) {
                 t1 = resolve_type(s, ck(s, (*e).lhs, t2));
             } else {
                 sdiag(s, (*e).file, (*e).line, (*e).col, "null comparison requires a pointer");
@@ -1122,7 +1248,7 @@ fn check_binary(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
         } else {
             t1 = resolve_type(s, ck(s, (*e).lhs, null));
             if rhs_null {
-                if type_is_ptr(t1) {
+                if type_is_ptr_like(t1) {
                     t2 = resolve_type(s, ck(s, (*e).rhs, t1));
                 } else {
                     sdiag(s, (*e).file, (*e).line, (*e).col, "null comparison requires a pointer");
@@ -1137,7 +1263,7 @@ fn check_binary(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
                 t1 = resolve_type(s, ck(s, (*e).lhs, t2));
             }
         }
-        let ptr_cmp: bool = type_is_ptr(t1) && type_is_ptr(t2);
+        let ptr_cmp: bool = type_is_ptr_like(t1) && type_is_ptr_like(t2);
         let ok: bool = type_compat(t1, t2) || type_compat(t2, t1);
         if !ok {
             sdiag(s, (*e).file, (*e).line, (*e).col, "comparison operands have different types");
@@ -1222,15 +1348,62 @@ fn builtin_id(name: str) -> i32 {
     }
 }
 
+fn check_indirect_call(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
+    unsafe {
+    let ct: *mut Type = resolve_type(s, check_expr(s, (*e).lhs, null));
+    if (*ct).kind != K::Fn {
+        sdiag(s, (*e).file, (*e).line, (*e).col, "call target must be a function or function pointer");
+        let bad: *mut Type = type_new((*s).a, K::I32);
+        (*e).ty = bad;
+        (*e).index = 0;
+        (*e).decl = null;
+        return bad;
+    }
+    let mut arg: *mut Expr = (*e).args;
+    let mut par: *mut Type = (*ct).params;
+    while par != null {
+        if arg == null {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "missing function argument");
+            break;
+        }
+        let pt: *mut Type = resolve_type(s, par);
+        let at: *mut Type = resolve_type(s, check_expr(s, arg, pt));
+        if !type_compat(pt, at) {
+            sdiag(s, (*arg).file, (*arg).line, (*arg).col, "argument type mismatch");
+        }
+        arg = (*arg).next;
+        par = (*par).next;
+    }
+    if arg != null {
+        sdiag(s, (*e).file, (*e).line, (*e).col, "too many function arguments");
+    }
+    let rt: *mut Type = resolve_type(s, (*ct).ret);
+    (*e).index = 0;
+    (*e).decl = null;
+    (*e).opty = ct;
+    (*e).ty = rt;
+    return rt;
+
+    }
+}
+
 fn check_call(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
     unsafe {
-    if (*e).lhs == null || (*e).lhs != null && (*((*e).lhs)).kind != E::Ident {
+    if (*e).lhs == null {
         sdiag(s, (*e).file, (*e).line, (*e).col, "callee must be a function name");
         let t: *mut Type = type_new((*s).a, K::I32);
         (*e).ty = t;
         return t;
     }
+    if (*((*e).lhs)).kind != E::Ident {
+        return check_indirect_call(s, e, expected);
+    }
     let name: str = (*((*e).lhs)).name;
+    // A local binding shadows a function of the same name: that call is
+    // indirect through the binding's function pointer.
+    if lookup_local(s, name) != null {
+        return check_indirect_call(s, e, expected);
+    }
     let bid: i32 = builtin_id(name);
     if bid != 0 {
         (*e).index = bid;
@@ -1262,10 +1435,7 @@ fn check_call(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
             (*e).ty = rt;
             return rt;
         }
-        sdiag(s, (*e).file, (*e).line, (*e).col, "call to unknown function");
-        let t: *mut Type = type_new((*s).a, K::I32);
-        (*e).ty = t;
-        return t;
+        return check_indirect_call(s, e, expected);
     }
     let ut: *mut Type = type_new((*s).a, K::Usize);
     if bid == 1 {

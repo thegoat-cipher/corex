@@ -206,9 +206,36 @@ fn parse_type(p: *mut P) -> *mut Type {
         return type_vec((*p).a, elem);
     }
     if k == T::KwFn {
-        perr(p, "function types are not supported by the bootstrap compiler");
         bump(p);
-        return type_prim((*p).a, K::I32);
+        expect(p, T::LParen);
+        let mut head: *mut Type = null;
+        let mut tail: *mut Type = null;
+        let mut variadic: bool = false;
+        while !at(p, T::RParen) && !at(p, T::Eof) {
+            if at(p, T::Ellipsis) {
+                bump(p);
+                variadic = true;
+                eat(p, T::Comma);
+                break;
+            }
+            let pt: *mut Type = parse_type(p);
+            (*pt).next = null;
+            if tail == null {
+                head = pt;
+            } else {
+                (*tail).next = pt;
+            }
+            tail = pt;
+            if !eat(p, T::Comma) {
+                break;
+            }
+        }
+        expect(p, T::RParen);
+        let mut ret: *mut Type = type_prim((*p).a, K::Void);
+        if eat(p, T::Arrow) {
+            ret = parse_type(p);
+        }
+        return type_fn((*p).a, head, ret, variadic);
     }
     if k == T::Ident {
         bump(p);
