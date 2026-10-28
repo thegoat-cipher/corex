@@ -15,6 +15,10 @@ struct P {
     depth: i32,
     vec_depth: i32,
     pending_gt: i32,
+    // `-I` search directories for `import "name.cx"` when the importing
+    // file's directory has no such file.
+    incs: *mut *u8,
+    nincs: i32,
     module_name: str,
     deps: *mut PathList,
     cfg: *mut PathList,
@@ -1030,6 +1034,12 @@ fn parse_args(p: *mut P) -> *mut Expr {
     expect(p, T::LParen);
     while !at(p, T::RParen) && !at(p, T::Eof) {
         let e: *mut Expr = parse_expr(p);
+        if e == null {
+            // A diagnostic was already reported; stop instead of linking a
+            // null node into the argument list.
+            sync(p);
+            break;
+        }
         if head == null {
             head = e;
         } else {
@@ -1078,6 +1088,10 @@ fn parse_struct_lit(p: *mut P, name: str, tok: *mut Tok) -> *mut Expr {
         bump(p);
         expect(p, T::Colon);
         let val: *mut Expr = parse_expr(p);
+        if val == null {
+            sync(p);
+            break;
+        }
         unsafe { (*val).sfield = (*ft).text; }
         if head == null {
             head = val;
@@ -1203,7 +1217,15 @@ fn parse_primary(p: *mut P) -> *mut Expr {
                 break;
             }
             let item: *mut Expr = parse_expr(p);
-            unsafe { (*tail).next = item; }
+            if item == null {
+                sync(p);
+                break;
+            }
+            if tail == null {
+                head = item;
+            } else {
+                unsafe { (*tail).next = item; }
+            }
             tail = item;
         }
         expect(p, T::RBracket);
@@ -1665,24 +1687,9 @@ fn path_loaded(p: *mut P, path: str) -> bool {
     }
 }
 
-fn parse_file(p: *mut P, path: str) {
+fn parse_src_text(p: *mut P, name: str, base: str, text: str) {
     unsafe {
-    if path_loaded(p, path) {
-        return;
-    }
-    let c: cstr = rt_to_cstr((*p).a, path);
-    let fd: FileData = rt_read_file((*p).a, c);
-    if !fd.ok {
-        diag_add((*p).d, (*p).a, 0, 0, 0, "cannot open source file");
-        return;
-    }
-    let pl: *mut PathList = rt_alloc((*p).a, sizeof(PathList)) as *mut PathList;
-    unsafe {
-        (*pl).path = path;
-        (*pl).next = (*p).loaded;
-        (*p).loaded = pl;
-    }
-    let src: *mut Src = srcs_add((*p).srcs, (*p).a, path, fd.data);
+    let src: *mut Src = srcs_add((*p).srcs, (*p).a, name, text);
     let arr: TokArr = lx_run((*p).a, src, (*p).d);
     let save_toks: *mut Tok = (*p).toks;
     let save_n: i32 = (*p).ntoks;
@@ -1694,7 +1701,7 @@ fn parse_file(p: *mut P, path: str) {
         (*p).ntoks = arr.len as i32;
         (*p).pos = 0;
         (*p).file = (*src).id;
-        (*p).path = path;
+        (*p).path = base;
     }
     while !at(p, T::Eof) {
         let mut before: i32 = 0;
@@ -1713,6 +1720,28 @@ fn parse_file(p: *mut P, path: str) {
         (*p).file = save_file;
         (*p).path = save_path;
     }
+
+    }
+}
+
+fn parse_file(p: *mut P, path: str) {
+    unsafe {
+    if path_loaded(p, path) {
+        return;
+    }
+    let c: cstr = rt_to_cstr((*p).a, path);
+    let fd: FileData = rt_read_file((*p).a, c);
+    if !fd.ok {
+        diag_add((*p).d, (*p).a, 0, 0, 0, "cannot open source file");
+        return;
+    }
+    let pl: *mut PathList = rt_alloc((*p).a, sizeof(PathList)) as *mut PathList;
+    unsafe {
+        (*pl).path = path;
+        (*pl).next = (*p).loaded;
+        (*p).loaded = pl;
+    }
+    parse_src_text(p, path, path, fd.data);
 
     }
 }
@@ -1985,7 +2014,23 @@ fn parse_item_inner(p: *mut P) {
         }
         bump(p);
         expect(p, T::Semi);
-        let resolved: str = rt_join((*p).a, (*p).path, (*pt).text);
+        let mut resolved: str = rt_join((*p).a, (*p).path, (*pt).text);
+        let mut cand_c: cstr = rt_to_cstr((*p).a, resolved);
+        if !rt_exists(cand_c) {
+            let mut k: i32 = 0;
+            while k < (*p).nincs {
+                let cd: cstr = *((*p).incs + k as usize) as cstr;
+                let cand: str = rt_join2((*p).a, rt_cstr_str(cd as *u8), (*pt).text);
+                let cc: cstr = rt_to_cstr((*p).a, cand);
+                if rt_exists(cc) {
+                    resolved = cand;
+                    cand_c = cc;
+                    break;
+                }
+                k = k + 1;
+            }
+        }
+        let _ = cand_c;
         let _ = it;
         parse_file(p, resolved);
         return;
@@ -2124,9 +2169,7 @@ fn parse_item_inner(p: *mut P) {
     }
 }
 
-fn parse_program_cfg(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, root: str,
-    cfg: *mut PathList, is_root: bool) -> Program {
-    unsafe {
+fn p_init(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList) -> *mut P {
     let p: *mut P = rt_alloc(a, sizeof(P)) as *mut P;
     unsafe {
         (*p).a = a;
@@ -2143,15 +2186,20 @@ fn parse_program_cfg(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, root: str
         (*p).depth = 0;
         (*p).vec_depth = 0;
         (*p).pending_gt = 0;
+        (*p).incs = null;
+        (*p).nincs = 0;
         (*p).module_name = "";
         (*p).deps = null;
-        (*p).cfg = cfg;
+        (*p).cfg = null;
         (*p).discard = false;
-        (*p).is_root = is_root;
+        (*p).is_root = false;
         (*p).macros = null;
         (*p).macro_depth = 0;
     }
-    parse_file(p, root);
+    return p;
+}
+
+fn p_program(p: *mut P) -> Program {
     let mut prog: Program = prog_init();
     unsafe {
         prog.items = (*p).items;
@@ -2160,10 +2208,43 @@ fn parse_program_cfg(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, root: str
         prog.deps = (*p).deps;
     }
     return prog;
+}
+
+fn parse_program_all(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, root: str,
+                     incs: *mut *u8, nincs: i32, cfg: *mut PathList, is_root: bool) -> Program {
+    unsafe {
+    let p: *mut P = p_init(a, d, srcs);
+    (*p).incs = incs;
+    (*p).nincs = nincs;
+    (*p).cfg = cfg;
+    (*p).is_root = is_root;
+    parse_file(p, root);
+    return p_program(p);
 
     }
 }
 
+fn parse_program_cfg(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, root: str,
+    cfg: *mut PathList, is_root: bool) -> Program {
+    return parse_program_all(a, d, srcs, root, null, 0, cfg, is_root);
+}
+
+fn parse_program_opts(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, root: str,
+                      incs: *mut *u8, nincs: i32) -> Program {
+    return parse_program_all(a, d, srcs, root, incs, nincs, null, true);
+}
+
 fn parse_program(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, root: str) -> Program {
     return parse_program_cfg(a, d, srcs, root, null, true);
+}
+
+// Parse source text that has no file (`-` and `exec`). Diagnostics name the
+// synthetic file; relative `import`s resolve against the working directory.
+fn parse_program_text(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, name: str, text: str) -> Program {
+    unsafe {
+    let p: *mut P = p_init(a, d, srcs);
+    parse_src_text(p, name, "", text);
+    return p_program(p);
+
+    }
 }

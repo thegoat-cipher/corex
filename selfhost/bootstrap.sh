@@ -85,4 +85,21 @@ tests/selfhosting/run.sh "$STAGE2"
 tests/selfhosting/run.sh "$STAGE3"
 
 echo
+echo "== CLI parity =="
+tests/selfhosting/cli.sh "$STAGE1"
+tests/selfhosting/cli.sh "$STAGE2"
+
+echo
+echo "== Differential dumps =="
+tests/selfhosting/dump.sh "$STAGE2"
+
+echo
+echo "== Malformed input / ASan =="
+tests/selfhosting/fuzz.sh "$STAGE2"
+
+echo
+echo "== Performance baseline =="
+tests/selfhosting/perf.sh "$STAGE2"
+
+echo
 echo "bootstrap ok"

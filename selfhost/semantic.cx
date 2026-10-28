@@ -1010,6 +1010,11 @@ fn place_mut(s: *mut Sem, e: *mut Expr) -> bool {
 
 fn type_ptr_elem(t: *mut Type) -> *mut Type {
     unsafe {
+    if t == null {
+        // A previous stage already reported a parse error. Return a concrete
+        // type so later passes never dereference null.
+        return t;
+    }
     return (*t).elem;
 
     }
@@ -1018,7 +1023,10 @@ fn type_ptr_elem(t: *mut Type) -> *mut Type {
 fn check_expr(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
     unsafe {
     if e == null {
-        return null;
+        // A previous stage already reported a parse error. Return a concrete
+        // type so later passes never dereference null (the crash this used to
+        // cause: `print(unsafe { ... })`, fixed in the P2 workstream).
+        return type_new((*s).a, K::I32);
     }
     if expected != null && !type_ok(s, expected) {
         sdiag(s, (*e).file, (*e).line, (*e).col, "internal: invalid expected type two");
@@ -1480,6 +1488,13 @@ fn ck(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
 
 fn check_binary(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
     unsafe {
+    // A parse error can leave one operand null; the diagnostic is already
+    // recorded, so return a placeholder instead of dereferencing null.
+    if (*e).lhs == null || (*e).rhs == null {
+        let t: *mut Type = type_new((*s).a, K::I32);
+        (*e).ty = t;
+        return t;
+    }
     if expected != null && !type_ok(s, expected) {
         sdiag(s, (*e).file, (*e).line, (*e).col, "internal: invalid expected type");
         let bad: *mut Type = type_new((*s).a, K::I32);
@@ -2422,8 +2437,8 @@ fn layout_all(s: *mut Sem) {
     }
 }
 
-fn sem_run(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program,
-    require_entry: bool) -> *mut Sem {
+fn sem_run_ex(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program,
+              require_entry: bool) -> *mut Sem {
     unsafe {
     let s: *mut Sem = rt_alloc(a, sizeof(Sem)) as *mut Sem;
     (*s).a = a;
@@ -2489,19 +2504,21 @@ fn sem_run(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program,
     layout_all(s);
     let mentry: *mut Decl = sem_find(s, "main");
     let sentry: *mut Decl = sem_find(s, "_start");
-    if require_entry && mentry == null && sentry == null {
-        sdiag(s, 0, 0, 0, "no entry point: define main or _start");
-    }
-    if mentry != null && (*mentry).kind == D::Func {
-        if (*mentry).nparams != 0 && (*mentry).nparams != 3 {
-            sdiag(s, (*mentry).file, (*mentry).line, (*mentry).col, "main must take 0 or 3 parameters");
+    if require_entry {
+        if mentry == null && sentry == null {
+            sdiag(s, 0, 0, 0, "no entry point: define main or _start");
         }
-        if (*mentry).ty != null && (*(*mentry).ty).kind != K::I32 {
-            sdiag(s, (*mentry).file, (*mentry).line, (*mentry).col, "main must return i32");
+        if mentry != null && (*mentry).kind == D::Func {
+            if (*mentry).nparams != 0 && (*mentry).nparams != 3 {
+                sdiag(s, (*mentry).file, (*mentry).line, (*mentry).col, "main must take 0 or 3 parameters");
+            }
+            if (*mentry).ty != null && (*(*mentry).ty).kind != K::I32 {
+                sdiag(s, (*mentry).file, (*mentry).line, (*mentry).col, "main must return i32");
+            }
         }
-    }
-    if sentry != null && (*sentry).kind == D::Func && (*sentry).nparams != 0 {
-        sdiag(s, (*sentry).file, (*sentry).line, (*sentry).col, "_start must take no parameters");
+        if sentry != null && (*sentry).kind == D::Func && (*sentry).nparams != 0 {
+            sdiag(s, (*sentry).file, (*sentry).line, (*sentry).col, "_start must take no parameters");
+        }
     }
     g = (*s).globals;
     while g != null {
@@ -2530,4 +2547,14 @@ fn sem_run(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program,
     return s;
 
     }
+}
+
+fn sem_run(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program) -> *mut Sem {
+    return sem_run_ex(a, d, srcs, prog, true);
+}
+
+// `corexc test` compiles a program without an entry point; the harness that
+// calls `test_*` functions is generated instead.
+fn sem_run_tests(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program) -> *mut Sem {
+    return sem_run_ex(a, d, srcs, prog, false);
 }

@@ -1,5 +1,12 @@
-// CoreX bootstrap driver: check, emit-ir, build. Invokes llvm-as, llc, and cc
-// through fork/execve; accepts LLVM tools from COREX_LLVM_BIN or PATH.
+// CoreX bootstrap driver.
+//
+// Command surface mirrors the Rust `corex` CLI: check, emit-ir, build, run,
+// exec, repl, fmt, lint, doc, and test, with `-` reading the source from stdin.
+// Exit codes: 0 success, 1 compile error, 2 usage or I/O error, 3 external
+// tool failure; `run` and `exec` propagate the compiled program's status.
+//
+// LLVM tools come from COREX_LLVM_BIN or PATH; the linker driver from COREX_CC
+// (default `cc`).
 
 fn dr_s(fd: i32, s: str) {
     unsafe {
@@ -16,14 +23,414 @@ fn dr_errln(s: str) {
     dr_s(2, "\n");
 }
 
+fn dr_outln(s: str) {
+    dr_s(1, s);
+    dr_s(1, "\n");
+}
+
+fn dr_usage_fd(fd: i32) {
+    dr_s(fd, "CoreX bootstrap compiler (corex 0.3.0 compatible)
+
+Usage:
+  corexc build   <file.cx | -> [-o <output>] [--opt <0-3>]
+  corexc run     <file.cx | -> [--opt <0-3>] [-- <program args>...]
+  corexc exec    '<source>' [--opt <0-3>] [-- <program args>...]
+  corexc repl    [--opt <0-3>]
+  corexc emit-ir <file.cx | -> [--verify]
+  corexc check   <file.cx | ->
+  corexc fmt     <file.cx | -> [-w | --check]
+  corexc lint    <file.cx | -> [--deny-warnings]
+  corexc doc     <file.cx | -> [-o <out.md>]
+  corexc test    <file.cx | -> [--opt <0-3>]
+  corexc dump-tokens <file.cx | ->
+  corexc dump-ast    <file.cx | ->
+
+Commands:
+  build    Compile to a freestanding Linux x86-64 ELF executable.
+  run      Compile, then run; exits with the program's status.
+  exec     Run source given directly on the command line (no file).
+  repl     Interactive session: type code, finish a block with a blank line.
+  emit-ir  Print the generated LLVM 20 IR (--verify assembles it).
+  check    Run the frontend only (lex, parse, semantic).
+  fmt      Format whitespace; `-w` writes in place, `--check` fails if unformatted.
+  lint     Report unused variables/items, unreachable code, constant conditions.
+  doc      Generate Markdown documentation from `///` comments.
+  test     Build and run `fn test_name() -> bool` functions.
+  dump-tokens  Print normalized tokens (kind, position, lexeme).
+  dump-ast     Print the normalized AST shape used for differential testing.
+
+Reading source:
+  A file argument of `-` reads the source from stdin, e.g.
+    printf 'fn main() -> i32 { return 7; }' | corexc run -
+
+Environment:
+  COREX_LLVM_BIN  Directory containing llvm-as, opt, llc (LLVM 20).
+  COREX_CC        Linker driver used to produce the ELF (default: cc).
+");
+}
+
 fn dr_usage() {
-    dr_errln("corexc bootstrap compiler");
-    dr_errln("usage:");
-    dr_errln("  corexc check   <file.cx>");
-    dr_errln("  corexc emit-ir <file.cx> [-o <out.ll>]");
-    dr_errln("  corexc build   <file.cx | dir> [-o <out>] [--opt 0..3]");
-    dr_errln("                 [--cfg key=value]... [--hosted] [--shared]");
-    dr_errln("                 [--emit obj|shared] [--link <obj|a>]... [-L <dir>]... [-l <name>]...");
+    dr_usage_fd(1);
+}
+
+fn dr_usage_err() {
+    dr_usage_fd(2);
+}
+
+struct Opts {
+    file: cstr,
+    has_file: bool,
+    out: cstr,
+    opt: i32,
+    verify: bool,
+    // Index of the first argument after `--`, or 0 when absent.
+    pa_start: i32,
+    // fmt
+    write: bool,
+    fmt_check: bool,
+    // lint
+    deny: bool,
+    // link/emit (SH-036). `emit` is "", "obj", "shared", or "staticlib".
+    emit: cstr,
+    hosted: bool,
+    shared: bool,
+    sanitize: bool,
+    links: *mut *u8,
+    nlinks: i32,
+    lib_paths: *mut *u8,
+    nlp: i32,
+    libs: *mut *u8,
+    nlibs: i32,
+    includes: *mut *u8,
+    nincs: i32,
+    cfgs: *mut *u8,
+    ncfgs: i32,
+}
+
+fn opts_new(a: *mut Arena, argc: i32) -> Opts {
+    return Opts {
+        file: c"",
+        has_file: false,
+        out: c"",
+        opt: 2,
+        verify: false,
+        pa_start: 0,
+        write: false,
+        fmt_check: false,
+        deny: false,
+        emit: c"",
+        hosted: false,
+        shared: false,
+        sanitize: false,
+        links: rt_argv(a, argc),
+        nlinks: 0,
+        lib_paths: rt_argv(a, argc),
+        nlp: 0,
+        libs: rt_argv(a, argc),
+        nlibs: 0,
+        includes: rt_argv(a, argc),
+        nincs: 0,
+        cfgs: rt_argv(a, argc),
+        ncfgs: 0,
+    };
+}
+
+fn dr_badopt(a: *mut Arena, flag: cstr, extra: str) -> i32 {
+    let mut b: Buf = rt_buf(a);
+    let bp: *mut Buf = &mut b;
+    rt_s(bp, "error: ");
+    rt_s(bp, extra);
+    rt_s(bp, "`");
+    rt_cstr(bp, flag);
+    rt_s(bp, "`\n\n");
+    dr_err(rt_view(bp));
+    dr_usage_err();
+    return 2;
+}
+
+fn dr_opt_level(argv: **u8, argc: i32, i: i32, o: *mut Opts) -> i32 {
+    unsafe {
+        if i + 1 >= argc {
+            dr_errln("error: `--opt` requires a value 0-3");
+            return 2;
+        }
+        let lv: cstr = *(argv + (i + 1) as usize) as cstr;
+        if rt_cstr_eq(lv, "0") {
+            (*o).opt = 0;
+        } else if rt_cstr_eq(lv, "1") {
+            (*o).opt = 1;
+        } else if rt_cstr_eq(lv, "2") {
+            (*o).opt = 2;
+        } else if rt_cstr_eq(lv, "3") {
+            (*o).opt = 3;
+        } else {
+            dr_errln("error: invalid --opt value (expected 0-3)");
+            return 2;
+        }
+        return 0;
+    }
+}
+
+// Parse options from argv[start..argc]. The `allow_*` switches decide which
+// flags are legal for the command, so `check --opt 2` is a usage error rather
+// than a silently ignored flag.
+fn dr_need(a: *mut Arena, argv: **u8, argc: i32, i: i32, flag: str) -> cstr {
+    unsafe {
+        if i + 1 >= argc {
+            let mut b: Buf = rt_buf(a);
+            let bp: *mut Buf = &mut b;
+            rt_s(bp, "error: `");
+            rt_s(bp, flag);
+            rt_s(bp, "` requires a value");
+            dr_errln(rt_view(bp));
+            return c"";
+        }
+        return *(argv + (i + 1) as usize) as cstr;
+    }
+}
+
+fn dr_is_num(s: cstr, v: str) -> bool {
+    return rt_cstr_eq(s, v);
+}
+
+// Parse options from argv[start..argc]. The `allow_*` switches decide which
+// flags are legal for the command, so `check --opt 2` is a usage error rather
+// than a silently ignored flag.
+fn dr_parse(a: *mut Arena, argv: **u8, argc: i32, start: i32, allow_out: bool,
+            allow_opt: bool, allow_verify: bool, allow_prog: bool,
+            allow_fmt: bool, allow_lint: bool, allow_link: bool, o: *mut Opts) -> i32 {
+    unsafe {
+        let mut i: i32 = start;
+        while i < argc {
+            let arg: cstr = *(argv + i as usize) as cstr;
+            if rt_cstr_eq(arg, "--") {
+                if !allow_prog {
+                    return dr_badopt(a, arg, "unknown option ");
+                }
+                (*o).pa_start = i + 1;
+                return 0;
+            }
+            if rt_cstr_eq(arg, "-o") {
+                if !allow_out {
+                    return dr_badopt(a, arg, "unknown option ");
+                }
+                let v: cstr = dr_need(a, argv, argc, i, "-o");
+                if cstr_len(v) == 0 {
+                    return 2;
+                }
+                (*o).out = v;
+                i = i + 2;
+                continue;
+            }
+            if rt_cstr_eq(arg, "--opt") {
+                if !allow_opt {
+                    return dr_badopt(a, arg, "unknown option ");
+                }
+                let rc: i32 = dr_opt_level(argv, argc, i, o);
+                if rc != 0 {
+                    return rc;
+                }
+                i = i + 2;
+                continue;
+            }
+            if rt_cstr_eq(arg, "--verify") {
+                if !allow_verify {
+                    return dr_badopt(a, arg, "unknown option ");
+                }
+                (*o).verify = true;
+                i = i + 1;
+                continue;
+            }
+            if allow_link {
+                if rt_cstr_eq(arg, "--link") {
+                    let v: cstr = dr_need(a, argv, argc, i, "--link");
+                    if cstr_len(v) == 0 {
+                        return 2;
+                    }
+                    rt_arg_set((*o).links, (*o).nlinks, v);
+                    (*o).nlinks = (*o).nlinks + 1;
+                    i = i + 2;
+                    continue;
+                }
+                if rt_cstr_eq(arg, "-L") {
+                    let v: cstr = dr_need(a, argv, argc, i, "-L");
+                    if cstr_len(v) == 0 {
+                        return 2;
+                    }
+                    rt_arg_set((*o).lib_paths, (*o).nlp, v);
+                    (*o).nlp = (*o).nlp + 1;
+                    i = i + 2;
+                    continue;
+                }
+                if rt_cstr_eq(arg, "-l") {
+                    let v: cstr = dr_need(a, argv, argc, i, "-l");
+                    if cstr_len(v) == 0 {
+                        return 2;
+                    }
+                    rt_arg_set((*o).libs, (*o).nlibs, v);
+                    (*o).nlibs = (*o).nlibs + 1;
+                    i = i + 2;
+                    continue;
+                }
+                if rt_cstr_eq(arg, "-I") || rt_cstr_eq(arg, "--include") {
+                    let v: cstr = dr_need(a, argv, argc, i, "-I");
+                    if cstr_len(v) == 0 {
+                        return 2;
+                    }
+                    rt_arg_set((*o).includes, (*o).nincs, v);
+                    (*o).nincs = (*o).nincs + 1;
+                    i = i + 2;
+                    continue;
+                }
+                if rt_cstr_eq(arg, "--cfg") {
+                    let v: cstr = dr_need(a, argv, argc, i, "--cfg");
+                    if cstr_len(v) == 0 {
+                        return 2;
+                    }
+                    rt_arg_set((*o).cfgs, (*o).ncfgs, v);
+                    (*o).ncfgs = (*o).ncfgs + 1;
+                    i = i + 2;
+                    continue;
+                }
+                if rt_cstr_eq(arg, "--hosted") {
+                    (*o).hosted = true;
+                    i = i + 1;
+                    continue;
+                }
+                if rt_cstr_eq(arg, "--shared") {
+                    (*o).shared = true;
+                    i = i + 1;
+                    continue;
+                }
+                if rt_cstr_eq(arg, "--sanitize") {
+                    (*o).sanitize = true;
+                    i = i + 1;
+                    continue;
+                }
+                if rt_cstr_eq(arg, "-g") || rt_cstr_eq(arg, "--debug") {
+                    dr_errln("error: debug info (`-g`) is not supported by the bootstrap compiler");
+                    return 2;
+                }
+                if rt_cstr_eq(arg, "--emit") {
+                    let v: cstr = dr_need(a, argv, argc, i, "--emit");
+                    if cstr_len(v) == 0 {
+                        return 2;
+                    }
+                    if rt_cstr_eq(v, "obj") {
+                        (*o).emit = c"obj";
+                    } else if rt_cstr_eq(v, "shared") || rt_cstr_eq(v, "dylib") {
+                        (*o).emit = c"shared";
+                    } else if rt_cstr_eq(v, "staticlib") || rt_cstr_eq(v, "static") || rt_cstr_eq(v, "lib") {
+                        (*o).emit = c"staticlib";
+                    } else if rt_cstr_eq(v, "exe") || rt_cstr_eq(v, "executable") || rt_cstr_eq(v, "bin") {
+                        (*o).emit = c"";
+                    } else {
+                        let mut b: Buf = rt_buf(a);
+                        let bp: *mut Buf = &mut b;
+                        rt_s(bp, "error: unknown --emit value `");
+                        rt_cstr(bp, v);
+                        rt_s(bp, "` (expected obj, shared, or staticlib)\n");
+                        dr_err(rt_view(bp));
+                        return 2;
+                    }
+                    i = i + 2;
+                    continue;
+                }
+            }
+            if rt_cstr_eq(arg, "-w") || rt_cstr_eq(arg, "--write") {
+                if !allow_fmt {
+                    return dr_badopt(a, arg, "unknown option ");
+                }
+                (*o).write = true;
+                i = i + 1;
+                continue;
+            }
+            if rt_cstr_eq(arg, "--check") {
+                if !allow_fmt {
+                    return dr_badopt(a, arg, "unknown option ");
+                }
+                (*o).fmt_check = true;
+                i = i + 1;
+                continue;
+            }
+            if rt_cstr_eq(arg, "--deny-warnings") {
+                if !allow_lint {
+                    return dr_badopt(a, arg, "unknown option ");
+                }
+                (*o).deny = true;
+                i = i + 1;
+                continue;
+            }
+            if rt_cstr_eq(arg, "-") {
+                if (*o).has_file {
+                    return dr_badopt(a, arg, "unexpected extra argument ");
+                }
+                (*o).file = arg;
+                (*o).has_file = true;
+                i = i + 1;
+                continue;
+            }
+            let b0: u8 = *(arg as *u8);
+            if b0 == 45 {
+                return dr_badopt(a, arg, "unknown option ");
+            }
+            if (*o).has_file {
+                return dr_badopt(a, arg, "unexpected extra argument ");
+            }
+            (*o).file = arg;
+            (*o).has_file = true;
+            i = i + 1;
+        }
+        return 0;
+    }
+}
+
+fn dr_is_stdin(f: cstr) -> bool {
+    return rt_cstr_eq(f, "-");
+}
+
+// Basename with a trailing `.cx` removed; Rust's `default_output`.
+fn dr_stem(a: *mut Arena, path: cstr) -> cstr {
+    let p: str = rt_cstr_str(path as *u8);
+    let mut start: usize = 0;
+    let mut i: usize = 0;
+    while i < len(p) {
+        if p[i] == 47 {
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    let mut end: usize = len(p);
+    if end - start > 3 {
+        let a1: u8 = p[end - 3];
+        let a2: u8 = p[end - 2];
+        let a3: u8 = p[end - 1];
+        if a1 == 46 && a2 == 99 && a3 == 120 {
+            end = end - 3;
+        }
+    }
+    let base: str = rt_slice(p, start, end);
+    if len(base) == 0 {
+        return c"a.out";
+    }
+    return rt_to_cstr(a, base);
+}
+
+// Report an unreadable input the way the Rust driver does and return true.
+fn dr_missing(a: *mut Arena, f: cstr) -> bool {
+    if dr_is_stdin(f) {
+        return false;
+    }
+    if rt_exists(f) {
+        return false;
+    }
+    let mut b: Buf = rt_buf(a);
+    let bp: *mut Buf = &mut b;
+    rt_s(bp, "error: cannot read ");
+    rt_cstr(bp, f);
+    rt_s(bp, ": No such file or directory\n");
+    dr_err(rt_view(bp));
+    return true;
 }
 
 fn dr_diags(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList) {
@@ -43,7 +450,20 @@ fn dr_diags(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList) {
             rt_i(bp, (*dg).line as i64);
             rt_s(bp, ":");
             rt_i(bp, (*dg).col as i64);
-            rt_s(bp, ": error: ");
+            rt_s(bp, ": ");
+            if len((*dg).code) > 0 {
+                if (*dg).warn {
+                    rt_s(bp, "warning[");
+                } else {
+                    rt_s(bp, "error[");
+                }
+                rt_s(bp, (*dg).code);
+                rt_s(bp, "]: ");
+            } else if rt_starts((*dg).msg, "undefined ") {
+                rt_s(bp, "error[E0201]: ");
+            } else {
+                rt_s(bp, "error: ");
+            }
             rt_s(bp, (*dg).msg);
             rt_s(bp, "\n");
             let msg: str = rt_view(bp);
@@ -100,7 +520,8 @@ fn module_file(a: *mut Arena, dir: str, name: str) -> str {
 // items to `prog`. Each unit is parsed separately so its own module prefix and
 // dependency list are respected.
 fn dr_load_modules(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program,
-    dir: str, deps: *mut PathList, ml: *mut ModList, cfg: *mut PathList) {
+    dir: str, deps: *mut PathList, ml: *mut ModList, cfg: *mut PathList,
+    incs: *mut *u8, nincs: i32) {
     unsafe {
     let mut q: *mut PathList = deps;
     while q != null {
@@ -108,7 +529,7 @@ fn dr_load_modules(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut 
         if !mod_seen(ml, name) {
             mod_note(a, ml, name);
             let file: str = module_file(a, dir, name);
-            let mut sub: Program = parse_program_cfg(a, d, srcs, file, cfg, false);
+            let mut sub: Program = parse_program_all(a, d, srcs, file, incs, nincs, cfg, false);
             if (*d).count > 0 {
                 return;
             }
@@ -118,7 +539,7 @@ fn dr_load_modules(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut 
                 return;
             }
             prog_append(prog, sp);
-            dr_load_modules(a, d, srcs, prog, rt_dirname(file), (*sp).deps, ml, cfg);
+            dr_load_modules(a, d, srcs, prog, rt_dirname(file), (*sp).deps, ml, cfg, incs, nincs);
         }
         q = (*q).next;
     }
@@ -227,7 +648,7 @@ fn manifest_sources(a: *mut Arena, dir: str) -> *mut PathList {
 // Build every source listed in `<dir>/corex.toml` as one program. Each source
 // keeps its own `module` prefix.
 fn dr_manifest(a: *mut Arena, dir: str, d: *mut Diags, srcs: *mut SrcList,
-    cfg: *mut PathList) -> Program {
+    cfg: *mut PathList, incs: *mut *u8, nincs: i32) -> Program {
     unsafe {
     let mut prog: Program = prog_init();
     let pp: *mut Program = &mut prog;
@@ -263,7 +684,7 @@ fn dr_manifest(a: *mut Arena, dir: str, d: *mut Diags, srcs: *mut SrcList,
         if !rt_is_abs(rel) {
             file = rt_join2(a, dir, rel);
         }
-        let mut sub: Program = parse_program_cfg(a, d, srcs, file, cf, true);
+        let mut sub: Program = parse_program_all(a, d, srcs, file, incs, nincs, cf, true);
         if (*d).count > 0 {
             return prog;
         }
@@ -272,7 +693,7 @@ fn dr_manifest(a: *mut Arena, dir: str, d: *mut Diags, srcs: *mut SrcList,
             mod_note(a, mlp, (*sp).module_name);
         }
         prog_append(pp, sp);
-        dr_load_modules(a, d, srcs, pp, rt_dirname(file), (*sp).deps, mlp, cf);
+        dr_load_modules(a, d, srcs, pp, rt_dirname(file), (*sp).deps, mlp, cf, incs, nincs);
         q = (*q).next;
     }
     return prog;
@@ -280,18 +701,70 @@ fn dr_manifest(a: *mut Arena, dir: str, d: *mut Diags, srcs: *mut SrcList,
     }
 }
 
-fn dr_front(a: *mut Arena, path: cstr, d: *mut Diags, srcs: *mut SrcList,
-    cfg: *mut PathList) -> Program {
+fn dr_report_count(a: *mut Arena, d: *mut Diags) {
     unsafe {
-        let root: str = rt_cstr_str(path as *u8);
-        let mut prog: Program = parse_program_cfg(a, d, srcs, root, cfg, true);
+        let n: i32 = (*d).count;
+        let mut b: Buf = rt_buf(a);
+        let bp: *mut Buf = &mut b;
+        rt_s(bp, "\n");
+        rt_i(bp, n as i64);
+        if n == 1 {
+            rt_s(bp, " error generated\n");
+        } else {
+            rt_s(bp, " errors generated\n");
+        }
+        dr_err(rt_view(bp));
+    }
+}
+
+fn dr_front(a: *mut Arena, path: cstr, d: *mut Diags, srcs: *mut SrcList) -> Program {
+    unsafe {
+        return parse_program(a, d, srcs, rt_cstr_str(path as *u8));
+    }
+}
+
+fn dr_front_stdin(a: *mut Arena, name: str, d: *mut Diags, srcs: *mut SrcList) -> Program {
+    let fd: FileData = rt_read_stdin(a);
+    return parse_program_text(a, d, srcs, name, fd.data);
+}
+
+fn dr_opts_cfg(a: *mut Arena, o: *mut Opts) -> *mut PathList {
+    unsafe {
+    let mut cfg: *mut PathList = null;
+    let mut i: i32 = 0;
+    while i < (*o).ncfgs {
+        let cv: cstr = *((*o).cfgs + i as usize) as cstr;
+        let pl: *mut PathList = rt_alloc(a, sizeof(PathList)) as *mut PathList;
+        (*pl).path = rt_cstr_str(cv as *u8);
+        (*pl).next = cfg;
+        cfg = pl;
+        i = i + 1;
+    }
+    return cfg;
+
+    }
+}
+
+fn dr_load(a: *mut Arena, f: cstr, d: *mut Diags, srcs: *mut SrcList, o: *mut Opts) -> Program {
+    if dr_is_stdin(f) {
+        return dr_front_stdin(a, "<stdin>", d, srcs);
+    }
+    unsafe {
+        let root: str = rt_cstr_str(f as *u8);
+        let cfg: *mut PathList = dr_opts_cfg(a, o);
+        if !path_ends_cx(f) {
+            return dr_manifest(a, root, d, srcs, cfg, (*o).includes, (*o).nincs);
+        }
+        let mut prog: Program = parse_program_all(a, d, srcs, root,
+            (*o).includes, (*o).nincs, cfg, true);
         let pp: *mut Program = &mut prog;
         let mut ml: ModList = ModList { head: null };
         let mlp: *mut ModList = &mut ml;
         if !rt_eq((*pp).module_name, "") {
             mod_note(a, mlp, (*pp).module_name);
         }
-        dr_load_modules(a, d, srcs, pp, rt_dirname(root), (*pp).deps, mlp, cfg);
+        dr_load_modules(a, d, srcs, pp, rt_dirname(root), (*pp).deps, mlp, cfg,
+            (*o).includes, (*o).nincs);
         return prog;
     }
 }
@@ -300,8 +773,8 @@ fn dr_write_ir(a: *mut Arena, ir: str, out: cstr) -> i32 {
     unsafe {
         if cstr_len(out) > 0 {
             if rt_write_file(out, ir) != 0 {
-                dr_errln("corexc: cannot write output");
-                return 1;
+                dr_errln("error: cannot write output");
+                return 2;
             }
             return 0;
         }
@@ -314,7 +787,7 @@ fn dr_exec(a: *mut Arena, envp: **u8, argv: *mut *u8, count: i32, what: str) -> 
     unsafe {
         let rc: i32 = rt_run(argv, envp);
         if rc != 0 {
-            dr_err("corexc: ");
+            dr_err("error: ");
             dr_err(what);
             dr_err(" failed, exit ");
             let mut b: Buf = rt_buf(a);
@@ -328,39 +801,14 @@ fn dr_exec(a: *mut Arena, envp: **u8, argv: *mut *u8, count: i32, what: str) -> 
     }
 }
 
-struct BuildOpts {
-    links: *mut PathList,
-    libdirs: *mut PathList,
-    libs: *mut PathList,
-    hosted: bool,
-    shared: bool,
-    emit_obj: bool,
-}
+const DR_TOOL_FAIL: i32 = 3;
 
-fn list_len(q: *mut PathList) -> i32 {
+fn dr_as(a: *mut Arena, envp: **u8, ll: cstr, bc: cstr) -> i32 {
     unsafe {
-    let mut n: i32 = 0;
-    let mut p: *mut PathList = q;
-    while p != null {
-        n = n + 1;
-        p = (*p).next;
-    }
-    return n;
-
-    }
-}
-
-fn dr_build(a: *mut Arena, envp: **u8, ll: cstr, out: cstr, opt: i32, o: *mut BuildOpts) -> i32 {
-    unsafe {
-        let bc: cstr = rt_temp_path(a, ".bc");
-        let mut obj: cstr = rt_temp_path(a, ".o");
-        if (*o).emit_obj {
-            obj = out;
-        }
         let asm_tool: cstr = rt_find_tool(a, envp, "llvm-as");
         if cstr_len(asm_tool) == 0 {
-            dr_errln("corexc: llvm-as not found");
-            return 1;
+            dr_errln("error: llvm-as not found");
+            return DR_TOOL_FAIL;
         }
         let av: *mut *u8 = rt_argv(a, 4);
         rt_arg_set(av, 0, asm_tool);
@@ -368,298 +816,794 @@ fn dr_build(a: *mut Arena, envp: **u8, ll: cstr, out: cstr, opt: i32, o: *mut Bu
         rt_arg_set(av, 2, c"-o");
         rt_arg_set(av, 3, bc);
         if dr_exec(a, envp, av, 4, "llvm-as") != 0 {
-            return 1;
+            return DR_TOOL_FAIL;
         }
-        let mut use_bc: cstr = bc;
-        if opt > 0 {
-            let opt_tool: cstr = rt_find_tool(a, envp, "opt");
-            if cstr_len(opt_tool) == 0 {
-                dr_errln("corexc: opt not found");
-                return 1;
-            }
-            let bc2: cstr = rt_temp_path(a, ".opt.bc");
-            let mut ob: Buf = rt_buf(a);
-            let obp: *mut Buf = &mut ob;
-            rt_s(obp, "-passes=default<O");
-            rt_i(obp, opt as i64);
-            rt_s(obp, ">");
-            let opt_flag: cstr = rt_to_cstr(a, rt_view(obp));
-            let ov: *mut *u8 = rt_argv(a, 5);
-            rt_arg_set(ov, 0, opt_tool);
-            rt_arg_set(ov, 1, opt_flag);
-            rt_arg_set(ov, 2, bc);
-            rt_arg_set(ov, 3, c"-o");
-            rt_arg_set(ov, 4, bc2);
-            if dr_exec(a, envp, ov, 5, "opt") != 0 {
-                return 1;
-            }
-            use_bc = bc2;
+        return 0;
+    }
+}
+
+fn dr_opt_bc(a: *mut Arena, envp: **u8, bc: cstr, bc2: cstr, opt: i32) -> i32 {
+    unsafe {
+        let opt_tool: cstr = rt_find_tool(a, envp, "opt");
+        if cstr_len(opt_tool) == 0 {
+            dr_errln("error: opt not found");
+            return DR_TOOL_FAIL;
         }
+        let mut ob: Buf = rt_buf(a);
+        let obp: *mut Buf = &mut ob;
+        rt_s(obp, "-passes=default<O");
+        rt_i(obp, opt as i64);
+        rt_s(obp, ">");
+        let opt_flag: cstr = rt_to_cstr(a, rt_view(obp));
+        let ov: *mut *u8 = rt_argv(a, 5);
+        rt_arg_set(ov, 0, opt_tool);
+        rt_arg_set(ov, 1, opt_flag);
+        rt_arg_set(ov, 2, bc);
+        rt_arg_set(ov, 3, c"-o");
+        rt_arg_set(ov, 4, bc2);
+        if dr_exec(a, envp, ov, 5, "opt") != 0 {
+            return DR_TOOL_FAIL;
+        }
+        return 0;
+    }
+}
+
+fn dr_llc(a: *mut Arena, envp: **u8, bc: cstr, obj: cstr, opt: i32, pic: bool) -> i32 {
+    unsafe {
         let llc: cstr = rt_find_tool(a, envp, "llc");
         if cstr_len(llc) == 0 {
-            dr_errln("corexc: llc not found");
-            return 1;
+            dr_errln("error: llc not found");
+            return DR_TOOL_FAIL;
         }
         let lv: *mut *u8 = rt_argv(a, 7);
         rt_arg_set(lv, 0, llc);
         rt_arg_set(lv, 1, c"-filetype=obj");
-        rt_arg_set(lv, 2, c"-relocation-model=static");
+        if pic {
+            rt_arg_set(lv, 2, c"-relocation-model=pic");
+        } else {
+            rt_arg_set(lv, 2, c"-relocation-model=static");
+        }
         let mut lb: Buf = rt_buf(a);
         let lbp: *mut Buf = &mut lb;
         rt_s(lbp, "-O");
         rt_i(lbp, opt as i64);
         let opt_level: cstr = rt_to_cstr(a, rt_view(lbp));
         rt_arg_set(lv, 3, opt_level);
-        rt_arg_set(lv, 4, use_bc);
+        rt_arg_set(lv, 4, bc);
         rt_arg_set(lv, 5, c"-o");
         rt_arg_set(lv, 6, obj);
         if dr_exec(a, envp, lv, 7, "llc") != 0 {
-            return 1;
+            return DR_TOOL_FAIL;
         }
-        if (*o).emit_obj {
-            rt_unlink(ll);
-            rt_unlink(bc);
-            return 0;
-        }
-        let cc: cstr = rt_cc(a, envp);
-        let nl: i32 = list_len((*o).links);
-        let nd: i32 = list_len((*o).libdirs);
-        let nb: i32 = list_len((*o).libs);
-        let mut n: i32 = 4 + nl + nd * 2 + nb * 2;
-        if !(*o).hosted && !(*o).shared {
-            n = n + 3;
-        }
-        if (*o).shared {
-            n = n + 1;
-        }
-        let cv: *mut *u8 = rt_argv(a, n);
-        let mut i: i32 = 0;
-        rt_arg_set(cv, i, cc);
-        i = i + 1;
-        if !(*o).hosted && !(*o).shared {
-            rt_arg_set(cv, i, c"-nostdlib");
-            i = i + 1;
-            rt_arg_set(cv, i, c"-static");
-            i = i + 1;
-            rt_arg_set(cv, i, c"-no-pie");
-            i = i + 1;
-        }
-        if (*o).shared {
-            rt_arg_set(cv, i, c"-shared");
-            i = i + 1;
-        }
-        rt_arg_set(cv, i, obj);
-        i = i + 1;
-        let mut q: *mut PathList = (*o).links;
-        while q != null {
-            rt_arg_set(cv, i, rt_to_cstr(a, (*q).path));
-            i = i + 1;
-            q = (*q).next;
-        }
-        q = (*o).libdirs;
-        while q != null {
-            rt_arg_set(cv, i, c"-L");
-            i = i + 1;
-            rt_arg_set(cv, i, rt_to_cstr(a, (*q).path));
-            i = i + 1;
-            q = (*q).next;
-        }
-        q = (*o).libs;
-        while q != null {
-            rt_arg_set(cv, i, c"-l");
-            i = i + 1;
-            rt_arg_set(cv, i, rt_to_cstr(a, (*q).path));
-            i = i + 1;
-            q = (*q).next;
-        }
-        rt_arg_set(cv, i, c"-o");
-        i = i + 1;
-        rt_arg_set(cv, i, out);
-        i = i + 1;
-        if dr_exec(a, envp, cv, n, "cc") != 0 {
-            return 1;
-        }
-        rt_unlink(ll);
-        rt_unlink(bc);
-        rt_unlink(obj);
         return 0;
     }
 }
 
+fn dr_link(a: *mut Arena, envp: **u8, obj: cstr, out: cstr, o: *mut Opts, shared: bool) -> i32 {
+    unsafe {
+        let cc: cstr = rt_cc(a, envp);
+        let mut n: i32 = 1 + 2 + 1 + (*o).nlinks + (*o).nlp + (*o).nlibs;
+        if shared || (*o).hosted {
+            n = n + 1;
+        } else {
+            n = n + 3;
+        }
+        let cv: *mut *u8 = rt_argv(a, n);
+        let mut k: i32 = 0;
+        rt_arg_set(cv, k, cc);
+        k = k + 1;
+        if shared {
+            rt_arg_set(cv, k, c"-shared");
+            k = k + 1;
+        } else if (*o).hosted {
+            rt_arg_set(cv, k, c"-no-pie");
+            k = k + 1;
+        } else {
+            rt_arg_set(cv, k, c"-nostdlib");
+            k = k + 1;
+            rt_arg_set(cv, k, c"-static");
+            k = k + 1;
+            rt_arg_set(cv, k, c"-no-pie");
+            k = k + 1;
+        }
+        rt_arg_set(cv, k, c"-o");
+        k = k + 1;
+        rt_arg_set(cv, k, out);
+        k = k + 1;
+        rt_arg_set(cv, k, obj);
+        k = k + 1;
+        let mut j: i32 = 0;
+        while j < (*o).nlinks {
+            rt_arg_set(cv, k, *( (*o).links + j as usize) as cstr);
+            k = k + 1;
+            j = j + 1;
+        }
+        j = 0;
+        while j < (*o).nlp {
+            let mut b: Buf = rt_buf(a);
+            let bp: *mut Buf = &mut b;
+            rt_s(bp, "-L");
+            rt_cstr(bp, *((*o).lib_paths + j as usize) as cstr);
+            rt_arg_set(cv, k, rt_to_cstr(a, rt_view(bp)));
+            k = k + 1;
+            j = j + 1;
+        }
+        j = 0;
+        while j < (*o).nlibs {
+            let mut b2: Buf = rt_buf(a);
+            let bp2: *mut Buf = &mut b2;
+            rt_s(bp2, "-l");
+            rt_cstr(bp2, *((*o).libs + j as usize) as cstr);
+            rt_arg_set(cv, k, rt_to_cstr(a, rt_view(bp2)));
+            k = k + 1;
+            j = j + 1;
+        }
+        if dr_exec(a, envp, cv, k, "cc") != 0 {
+            return DR_TOOL_FAIL;
+        }
+        return 0;
+    }
+}
+
+fn dr_copy_file(a: *mut Arena, from: cstr, to: cstr) -> i32 {
+    let fd: FileData = rt_read_file(a, from);
+    if !fd.ok {
+        return 1;
+    }
+    if rt_write_file(to, fd.data) != 0 {
+        return 1;
+    }
+    return 0;
+}
+
+fn dr_archive(a: *mut Arena, envp: **u8, obj: cstr, out: cstr) -> i32 {
+    unsafe {
+        let mut ar: cstr = rt_find_tool(a, envp, "llvm-ar");
+        if cstr_len(ar) == 0 {
+            ar = rt_find_tool(a, envp, "ar");
+        }
+        if cstr_len(ar) == 0 {
+            dr_errln("error: llvm-ar not found");
+            return DR_TOOL_FAIL;
+        }
+        let av: *mut *u8 = rt_argv(a, 4);
+        rt_arg_set(av, 0, ar);
+        rt_arg_set(av, 1, c"rcs");
+        rt_arg_set(av, 2, out);
+        rt_arg_set(av, 3, obj);
+        if dr_exec(a, envp, av, 4, "llvm-ar") != 0 {
+            return DR_TOOL_FAIL;
+        }
+        return 0;
+    }
+}
+
+// Assemble, optimize, lower, and then link (default), copy the object (`--emit
+// obj`), produce a shared object (`--emit shared`), or archive (`--emit
+// staticlib`).
+fn dr_build(a: *mut Arena, envp: **u8, ll: cstr, out: cstr, opt: i32,
+            o: *mut Opts, pic: bool) -> i32 {
+    unsafe {
+        let bc: cstr = rt_temp_path(a, ".bc");
+        let obj: cstr = rt_temp_path(a, ".o");
+        if dr_as(a, envp, ll, bc) != 0 {
+            return DR_TOOL_FAIL;
+        }
+        let mut use_bc: cstr = bc;
+        if opt > 0 {
+            let bc2: cstr = rt_temp_path(a, ".opt.bc");
+            if dr_opt_bc(a, envp, bc, bc2, opt) != 0 {
+                return DR_TOOL_FAIL;
+            }
+            use_bc = bc2;
+        }
+        if dr_llc(a, envp, use_bc, obj, opt, pic) != 0 {
+            return DR_TOOL_FAIL;
+        }
+        rt_unlink(ll);
+        if rt_cstr_eq((*o).emit, "obj") {
+            if dr_copy_file(a, obj, out) != 0 {
+                dr_errln("error: cannot write object file");
+                return 2;
+            }
+            rt_unlink(obj);
+            return 0;
+        }
+        if rt_cstr_eq((*o).emit, "staticlib") {
+            let rc: i32 = dr_archive(a, envp, obj, out);
+            rt_unlink(obj);
+            return rc;
+        }
+        let shared: bool = (*o).shared || rt_cstr_eq((*o).emit, "shared");
+        let rc2: i32 = dr_link(a, envp, obj, out, o, shared);
+        rt_unlink(obj);
+        return rc2;
+    }
+}
+
+fn dr_count_fns(prog: *mut Program) -> i32 {
+    unsafe {
+        let mut n: i32 = 0;
+        let mut it: *mut Item = (*prog).items;
+        while it != null {
+            if (*it).kind == I::Func {
+                n = n + 1;
+            }
+            it = (*it).next;
+        }
+        return n;
+    }
+}
+
+fn dr_entry_name(sem: *mut Sem) -> str {
+    if sem_find(sem, "_start") != null {
+        return "_start";
+    }
+    return "main";
+}
+
+fn dr_verify(a: *mut Arena, envp: **u8, ir: str) -> i32 {
+    unsafe {
+        let ll: cstr = rt_temp_path(a, ".verify.ll");
+        let bc: cstr = rt_temp_path(a, ".verify.bc");
+        if rt_write_file(ll, ir) != 0 {
+            dr_errln("error: cannot write temporary IR");
+            return DR_TOOL_FAIL;
+        }
+        let rc: i32 = dr_as(a, envp, ll, bc);
+        rt_unlink(ll);
+        rt_unlink(bc);
+        return rc;
+    }
+}
+
+// Run `bin` with the arguments after `--` and map the wait status the way the
+// Rust driver does: exit code, or 128 + signal.
+fn dr_run_program(a: *mut Arena, envp: **u8, bin: cstr, argv: **u8, argc: i32,
+                  pa_start: i32) -> i32 {
+    unsafe {
+        let mut n: i32 = 0;
+        if pa_start > 0 {
+            n = argc - pa_start;
+            if n < 0 {
+                n = 0;
+            }
+        }
+        let av: *mut *u8 = rt_argv(a, n + 1);
+        rt_arg_set(av, 0, bin);
+        let mut i: i32 = 0;
+        while i < n {
+            rt_arg_set(av, i + 1, *(argv + (pa_start + i) as usize) as cstr);
+            i = i + 1;
+        }
+        let st: i32 = rt_run_status(av, envp);
+        if st < 0 {
+            dr_errln("error: cannot run program");
+            return 2;
+        }
+        let sig: i32 = st & 127;
+        if sig != 0 {
+            return 128 + sig;
+        }
+        return (st >> 8) & 255;
+    }
+}
+
+fn dr_cmd_check(a: *mut Arena, envp: **u8, argv: **u8, argc: i32, o: *mut Opts) -> i32 {
+    unsafe {
+        let mut d: Diags = diags_new();
+        let mut srcs: SrcList = srcs_new();
+        let mut prog: Program = dr_load(a, (*o).file, &mut d, &mut srcs, o);
+        let sem: *mut Sem = sem_run(a, &mut d, &mut srcs, &mut prog);
+        if d.count > 0 {
+            dr_diags(a, &mut d, &mut srcs);
+            dr_report_count(a, &mut d);
+            return 1;
+        }
+        let mut b: Buf = rt_buf(a);
+        let bp: *mut Buf = &mut b;
+        rt_s(bp, "ok: ");
+        rt_i(bp, dr_count_fns(&mut prog) as i64);
+        rt_s(bp, " function(s), entry `");
+        rt_s(bp, dr_entry_name(sem));
+        rt_s(bp, "`\n");
+        dr_s(1, rt_view(bp));
+        return 0;
+    }
+}
+
+fn dr_cmd_emit_ir(a: *mut Arena, envp: **u8, argv: **u8, argc: i32, o: *mut Opts) -> i32 {
+    unsafe {
+        let mut d: Diags = diags_new();
+        let mut srcs: SrcList = srcs_new();
+        let mut prog: Program = dr_load(a, (*o).file, &mut d, &mut srcs, o);
+        let sem: *mut Sem = sem_run(a, &mut d, &mut srcs, &mut prog);
+        if d.count > 0 {
+            dr_diags(a, &mut d, &mut srcs);
+            dr_report_count(a, &mut d);
+            return 1;
+        }
+        let ir: str = cg_run(a, &mut d, &mut srcs, &mut prog, sem);
+        if d.count > 0 {
+            dr_diags(a, &mut d, &mut srcs);
+            dr_report_count(a, &mut d);
+            return 1;
+        }
+        if (*o).verify {
+            if dr_verify(a, envp, ir) != 0 {
+                dr_errln("error: IR verification failed");
+                return DR_TOOL_FAIL;
+            }
+            dr_errln("IR verified by llvm-as");
+        }
+        return dr_write_ir(a, ir, (*o).out);
+    }
+}
+
+fn dr_cmd_build(a: *mut Arena, envp: **u8, argv: **u8, argc: i32, o: *mut Opts) -> i32 {
+    unsafe {
+        let mut d: Diags = diags_new();
+        let mut srcs: SrcList = srcs_new();
+        let mut prog: Program = dr_load(a, (*o).file, &mut d, &mut srcs, o);
+        // Shared objects and archive members carry no entry point; executables
+        // and objects do. `--hosted` keeps the entry but leaves `_start` to the
+        // C runtime.
+        let is_lib: bool = rt_cstr_eq((*o).emit, "shared") || rt_cstr_eq((*o).emit, "staticlib");
+        let require_entry: bool = !is_lib;
+        let make_entry: bool = require_entry && !(*o).hosted;
+        let sem: *mut Sem = sem_run_ex(a, &mut d, &mut srcs, &mut prog, require_entry);
+        if d.count > 0 {
+            dr_diags(a, &mut d, &mut srcs);
+            dr_report_count(a, &mut d);
+            return 1;
+        }
+        let ir: str = cg_run_ex(a, &mut d, &mut srcs, &mut prog, sem, (*o).sanitize, (*o).hosted, make_entry);
+        if d.count > 0 {
+            dr_diags(a, &mut d, &mut srcs);
+            dr_report_count(a, &mut d);
+            return 1;
+        }
+        let mut out: cstr = (*o).out;
+        if cstr_len(out) == 0 {
+            out = dr_stem(a, (*o).file);
+        }
+        let ll: cstr = rt_temp_path(a, ".ll");
+        if rt_write_file(ll, ir) != 0 {
+            dr_errln("error: cannot write temporary IR");
+            return 2;
+        }
+        let rc: i32 = dr_build(a, envp, ll, out, (*o).opt, o, is_lib);
+        let mut rb: Buf = rt_buf(a);
+        let rbp: *mut Buf = &mut rb;
+        rt_s(rbp, "compiled ");
+        if dr_is_stdin((*o).file) {
+            rt_s(rbp, "<stdin>");
+        } else {
+            rt_cstr(rbp, (*o).file);
+        }
+        rt_s(rbp, " -> ");
+        rt_cstr(rbp, out);
+        rt_s(rbp, "\n");
+        dr_s(1, rt_view(rbp));
+        return 0;
+    }
+}
+
+fn dr_run_source(a: *mut Arena, envp: **u8, d: *mut Diags, srcs: *mut SrcList,
+                 prog: *mut Program, o: *mut Opts, argv: **u8, argc: i32,
+                 tag: str) -> i32 {
+    unsafe {
+        let sem: *mut Sem = sem_run(a, d, srcs, prog);
+        if (*d).count > 0 {
+            dr_diags(a, d, srcs);
+            dr_report_count(a, d);
+            return 1;
+        }
+        let ir: str = cg_run_ex(a, d, srcs, prog, sem, (*o).sanitize, (*o).hosted, !(*o).hosted);
+        if (*d).count > 0 {
+            dr_diags(a, d, srcs);
+            dr_report_count(a, d);
+            return 1;
+        }
+        let ll: cstr = rt_temp_path(a, ".run.ll");
+        if rt_write_file(ll, ir) != 0 {
+            dr_errln("error: cannot write temporary IR");
+            return 2;
+        }
+        let bin: cstr = rt_temp_path(a, ".run");
+        let rc: i32 = dr_build(a, envp, ll, bin, (*o).opt, o, false);
+        if rc != 0 {
+            return rc;
+        }
+        let code: i32 = dr_run_program(a, envp, bin, argv, argc, (*o).pa_start);
+        rt_unlink(bin);
+        return code;
+    }
+}
+
+fn dr_cmd_run(a: *mut Arena, envp: **u8, argv: **u8, argc: i32, o: *mut Opts) -> i32 {
+    unsafe {
+        let mut d: Diags = diags_new();
+        let mut srcs: SrcList = srcs_new();
+        let mut prog: Program = dr_load(a, (*o).file, &mut d, &mut srcs, o);
+        return dr_run_source(a, envp, &mut d, &mut srcs, &mut prog, o, argv, argc, "run");
+    }
+}
+
+fn dr_cmd_exec(a: *mut Arena, envp: **u8, argv: **u8, argc: i32, o: *mut Opts) -> i32 {
+    unsafe {
+        let mut d: Diags = diags_new();
+        let mut srcs: SrcList = srcs_new();
+        let mut prog: Program = prog_init();
+        if dr_is_stdin((*o).file) {
+            prog = dr_front_stdin(a, "<exec>", &mut d, &mut srcs);
+        } else {
+            let text: str = rt_cstr_str((*o).file as *u8);
+            prog = parse_program_text(a, &mut d, &mut srcs, "<exec>", text);
+        }
+        return dr_run_source(a, envp, &mut d, &mut srcs, &mut prog, o, argv, argc, "exec");
+    }
+}
+
+fn dr_cmd_test(a: *mut Arena, envp: **u8, argv: **u8, argc: i32, o: *mut Opts) -> i32 {
+    unsafe {
+        let mut d: Diags = diags_new();
+        let mut srcs: SrcList = srcs_new();
+        let mut prog: Program = dr_load(a, (*o).file, &mut d, &mut srcs, o);
+        let sem: *mut Sem = sem_run_tests(a, &mut d, &mut srcs, &mut prog);
+        if d.count > 0 {
+            dr_diags(a, &mut d, &mut srcs);
+            dr_report_count(a, &mut d);
+            return 1;
+        }
+        let ir: str = cg_run_tests(a, &mut d, &mut srcs, &mut prog, sem);
+        if d.count > 0 {
+            dr_diags(a, &mut d, &mut srcs);
+            dr_report_count(a, &mut d);
+            return 1;
+        }
+        let ll: cstr = rt_temp_path(a, ".test.ll");
+        if rt_write_file(ll, ir) != 0 {
+            dr_errln("error: cannot write temporary IR");
+            return 2;
+        }
+        let bin: cstr = rt_temp_path(a, ".test");
+        let rc: i32 = dr_build(a, envp, ll, bin, (*o).opt, o, false);
+        if rc != 0 {
+            return rc;
+        }
+        let code: i32 = dr_run_program(a, envp, bin, argv, argc, 0);
+        rt_unlink(bin);
+        return code;
+    }
+}
+
+fn dr_read_text(a: *mut Arena, f: cstr, name_out: *mut str, text_out: *mut str) -> i32 {
+    unsafe {
+        if dr_is_stdin(f) {
+            let fd: FileData = rt_read_stdin(a);
+            *name_out = "<stdin>";
+            *text_out = fd.data;
+            return 0;
+        }
+        let fd2: FileData = rt_read_file(a, f);
+        if !fd2.ok {
+            let mut b: Buf = rt_buf(a);
+            let bp: *mut Buf = &mut b;
+            rt_s(bp, "error: cannot read ");
+            rt_cstr(bp, f);
+            rt_s(bp, "\n");
+            dr_err(rt_view(bp));
+            return 2;
+        }
+        *name_out = rt_cstr_str(f as *u8);
+        *text_out = fd2.data;
+        return 0;
+    }
+}
+
+fn dr_cmd_fmt(a: *mut Arena, argv: **u8, argc: i32, o: *mut Opts) -> i32 {
+    unsafe {
+        let mut name: str = "";
+        let mut text: str = "";
+        let rc: i32 = dr_read_text(a, (*o).file, &mut name, &mut text);
+        if rc != 0 {
+            return rc;
+        }
+        let formatted: str = fmt_source(a, text);
+        if (*o).fmt_check {
+            if rt_eq(formatted, text) {
+                return 0;
+            }
+            let mut b: Buf = rt_buf(a);
+            let bp: *mut Buf = &mut b;
+            rt_s(bp, name);
+            rt_s(bp, ": not formatted\n");
+            dr_err(rt_view(bp));
+            return 1;
+        }
+        if (*o).write {
+            if dr_is_stdin((*o).file) {
+                dr_s(1, formatted);
+                return 0;
+            }
+            if rt_write_file((*o).file, formatted) != 0 {
+                dr_errln("error: cannot write file");
+                return 2;
+            }
+            return 0;
+        }
+        dr_s(1, formatted);
+        return 0;
+    }
+}
+
+fn dr_cmd_lint(a: *mut Arena, argv: **u8, argc: i32, o: *mut Opts) -> i32 {
+    unsafe {
+        let mut name: str = "";
+        let mut text: str = "";
+        let rc: i32 = dr_read_text(a, (*o).file, &mut name, &mut text);
+        if rc != 0 {
+            return rc;
+        }
+        let mut d: Diags = diags_new();
+        let mut srcs: SrcList = srcs_new();
+        let mut prog: Program = parse_program_text(a, &mut d, &mut srcs, name, text);
+        if d.count > 0 {
+            dr_diags(a, &mut d, &mut srcs);
+            dr_report_count(a, &mut d);
+            return 1;
+        }
+        lint_program(a, &mut d, &mut prog);
+        if d.count == 0 {
+            return 0;
+        }
+        dr_diags(a, &mut d, &mut srcs);
+        let n: i32 = d.count;
+        let mut b: Buf = rt_buf(a);
+        let bp: *mut Buf = &mut b;
+        rt_s(bp, "\n");
+        rt_i(bp, n as i64);
+        if n == 1 {
+            rt_s(bp, " warning generated\n");
+        } else {
+            rt_s(bp, " warnings generated\n");
+        }
+        dr_err(rt_view(bp));
+        if (*o).deny {
+            return 1;
+        }
+        return 0;
+    }
+}
+
+fn dr_cmd_doc(a: *mut Arena, argv: **u8, argc: i32, o: *mut Opts) -> i32 {
+    unsafe {
+        let mut name: str = "";
+        let mut text: str = "";
+        let rc: i32 = dr_read_text(a, (*o).file, &mut name, &mut text);
+        if rc != 0 {
+            return rc;
+        }
+        let mut d: Diags = diags_new();
+        let mut srcs: SrcList = srcs_new();
+        let mut prog: Program = parse_program_text(a, &mut d, &mut srcs, name, text);
+        if d.count > 0 {
+            dr_diags(a, &mut d, &mut srcs);
+            dr_report_count(a, &mut d);
+            return 1;
+        }
+        let md: str = doc_generate(a, name, text, &mut prog);
+        if cstr_len((*o).out) > 0 {
+            if rt_write_file((*o).out, md) != 0 {
+                dr_errln("error: cannot write output");
+                return 2;
+            }
+            return 0;
+        }
+        dr_s(1, md);
+        return 0;
+    }
+}
+
+fn dr_cmd_dump_tokens(a: *mut Arena, o: *mut Opts) -> i32 {
+    unsafe {
+        let mut name: str = "";
+        let mut text: str = "";
+        let rc: i32 = dr_read_text(a, (*o).file, &mut name, &mut text);
+        if rc != 0 {
+            return rc;
+        }
+        dr_s(1, dump_tokens(a, name, text));
+        return 0;
+    }
+}
+
+fn dr_cmd_dump_ast(a: *mut Arena, o: *mut Opts) -> i32 {
+    unsafe {
+        let mut d: Diags = diags_new();
+        let mut srcs: SrcList = srcs_new();
+        let mut prog: Program = dr_load(a, (*o).file, &mut d, &mut srcs, o);
+        if d.count > 0 {
+            dr_diags(a, &mut d, &mut srcs);
+            dr_report_count(a, &mut d);
+            return 1;
+        }
+        dr_s(1, dump_ast(a, &mut prog));
+        return 0;
+    }
+}
 
 fn main(argc: i32, argv: **u8, envp: **u8) -> i32 {
     unsafe {
         let mut arena: Arena = rt_arena(536870912);
         let a: *mut Arena = &mut arena;
-        if argc < 3 {
+        if argc < 2 {
             dr_usage();
             return 2;
         }
         let cmd: cstr = *(argv + 1) as cstr;
-        let file: cstr = *(argv + 2) as cstr;
-        let mut out: cstr = c"";
-        let mut opt: i32 = 0;
-        let mut check_only: bool = false;
-        let mut emit_only: bool = false;
-        let mut is_build: bool = false;
-        let mut cfg: *mut PathList = null;
-        let mut links: *mut PathList = null;
-        let mut libdirs: *mut PathList = null;
-        let mut libs: *mut PathList = null;
-        let mut hosted: bool = false;
-        let mut shared: bool = false;
-        let mut emit_obj: bool = false;
+        if rt_cstr_eq(cmd, "--help") || rt_cstr_eq(cmd, "-h") {
+            dr_usage();
+            return 0;
+        }
+        if rt_cstr_eq(cmd, "--version") || rt_cstr_eq(cmd, "-V") {
+            dr_outln("corexc 0.3.0 (LLVM 20 backend)");
+            return 0;
+        }
+        let mut o: Opts = opts_new(a, argc);
+        let mut rc: i32 = 0;
+        let mut known: bool = true;
         if rt_cstr_eq(cmd, "check") {
-            check_only = true;
+            rc = dr_parse(a, argv, argc, 2, false, false, false, false, false, false, false, &mut o);
+            if rc == 0 && !o.has_file {
+                dr_errln("error: no input file");
+                rc = 2;
+            }
+            if rc != 0 {
+                return rc;
+            }
+            if dr_missing(a, o.file) {
+                return 2;
+            }
+            return dr_cmd_check(a, envp, argv, argc, &mut o);
         } else if rt_cstr_eq(cmd, "emit-ir") {
-            emit_only = true;
+            rc = dr_parse(a, argv, argc, 2, false, false, true, false, false, false, false, &mut o);
+            if rc == 0 && !o.has_file {
+                dr_errln("error: no input file");
+                rc = 2;
+            }
+            if rc != 0 {
+                return rc;
+            }
+            if dr_missing(a, o.file) {
+                return 2;
+            }
+            return dr_cmd_emit_ir(a, envp, argv, argc, &mut o);
         } else if rt_cstr_eq(cmd, "build") {
-            is_build = true;
+            rc = dr_parse(a, argv, argc, 2, true, true, false, false, false, false, true, &mut o);
+            if rc == 0 && !o.has_file {
+                dr_errln("error: no input file");
+                rc = 2;
+            }
+            if rc != 0 {
+                return rc;
+            }
+            if dr_missing(a, o.file) {
+                return 2;
+            }
+            return dr_cmd_build(a, envp, argv, argc, &mut o);
+        } else if rt_cstr_eq(cmd, "run") {
+            rc = dr_parse(a, argv, argc, 2, false, true, false, true, false, false, true, &mut o);
+            if rc == 0 && !o.has_file {
+                dr_errln("error: no input file");
+                rc = 2;
+            }
+            if rc != 0 {
+                return rc;
+            }
+            if dr_missing(a, o.file) {
+                return 2;
+            }
+            return dr_cmd_run(a, envp, argv, argc, &mut o);
+        } else if rt_cstr_eq(cmd, "exec") {
+            rc = dr_parse(a, argv, argc, 2, false, true, false, true, false, false, true, &mut o);
+            if rc == 0 && !o.has_file {
+                dr_errln("error: `exec` needs source code, or `-` to read it from stdin");
+                rc = 2;
+            }
+            if rc != 0 {
+                return rc;
+            }
+            return dr_cmd_exec(a, envp, argv, argc, &mut o);
+        } else if rt_cstr_eq(cmd, "test") {
+            rc = dr_parse(a, argv, argc, 2, false, true, false, false, false, false, true, &mut o);
+            if rc == 0 && !o.has_file {
+                dr_errln("error: no input file");
+                rc = 2;
+            }
+            if rc != 0 {
+                return rc;
+            }
+            if dr_missing(a, o.file) {
+                return 2;
+            }
+            return dr_cmd_test(a, envp, argv, argc, &mut o);
+        } else if rt_cstr_eq(cmd, "fmt") {
+            rc = dr_parse(a, argv, argc, 2, false, false, false, false, true, false, false, &mut o);
+            if rc == 0 && !o.has_file {
+                dr_errln("error: `fmt` needs a file (or `-` for stdin)");
+                rc = 2;
+            }
+            if rc != 0 {
+                return rc;
+            }
+            return dr_cmd_fmt(a, argv, argc, &mut o);
+        } else if rt_cstr_eq(cmd, "lint") {
+            rc = dr_parse(a, argv, argc, 2, false, false, false, false, false, true, false, &mut o);
+            if rc == 0 && !o.has_file {
+                dr_errln("error: `lint` needs a file (or `-` for stdin)");
+                rc = 2;
+            }
+            if rc != 0 {
+                return rc;
+            }
+            return dr_cmd_lint(a, argv, argc, &mut o);
+        } else if rt_cstr_eq(cmd, "doc") {
+            rc = dr_parse(a, argv, argc, 2, true, false, false, false, false, false, false, &mut o);
+            if rc == 0 && !o.has_file {
+                dr_errln("error: `doc` needs a file (or `-` for stdin)");
+                rc = 2;
+            }
+            if rc != 0 {
+                return rc;
+            }
+            return dr_cmd_doc(a, argv, argc, &mut o);
+        } else if rt_cstr_eq(cmd, "dump-tokens") {
+            rc = dr_parse(a, argv, argc, 2, false, false, false, false, false, false, false, &mut o);
+            if rc == 0 && !o.has_file {
+                dr_errln("error: no input file");
+                rc = 2;
+            }
+            if rc != 0 {
+                return rc;
+            }
+            if dr_missing(a, o.file) {
+                return 2;
+            }
+            return dr_cmd_dump_tokens(a, &mut o);
+        } else if rt_cstr_eq(cmd, "dump-ast") {
+            rc = dr_parse(a, argv, argc, 2, false, false, false, false, false, false, true, &mut o);
+            if rc == 0 && !o.has_file {
+                dr_errln("error: no input file");
+                rc = 2;
+            }
+            if rc != 0 {
+                return rc;
+            }
+            if dr_missing(a, o.file) {
+                return 2;
+            }
+            return dr_cmd_dump_ast(a, &mut o);
+        } else if rt_cstr_eq(cmd, "repl") {
+            rc = dr_parse(a, argv, argc, 2, false, true, false, false, false, false, true, &mut o);
+            if rc != 0 {
+                return rc;
+            }
+            return repl_run(envp, o.opt);
         } else {
+            known = false;
+        }
+        if !known {
+            let mut b: Buf = rt_buf(a);
+            let bp: *mut Buf = &mut b;
+            rt_s(bp, "error: unknown command `");
+            rt_cstr(bp, cmd);
+            rt_s(bp, "`\n\n");
+            dr_err(rt_view(bp));
             dr_usage();
             return 2;
         }
-        let mut i: i32 = 3;
-        while i < argc {
-            let arg: cstr = *(argv + i as usize) as cstr;
-            if rt_cstr_eq(arg, "-o") {
-                if i + 1 >= argc {
-                    dr_errln("corexc: -o requires a path");
-                    return 2;
-                }
-                out = *(argv + (i + 1) as usize) as cstr;
-                i = i + 2;
-                continue;
-            }
-            if rt_cstr_eq(arg, "--cfg") {
-                if i + 1 >= argc {
-                    dr_errln("corexc: --cfg requires key=value");
-                    return 2;
-                }
-                let cv: cstr = *(argv + (i + 1) as usize) as cstr;
-                let pl: *mut PathList = rt_alloc(a, sizeof(PathList)) as *mut PathList;
-                (*pl).path = rt_cstr_str(cv as *u8);
-                (*pl).next = cfg;
-                cfg = pl;
-                i = i + 2;
-                continue;
-            }
-            if rt_cstr_eq(arg, "--link") || rt_cstr_eq(arg, "-L") || rt_cstr_eq(arg, "-l") {
-                if i + 1 >= argc {
-                    dr_errln("corexc: --link/-L/-l require a value");
-                    return 2;
-                }
-                let v: cstr = *(argv + (i + 1) as usize) as cstr;
-                let pl: *mut PathList = rt_alloc(a, sizeof(PathList)) as *mut PathList;
-                (*pl).path = rt_cstr_str(v as *u8);
-                (*pl).next = null;
-                if rt_cstr_eq(arg, "--link") {
-                    (*pl).next = links;
-                    links = pl;
-                } else if rt_cstr_eq(arg, "-L") {
-                    (*pl).next = libdirs;
-                    libdirs = pl;
-                } else {
-                    (*pl).next = libs;
-                    libs = pl;
-                }
-                i = i + 2;
-                continue;
-            }
-            if rt_cstr_eq(arg, "--hosted") {
-                hosted = true;
-                i = i + 1;
-                continue;
-            }
-            if rt_cstr_eq(arg, "--shared") {
-                shared = true;
-                i = i + 1;
-                continue;
-            }
-            if rt_cstr_eq(arg, "--emit") {
-                if i + 1 >= argc {
-                    dr_errln("corexc: --emit requires obj or shared");
-                    return 2;
-                }
-                let ev: cstr = *(argv + (i + 1) as usize) as cstr;
-                if rt_cstr_eq(ev, "obj") {
-                    emit_obj = true;
-                } else if rt_cstr_eq(ev, "shared") {
-                    shared = true;
-                } else {
-                    dr_errln("corexc: --emit expects obj or shared");
-                    return 2;
-                }
-                i = i + 2;
-                continue;
-            }
-            if rt_cstr_eq(arg, "--opt") {
-                if i + 1 >= argc {
-                    dr_errln("corexc: --opt requires a level");
-                    return 2;
-                }
-                let lv: cstr = *(argv + (i + 1) as usize) as cstr;
-                if rt_cstr_eq(lv, "0") { opt = 0; }
-                else if rt_cstr_eq(lv, "1") { opt = 1; }
-                else if rt_cstr_eq(lv, "2") { opt = 2; }
-                else if rt_cstr_eq(lv, "3") { opt = 3; }
-                else {
-                    dr_errln("corexc: --opt expects 0..3");
-                    return 2;
-                }
-                i = i + 2;
-                continue;
-            }
-            dr_errln("corexc: unknown option");
-            return 2;
-        }
-        let mut d: Diags = diags_new();
-        let mut srcs: SrcList = srcs_new();
-        let mut prog: Program = prog_init();
-        if path_ends_cx(file) {
-            prog = dr_front(a, file, &mut d, &mut srcs, cfg);
-        } else {
-            prog = dr_manifest(a, rt_cstr_str(file as *u8), &mut d, &mut srcs, cfg);
-        }
-        let require_entry: bool = !shared && !emit_obj;
-        let emit_entry: bool = !hosted && !shared && !emit_obj;
-        let sem: *mut Sem = sem_run(a, &mut d, &mut srcs, &mut prog, require_entry);
-        if d.count > 0 {
-            dr_diags(a, &mut d, &mut srcs);
-            return 1;
-        }
-        if check_only {
-            return 0;
-        }
-        let ir: str = cg_run(a, &mut d, &mut srcs, &mut prog, sem, emit_entry);
-        if d.count > 0 {
-            dr_diags(a, &mut d, &mut srcs);
-            return 1;
-        }
-        if emit_only {
-            return dr_write_ir(a, ir, out);
-        }
-        if !is_build {
-            return 0;
-        }
-        let ll: cstr = rt_temp_path(a, ".ll");
-        if rt_write_file(ll, ir) != 0 {
-            dr_errln("corexc: cannot write temporary IR");
-            return 1;
-        }
-        if cstr_len(out) == 0 {
-            if emit_obj {
-                out = c"a.o";
-            } else if shared {
-                out = c"liba.so";
-            } else {
-                out = c"a.out";
-            }
-        }
-        let mut opts: BuildOpts = BuildOpts {
-            links: links, libdirs: libdirs, libs: libs,
-            hosted: hosted, shared: shared, emit_obj: emit_obj };
-        let op: *mut BuildOpts = &mut opts;
-        return dr_build(a, envp, ll, out, opt, op);
+        return 2;
     }
 }

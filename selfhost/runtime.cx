@@ -172,6 +172,15 @@ fn rt_view(b: *mut Buf) -> str {
     }
 }
 
+// Copy a string into fresh arena storage. Use whenever a `str` outlives the
+// buffer it was taken from with `rt_view`.
+fn rt_copy(a: *mut Arena, s: str) -> str {
+    let mut b: Buf = rt_buf_cap(a, len(s) + 16);
+    let bp: *mut Buf = &mut b;
+    rt_s(bp, s);
+    return rt_view(bp);
+}
+
 fn rt_clear(b: *mut Buf) {
     unsafe {
         (*b).len = 0;
@@ -482,7 +491,7 @@ fn rt_arg_set(argv: *mut *u8, i: i32, value: cstr) {
     }
 }
 
-fn rt_run(argv: *mut *u8, envp: **u8) -> i32 {
+fn rt_run_status(argv: *mut *u8, envp: **u8) -> i32 {
     unsafe {
         let pid: i32 = syscall(57, 0, 0, 0, 0, 0, 0) as i32;
         if pid == 0 {
@@ -495,7 +504,42 @@ fn rt_run(argv: *mut *u8, envp: **u8) -> i32 {
         }
         let mut status: i32 = 0;
         let _ = syscall(61, pid as usize, (&mut status) as usize, 0, 0, 0, 0);
-        return (status >> 8) & 255;
+        return status;
+    }
+}
+
+fn rt_run(argv: *mut *u8, envp: **u8) -> i32 {
+    let st: i32 = rt_run_status(argv, envp);
+    return (st >> 8) & 255;
+}
+
+// Read all of stdin. The REPL and `-` file arguments both consume the whole
+// stream, matching the Rust driver's buffered stdin.
+fn rt_read_stdin(a: *mut Arena) -> FileData {
+    unsafe {
+        let mut b: Buf = rt_buf_cap(a, 65536);
+        let bp: *mut Buf = &mut b;
+        let chunk: *mut u8 = rt_alloc(a, 65536);
+        loop {
+            let r: isize = syscall(0, 0, chunk as usize, 65536 as usize, 0, 0, 0) as isize;
+            if r <= 0 {
+                break;
+            }
+            rt_s(bp, str_from_raw(chunk, r as usize));
+        }
+        return FileData { data: rt_view(bp), ok: true };
+    }
+}
+
+fn rt_mkdir(path: cstr, mode: i32) -> i32 {
+    unsafe {
+        return syscall(83, path as usize, mode as usize, 0, 0, 0, 0) as i32;
+    }
+}
+
+fn rt_rmdir(path: cstr) -> i32 {
+    unsafe {
+        return syscall(84, path as usize, 0, 0, 0, 0, 0) as i32;
     }
 }
 

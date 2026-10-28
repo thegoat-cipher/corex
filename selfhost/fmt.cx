@@ -1,0 +1,287 @@
+// Deterministic whitespace formatter, ported from `compiler/src/format.rs`.
+//
+// The formatter preserves line structure, comments, and string literals. It
+// normalizes indentation from brace nesting, collapses runs of spaces outside
+// literals and comments, and enforces the spacing conventions used by the
+// examples: four-space indentation, one space after commas, no space before
+// `,;)]`, and no space around `.` and `::`.
+//
+// It never reorders or reflows tokens, so formatting is semantics preserving
+// by construction and idempotent.
+
+const FMT_CODE: i32 = 0;
+const FMT_STR: i32 = 1;
+const FMT_CHAR: i32 = 2;
+const FMT_LINE: i32 = 3;
+const FMT_BLOCK: i32 = 4;
+
+fn fmt_last(b: *mut Buf) -> i32 {
+    unsafe {
+        if (*b).len == 0 {
+            return -1;
+        }
+        return *((*b).data + (*b).len - 1) as i32;
+    }
+}
+
+fn fmt_pop_spaces(b: *mut Buf) {
+    unsafe {
+        while (*b).len > 0 && *((*b).data + (*b).len - 1) == 32 {
+            (*b).len = (*b).len - 1;
+        }
+    }
+}
+
+fn fmt_ws(c: u8) -> bool {
+    return c == 32 || c == 9 || c == 13 || c == 10 || c == 11 || c == 12;
+}
+
+fn fmt_trim_end(s: str, start: usize, end: usize) -> usize {
+    let mut e: usize = end;
+    while e > start && fmt_ws(s[e - 1]) {
+        e = e - 1;
+    }
+    return e;
+}
+
+fn fmt_trim_start(s: str, start: usize, end: usize) -> usize {
+    let mut b: usize = start;
+    while b < end && fmt_ws(s[b]) {
+        b = b + 1;
+    }
+    return b;
+}
+
+// Net brace nesting change on a line, ignoring literals and comments.
+fn fmt_brace_delta(line: str, state: *mut i32) -> i32 {
+    let bytes: str = line;
+    let mut i: usize = 0;
+    let mut delta: i32 = 0;
+    let mut st: i32 = 0;
+    unsafe { st = *state; }
+    while i < len(bytes) {
+        let b: u8 = bytes[i];
+        if st == FMT_CODE {
+            if b == 34 {
+                st = FMT_STR;
+            } else if b == 39 {
+                st = FMT_CHAR;
+            } else if b == 47 && i + 1 < len(bytes) && bytes[i + 1] == 47 {
+                st = FMT_LINE;
+                break;
+            } else if b == 47 && i + 1 < len(bytes) && bytes[i + 1] == 42 {
+                st = FMT_BLOCK;
+                i = i + 1;
+            } else if b == 123 {
+                delta = delta + 1;
+            } else if b == 125 {
+                delta = delta - 1;
+            }
+        } else if st == FMT_STR {
+            if b == 92 {
+                i = i + 1;
+            } else if b == 34 {
+                st = FMT_CODE;
+            }
+        } else if st == FMT_CHAR {
+            if b == 92 {
+                i = i + 1;
+            } else if b == 39 {
+                st = FMT_CODE;
+            }
+        } else if st == FMT_LINE {
+            // Nothing to do: the line ends the comment.
+        } else if st == FMT_BLOCK {
+            if b == 42 && i + 1 < len(bytes) && bytes[i + 1] == 47 {
+                st = FMT_CODE;
+                i = i + 1;
+            }
+        }
+        i = i + 1;
+    }
+    if st == FMT_LINE {
+        st = FMT_CODE;
+    }
+    unsafe { *state = st; }
+    return delta;
+}
+
+// Collapse whitespace outside literals and remove space in the positions the
+// style guide forbids.
+fn fmt_normalize(a: *mut Arena, line: str) -> str {
+    unsafe {
+    let mut tmp: Buf = rt_buf(a);
+    let out: *mut Buf = &mut tmp;
+    let bytes: str = line;
+    let mut i: usize = 0;
+    let mut st: i32 = FMT_CODE;
+    while i < len(bytes) {
+        let b: u8 = bytes[i];
+        if st == FMT_CODE {
+            if b == 34 || b == 39 {
+                if b == 34 {
+                    st = FMT_STR;
+                } else {
+                    st = FMT_CHAR;
+                }
+                rt_b(out, b);
+            } else if b == 47 && i + 1 < len(bytes) && bytes[i + 1] == 47 {
+                rt_b(out, 47);
+                rt_b(out, 47);
+                let mut j: usize = i + 2;
+                while j < len(bytes) {
+                    rt_b(out, bytes[j]);
+                    j = j + 1;
+                }
+                break;
+            } else if b == 47 && i + 1 < len(bytes) && bytes[i + 1] == 42 {
+                rt_b(out, 47);
+                rt_b(out, 42);
+                i = i + 1;
+                st = FMT_BLOCK;
+            } else if b == 32 || b == 9 {
+                if fmt_last(out) != 32 && (*out).len != 0 {
+                    rt_b(out, 32);
+                }
+            } else if b == 44 {
+                fmt_pop_spaces(out);
+                rt_b(out, 44);
+                if i + 1 < len(bytes) && bytes[i + 1] != 32 && bytes[i + 1] != 41 {
+                    rt_b(out, 32);
+                }
+            } else if b == 59 || b == 41 || b == 93 || b == 125 {
+                fmt_pop_spaces(out);
+                rt_b(out, b);
+            } else if b == 46 {
+                fmt_pop_spaces(out);
+                rt_b(out, 46);
+                // Skip whitespace after `.` (but not `..`).
+                if i + 1 >= len(bytes) || bytes[i + 1] != 46 {
+                    while i + 1 < len(bytes) && (bytes[i + 1] == 32 || bytes[i + 1] == 9) {
+                        i = i + 1;
+                    }
+                }
+            } else if b == 58 && i + 1 < len(bytes) && bytes[i + 1] == 58 {
+                fmt_pop_spaces(out);
+                rt_b(out, 58);
+                rt_b(out, 58);
+                i = i + 1;
+                while i + 1 < len(bytes) && (bytes[i + 1] == 32 || bytes[i + 1] == 9) {
+                    i = i + 1;
+                }
+            } else if b == 40 || b == 91 {
+                rt_b(out, b);
+                while i + 1 < len(bytes) && (bytes[i + 1] == 32 || bytes[i + 1] == 9) {
+                    i = i + 1;
+                }
+            } else {
+                rt_b(out, b);
+            }
+        } else if st == FMT_STR || st == FMT_CHAR {
+            rt_b(out, b);
+            if b == 92 && i + 1 < len(bytes) {
+                rt_b(out, bytes[i + 1]);
+                i = i + 1;
+            } else if (st == FMT_STR && b == 34) || (st == FMT_CHAR && b == 39) {
+                st = FMT_CODE;
+            }
+        } else if st == FMT_LINE {
+            rt_b(out, b);
+        } else if st == FMT_BLOCK {
+            rt_b(out, b);
+            if b == 42 && i + 1 < len(bytes) && bytes[i + 1] == 47 {
+                rt_b(out, 47);
+                i = i + 1;
+                st = FMT_CODE;
+            }
+        }
+        i = i + 1;
+    }
+    fmt_pop_spaces(out);
+    return rt_view(out);
+
+    }}
+
+fn fmt_indent(out: *mut Buf, depth: i32, lead: i32) {
+    unsafe {
+    let mut level: i32 = depth - lead;
+    if level < 0 {
+        level = 0;
+    }
+    let mut i: i32 = 0;
+    while i < level * 4 {
+        rt_b(out, 32);
+        i = i + 1;
+    }
+
+    }}
+
+fn fmt_source(a: *mut Arena, src: str) -> str {
+    unsafe {
+    let mut o: Buf = rt_buf(a);
+    let out: *mut Buf = &mut o;
+    let mut depth: i32 = 0;
+    let mut state: i32 = FMT_CODE;
+    let mut last_blank: bool = true;
+    let n: usize = len(src);
+    let mut start: usize = 0;
+    let mut i: usize = 0;
+    loop {
+        let at_end: bool = i == n;
+        if at_end && start == i {
+            break;
+        }
+        if at_end || src[i] == 10 {
+            let e: usize = fmt_trim_end(src, start, i);
+            let b: usize = fmt_trim_start(src, start, e);
+            if b == e {
+                if !last_blank && (*out).len != 0 {
+                    rt_b(out, 10);
+                    last_blank = true;
+                }
+            } else {
+                let content: str = rt_slice(src, b, e);
+                let mut lead: i32 = 0;
+                if state == FMT_CODE {
+                    let mut k: usize = 0;
+                    while k < len(content) {
+                        if content[k] == 125 {
+                            lead = lead + 1;
+                            k = k + 1;
+                        } else {
+                            break;
+                        }
+                    }
+                }
+                fmt_indent(out, depth, lead);
+                rt_s(out, fmt_normalize(a, content));
+                depth = depth + fmt_brace_delta(content, &mut state);
+                if depth < 0 {
+                    depth = 0;
+                }
+                rt_b(out, 10);
+                last_blank = false;
+            }
+            start = i + 1;
+        }
+        if at_end {
+            break;
+        }
+        i = i + 1;
+    }
+    // Collapse a trailing run of blank lines to exactly one newline.
+    while (*out).len >= 2 {
+        let c1: u8 = *((*out).data + (*out).len - 1);
+        let c2: u8 = *((*out).data + (*out).len - 2);
+        if c1 == 10 && c2 == 10 {
+            (*out).len = (*out).len - 1;
+        } else {
+            break;
+        }
+    }
+    if (*out).len == 0 && n != 0 {
+        rt_b(out, 10);
+    }
+    return rt_view(out);
+
+    }}

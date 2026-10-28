@@ -1,0 +1,9 @@
+# Positive corpus cases whose bootstrap AST is intentionally a different shape
+# from the Rust oracle's AST. Tokens and normalized IR are still compared.
+#
+# - for_loops: the bootstrap parser lowers `for`/`do` and compound assignments
+#   to equivalent while/assignment nodes; the oracle keeps the sugar nodes.
+# - goto_labels: the bootstrap parser lowers `goto`/labels; the oracle keeps
+#   the dedicated label node in its statement histogram.
+for_loops
+goto_labels
