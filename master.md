@@ -44,6 +44,7 @@ and tested; P2 remains optional and not started.
 | P1: inline asm, macros, cfg, shared libraries, dlopen | COMPLETED | `tests/concurrency.rs`, `tests/modules.rs` |
 | P1: benchmarks | COMPLETED | `scripts/bench.sh`, `docs/benchmarks.md` |
 | Self-hosting P0 blockers (static aggregates, collections/builder, driver helpers, nested `vec`, `switch` divergence) | COMPLETED | `tests/aggregates.rs`, `tests/collections.rs`, `tests/driver_helpers.rs`; `docs/self-hosting.md` §1.1 |
+| Self-hosted bootstrap compiler | COMPLETED (functional subset) | `selfhost/`; Stage 2/3/4 `d270cd67…`; 241 checks; CLI 62; dumps 73; fuzz 326; gaps: SH-033/034/037/039 |
 
 Test totals: `cargo test` → **205 passed, 0 failed** (68 unit, 137 integration).
 
