@@ -2,14 +2,14 @@
 
 Date: 2026-10-28
 Compiler under test: integrated `selfhost/` after the P0–P3 audit fixes
-(473 functions, 15,214 lines).
+(474 functions, 15,228 lines).
 
 ## 1. Result summary
 
 | Gate | Result | Evidence |
 |---|---|---|
-| Stage 0 builds Stage 1 | PASS | Stage 1 `66d54c00…`; runs the corpus |
-| Stage 1 builds Stage 2 | PASS | Stage 2 `9c38d50d…` |
+| Stage 0 builds Stage 1 | PASS | Stage 1 `f4192f40…`; runs the corpus |
+| Stage 1 builds Stage 2 | PASS | Stage 2 `c33aff55…` |
 | Stage 2 builds Stage 3 | PASS | Stage 3 identical to Stage 2 |
 | Stage 3 builds Stage 4 | PASS | Stage 4 identical |
 | Stage 2/3 compile user programs | PASS | 249 checks per stage; outputs byte-identical |
@@ -48,7 +48,7 @@ miscompilation) recorded from the differential oracle.
 
 ## 3. Frontend and IR
 
-- `compiler/target/release/corex check selfhost/corexc.cx` → `ok: 473
+- `compiler/target/release/corex check selfhost/corexc.cx` → `ok: 474
   function(s), entry main`; the bootstrap compiler produces the same result.
 - Every build invokes `llvm-as`; malformed IR aborts the build and `build`
   exits nonzero (exit 3 for tool failures) without printing `compiled`.
@@ -71,10 +71,10 @@ cases assert E0226.
 ## 5. Bootstrap validation
 
 ```text
-stage1 66d54c00f4428390d5a056024a020c8ef668c8bcb0f0c9fd467bc1221754b4f3
-stage2 9c38d50db6043280b4db19fae20c056bb2defd9d2a9010c20f02aaebf30b5907
-stage3 9c38d50db6043280b4db19fae20c056bb2defd9d2a9010c20f02aaebf30b5907
-stage4 9c38d50db6043280b4db19fae20c056bb2defd9d2a9010c20f02aaebf30b5907
+stage1 f4192f40a4571bdfec5f4514bf035a1246486f80ad94fa54e2fedf79a17af884
+stage2 c33aff55ae3c74ab87358b4db50062a548fed238b7cae4cd9e7ac8f202eb5f78
+stage3 c33aff55ae3c74ab87358b4db50062a548fed238b7cae4cd9e7ac8f202eb5f78
+stage4 c33aff55ae3c74ab87358b4db50062a548fed238b7cae4cd9e7ac8f202eb5f78
 reproducible: stage2 == stage3 == stage4
 ```
 
@@ -85,12 +85,12 @@ Optimized levels are deterministic and self-reproducing:
 
 | Level | SHA-256 |
 |---|---|
-| `--opt 1` | `eb03c1bf2d3997bde772a13ec091f76305fc62acc1f6d99e90671d85ef1c2c44` |
-| `--opt 2` | `334f53c2a3e3eddbbef74da3eb236763a4bd5de0afa14216319b8b4600ec910f` |
-| `--opt 3` | `8695c4c4bf653427a61e9fe7a5235db8b8c887cd23fd2a30668b1edaa75aff7b` |
+| `--opt 1` | `0f6bd2355968070f61c4097e966effd36ba7953415b801cb71bcfc3a0a3db81d` |
+| `--opt 2` | `eda405ad9c109c673343d4885c9952ec475a48cb1ad1f4047a1cd4139b1a0981` |
+| `--opt 3` | `58067778faf2bfe10ca6ccc0b37523063e199a8558e0dabd681eeb98b629ed25` |
 
-The integrated performance table (712 ms best self-compile, 64–65 ms frontend,
-6.93–7.04 MB/s closure throughput, 94,532/20,612 KiB peak RSS) is recorded once
+The integrated performance table (708 ms best self-compile, 64 ms frontend,
+7.04 MB/s closure throughput, 94,008/21,184 KiB peak RSS) is recorded once
 in `bootstrap-results.md` §3.
 
 ## 6. Acceptance criteria

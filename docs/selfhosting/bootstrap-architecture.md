@@ -55,13 +55,13 @@ tests/selfhosting/run.sh (stage1, stage2, stage3)
 | `selfhost/ast.cx` | 365 | AST node kinds, tagged structs, declarations, items |
 | `selfhost/parser.cx` | 2,377 | Recursive descent, imports, types, statements, expressions, macros, cfg |
 | `selfhost/semantic.cx` | 2,915 | Symbols, types, layout, const eval, checks, return flow |
-| `selfhost/codegen.cx` | 3,535 | LLVM IR emission, ABI, runtime helpers, module assembly |
+| `selfhost/codegen.cx` | 3,549 | LLVM IR emission, ABI, runtime helpers, module assembly |
 | `selfhost/fmt.cx` | 287 | Whitespace formatter |
 | `selfhost/lint.cx` | 409 | Unused/unreachable/constant-condition lint |
 | `selfhost/doc.cx` | 394 | `///` documentation generator |
 | `selfhost/dump.cx` | 508 | Token/AST dumps for differential tests |
 | `selfhost/repl.cx` | 726 | Interactive session |
-| `selfhost/driver.cx` | 1,634 | CLI, IR writing, `llvm-as`/`opt`/`llc`/`cc` orchestration |
+| `selfhost/driver.cx` | 1,639 | CLI, IR writing, `llvm-as`/`opt`/`llc`/`cc` orchestration |
 
 `selfhost/corexc.cx` imports `types.cx` before `ast.cx`; type references to
 `Expr`/`Decl` are resolved after all declarations are collected. All files are

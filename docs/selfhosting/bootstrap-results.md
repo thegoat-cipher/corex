@@ -20,10 +20,10 @@ audit fixes).
 
 | Stage | SHA-256 | Size |
 |---|---|---:|
-| Stage 1 (Rust-built from CoreX source) | `66d54c00f4428390d5a056024a020c8ef668c8bcb0f0c9fd467bc1221754b4f3` | 489,048 bytes |
-| Stage 2 (Stage 1-built) | `9c38d50db6043280b4db19fae20c056bb2defd9d2a9010c20f02aaebf30b5907` | 547,944 bytes |
-| Stage 3 (Stage 2-built) | `9c38d50db6043280b4db19fae20c056bb2defd9d2a9010c20f02aaebf30b5907` | 547,944 bytes |
-| Stage 4 (Stage 3-built) | `9c38d50db6043280b4db19fae20c056bb2defd9d2a9010c20f02aaebf30b5907` | 547,944 bytes |
+| Stage 1 (Rust-built from CoreX source) | `f4192f40a4571bdfec5f4514bf035a1246486f80ad94fa54e2fedf79a17af884` | 489,088 bytes |
+| Stage 2 (Stage 1-built) | `c33aff55ae3c74ab87358b4db50062a548fed238b7cae4cd9e7ac8f202eb5f78` | 548,016 bytes |
+| Stage 3 (Stage 2-built) | `c33aff55ae3c74ab87358b4db50062a548fed238b7cae4cd9e7ac8f202eb5f78` | 548,016 bytes |
+| Stage 4 (Stage 3-built) | `c33aff55ae3c74ab87358b4db50062a548fed238b7cae4cd9e7ac8f202eb5f78` | 548,016 bytes |
 
 `stage2 == stage3 == stage4` byte-for-byte. Stage 1 differs because it is
 compiled by the Rust backend (Rust ABI/runtime helper spellings), while
@@ -57,13 +57,13 @@ the observed range across final runs is shown.
 
 | Metric | Observed |
 |---|---|
-| Compiler source closure | 15,214 lines, 472,424 bytes (`selfhost/*.cx`) |
-| Self-compile `build --opt 0` (best of 3) | **712 ms** (712–834 ms across final runs) |
-| Frontend `check` of the compiler source (best of 5) | **64–65 ms** |
-| Frontend corpus (37 files, 24,780 bytes) | 29 ms (0.81 MB/s) |
-| Frontend throughput (immutable closure) | **6.93–7.04 MB/s** |
-| Peak RSS, self-compile | 94,532 KiB (≈92.3 MiB) |
-| Peak RSS, frontend `check` | 20,612 KiB (≈20.1 MiB) |
+| Compiler source closure | 15,228 lines, 472,690 bytes (`selfhost/*.cx`) |
+| Self-compile `build --opt 0` (best of 3) | **708 ms** (repeated runs vary with host load) |
+| Frontend `check` of the compiler source (best of 5) | **64 ms** |
+| Frontend corpus (37 files, 24,780 bytes) | 32 ms (0.74 MB/s) |
+| Frontend throughput (immutable closure) | **7.04 MB/s** |
+| Peak RSS, self-compile | 94,008 KiB (≈91.8 MiB) |
+| Peak RSS, frontend `check` | 21,184 KiB (≈20.7 MiB) |
 
 `tests/selfhosting/perf.sh` applies only a 60 s smoke bound; the numbers above
 are observations, not a gate.
@@ -114,9 +114,9 @@ optimized compiler:
 
 | Level | SHA-256 | Size |
 |---|---|---:|
-| `--opt 1` | `eb03c1bf2d3997bde772a13ec091f76305fc62acc1f6d99e90671d85ef1c2c44` | 424,376 bytes |
-| `--opt 2` | `334f53c2a3e3eddbbef74da3eb236763a4bd5de0afa14216319b8b4600ec910f` | 472,080 bytes |
-| `--opt 3` | `8695c4c4bf653427a61e9fe7a5235db8b8c887cd23fd2a30668b1edaa75aff7b` | 875,920 bytes |
+| `--opt 1` | `0f6bd2355968070f61c4097e966effd36ba7953415b801cb71bcfc3a0a3db81d` | 424,416 bytes |
+| `--opt 2` | `eda405ad9c109c673343d4885c9952ec475a48cb1ad1f4047a1cd4139b1a0981` | 472,120 bytes |
+| `--opt 3` | `58067778faf2bfe10ca6ccc0b37523063e199a8558e0dabd681eeb98b629ed25` | 876,072 bytes |
 
 Hashes differ *across* levels by design; within each level,
 `repeat == self == fixed == stage1 oracle`.
@@ -138,7 +138,7 @@ bad stage or a failing gate. CI additionally exports `COREX_REQUIRE_ASAN=1`.
 
 - The compiler is freestanding: it uses Linux syscalls and external LLVM/cc
   tools at compile time.
-- The source is 15,214 lines across 14 files and 473 functions.
+- The source is 15,228 lines across 14 files and 474 functions.
 - Known gaps are listed in `master.md` §9, `bootstrap-architecture.md` §10, and
   `tasks.md`: threads/atomics/volatile/TLS/asm, LSP/editor parity, DWARF
   (`-g`), full 205-test parity, and `lib/corex` completion (13/16).

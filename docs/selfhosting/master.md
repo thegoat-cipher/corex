@@ -11,7 +11,7 @@ bootstrap.
 ## 2. Current stage
 
 **Stage 3 reproducibility verified (fixed point: Stage 2 == Stage 3 == Stage 4).**
-The integrated compiler is **473 functions / 15,214 lines** across 14
+The integrated compiler is **474 functions / 15,228 lines** across 14
 `selfhost/*.cx` files.
 
 | Stage | Compiler | Output | Status |
@@ -24,10 +24,10 @@ The integrated compiler is **473 functions / 15,214 lines** across 14
 Hashes (final integrated run, `--opt 0`):
 
 ```text
-stage1 66d54c00f4428390d5a056024a020c8ef668c8bcb0f0c9fd467bc1221754b4f3
-stage2 9c38d50db6043280b4db19fae20c056bb2defd9d2a9010c20f02aaebf30b5907
-stage3 9c38d50db6043280b4db19fae20c056bb2defd9d2a9010c20f02aaebf30b5907
-stage4 9c38d50db6043280b4db19fae20c056bb2defd9d2a9010c20f02aaebf30b5907
+stage1 f4192f40a4571bdfec5f4514bf035a1246486f80ad94fa54e2fedf79a17af884
+stage2 c33aff55ae3c74ab87358b4db50062a548fed238b7cae4cd9e7ac8f202eb5f78
+stage3 c33aff55ae3c74ab87358b4db50062a548fed238b7cae4cd9e7ac8f202eb5f78
+stage4 c33aff55ae3c74ab87358b4db50062a548fed238b7cae4cd9e7ac8f202eb5f78
 ```
 
 Stage 2/3/4 are byte-identical. Stage 1 is Rust-compiled and differs by design
@@ -116,7 +116,7 @@ Final observed gates (see `bootstrap-results.md` for hashes and the integrated
 performance table):
 
 ```text
-check: ok: 473 function(s), entry `main`
+check: ok: 474 function(s), entry `main`
 stage2 == stage3 == stage4
 selfhosting tests: 249 passed, 0 failed (Stage 1/2/3)
 cli tests: 80 passed, 0 failed

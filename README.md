@@ -255,11 +255,11 @@ Results and caveats: [`docs/benchmarks.md`](docs/benchmarks.md).
 ## Self-hosting
 
 A CoreX-written bootstrap compiler lives in `selfhost/`. It compiles its own
-source (15,214 lines across 14 files, 473 functions), emits LLVM 20 textual IR
+source (15,228 lines across 14 files, 474 functions), emits LLVM 20 textual IR
 through external `llvm-as`/`llc`/`cc`, and produces a freestanding static
 x86-64 ELF. Stage 1 is built by the Rust compiler; Stage 2 builds itself and
 Stage 3 rebuilds it. **Stage 2, Stage 3, and Stage 4 are byte-identical**
-(`sha256 9c38d50d…`) under `--opt 0` with LLVM 20.1.8 and cc 15.2.0.
+(`sha256 c33aff55…`) under `--opt 0` with LLVM 20.1.8 and cc 15.2.0.
 `selfhost/repro-opt.sh --corpus` verifies determinism and the self-fixed point
 at `--opt 1..3`.
 
@@ -320,7 +320,7 @@ compiler/
     stdlib.rs           allocator, memory/strings, files, formatting, time, math
     concurrency.rs      atomics, volatile, asm, threads, futex, TLS
     tooling.rs          fmt/lint/doc/test, DWARF, sanitizers, LSP
-selfhost/               CoreX-written bootstrap compiler (14 files, 15,214 lines)
+selfhost/               CoreX-written bootstrap compiler (14 files, 15,228 lines)
 tests/selfhosting/      bootstrap corpus and differential harness
 lib/corex/              freestanding standard library modules
 examples/               hello, factorial, pointers, loop_sum, features, compiler_data,

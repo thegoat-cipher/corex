@@ -3,7 +3,7 @@
 Last updated: 2026-10-28. Statuses: NOT STARTED, IN PROGRESS, BLOCKED,
 COMPLETED. A task is only COMPLETED with the evidence named in the row.
 
-Final integrated compiler: **473 functions**, **15,214 lines** across 14
+Final integrated compiler: **474 functions**, **15,228 lines** across 14
 `selfhost/*.cx` files. `selfhost/bootstrap.sh` builds Stage 1–4, runs the
 behavioural corpus (249 checks per stage), CLI parity (80), differential dumps
 (75), fuzzing/ASan (327), and the performance baseline; `selfhost/repro-opt.sh
@@ -20,9 +20,9 @@ behavioural corpus (249 checks per stage), CLI parity (80), differential dumps
 | SH-007 | Types and semantic analysis | COMPLETED | `types.cx`, `semantic.cx` |
 | SH-008 | LLVM IR backend/ABI | COMPLETED | `codegen.cx` |
 | SH-009 | Driver/CLI/linking | COMPLETED | `driver.cx` |
-| SH-010 | Build Stage 1 with Rust Stage 0 | COMPLETED | Stage 1 `66d54c00…` |
-| SH-011 | Build Stage 2 with Stage 1 | COMPLETED | Stage 2 `9c38d50d…` |
-| SH-012 | Build Stage 3 with Stage 2 | COMPLETED | Stage 3 `9c38d50d…` |
+| SH-010 | Build Stage 1 with Rust Stage 0 | COMPLETED | Stage 1 `f4192f40…` |
+| SH-011 | Build Stage 2 with Stage 1 | COMPLETED | Stage 2 `c33aff55…` |
+| SH-012 | Build Stage 3 with Stage 2 | COMPLETED | Stage 3 `c33aff55…` |
 | SH-013 | Compare Stage 2/3 and 3/4 | COMPLETED | `stage2 == stage3 == stage4` |
 | SH-014 | Differential/negative/native/opt tests | COMPLETED | `tests/selfhosting/`; 249 per stage |
 | SH-015 | Documentation and CI | COMPLETED | `docs/selfhosting/`; `.github/workflows/ci.yml` |
@@ -52,7 +52,7 @@ behavioural corpus (249 checks per stage), CLI parity (80), differential dumps
 | SH-039 | Full Rust behavior suite against `corexc` | BLOCKED | Suite not ported; depends on SH-033, LSP/tooling, and remaining attribute/ABI gaps |
 | SH-040 | Memory validation and fuzzing | COMPLETED | 327/327 ASan/fuzz; ASan required in CI; no signals |
 | SH-041 | Performance baseline | COMPLETED | Integrated table in `bootstrap-results.md` §3 (self-compile and frontend/RSS) |
-| SH-042 | Reproducibility at `--opt 1..3` | COMPLETED | `repro-opt.sh`; opt1 `eb03c1bf…`, opt2 `334f53c2…`, opt3 `8695c4c4…` |
+| SH-042 | Reproducibility at `--opt 1..3` | COMPLETED | `repro-opt.sh`; opt1 `0f6bd235…`, opt2 `eda405ad…`, opt3 `58067778…` |
 | SH-043 | Commit/push and remote CI validation | NOT STARTED | Local commits only; remote push/CI not run |
 | SH-044 | Bootstrap code cleanup/review | BLOCKED | P3 cleanup commits conflict with the larger integrated language branches; non-functional and not merged. See `worklogs/p3.md` |
 | SH-045 | Documentation maintenance | COMPLETED | P0/P1/P2/P3 worklogs; this tracker, `master.md`, results/validation |
@@ -61,18 +61,18 @@ behavioural corpus (249 checks per stage), CLI parity (80), differential dumps
 ## Final gate evidence
 
 ```text
-compiler/target/release/corex check selfhost/corexc.cx -> ok: 473 function(s), entry `main`
-stage1 66d54c00f4428390d5a056024a020c8ef668c8bcb0f0c9fd467bc1221754b4f3
-stage2 9c38d50db6043280b4db19fae20c056bb2defd9d2a9010c20f02aaebf30b5907
-stage3 9c38d50db6043280b4db19fae20c056bb2defd9d2a9010c20f02aaebf30b5907
-stage4 9c38d50db6043280b4db19fae20c056bb2defd9d2a9010c20f02aaebf30b5907
+compiler/target/release/corex check selfhost/corexc.cx -> ok: 474 function(s), entry `main`
+stage1 f4192f40a4571bdfec5f4514bf035a1246486f80ad94fa54e2fedf79a17af884
+stage2 c33aff55ae3c74ab87358b4db50062a548fed238b7cae4cd9e7ac8f202eb5f78
+stage3 c33aff55ae3c74ab87358b4db50062a548fed238b7cae4cd9e7ac8f202eb5f78
+stage4 c33aff55ae3c74ab87358b4db50062a548fed238b7cae4cd9e7ac8f202eb5f78
 reproducible: stage2 == stage3 == stage4
 selfhosting tests: 249 passed, 0 failed (Stage 1/2/3)
 cli tests: 80 passed, 0 failed
 dump tests: 75 passed, 0 failed
 fuzz tests: 327 passed, 0 failed
 cargo test: 205 passed, 0 failed
-repro-opt: opt1 eb03c1bf…, opt2 334f53c2…, opt3 8695c4c4…
+repro-opt: opt1 0f6bd235…, opt2 eda405ad…, opt3 58067778…
 examples: 8/8 match the oracle
 lib/corex: 13/16 build (SH-033 blocks std_sync, std_tls, std_thread)
 ```
