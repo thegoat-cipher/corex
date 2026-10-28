@@ -123,7 +123,7 @@ there is no long-lived leak surface.
 ## 9. Verification evidence
 
 - `selfhost/bootstrap.sh`: Stage 2 == Stage 3 == Stage 4; three corpus runs.
-- 79 tests per compiler stage, 237 total; all pass.
+- 241 checks per compiler stage, 723 total on Stage 1/2/3; all pass.
 - Arena stress: 128 × 32-byte blocks, patterns verified, `used = 4096`.
 - Struct-size parity between Rust Stage 0 and Stage 1 binaries.
 - Static ELF, no libc (`ldd` reports "not a dynamic executable").

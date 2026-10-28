@@ -25,7 +25,12 @@ command. Timestamps are UTC on the working date.
 | REQ-SH-016 | 2026-10-28T18:05Z | Add slice support (`[T]`, `&array`, ranges, slice params/returns, `[u8]` print) and re-verify the fixed point | User "make another agent for the next steps" | Agent 12 (Bootstrap subset) | SH-016 | ADR-SH-012; Stage 2/3/4 `ff6677ca…`; 49 tests × Stage 1/2/3; Rust suite 205 |
 | REQ-SH-017 | 2026-10-28T18:40Z | Fix the remaining slice-related limitations: runtime element bounds checks and spec §3.3 `str`/`[u8]` compatibility | User "help to fix any limitations" | Agent 12 (Bootstrap subset) | SH-017 | ADR-SH-013; Stage 2/3/4 `c417b392…`; 62 tests × Stage 1/2/3; Rust suite 205 |
 | REQ-SH-018 | 2026-10-28T19:05Z | Implement the next milestone: `vec<T>` (`vec_new`/`vec_push`/`vec_free`/`vec_slice`, indexing, `len`) and re-verify the fixed point | User "next milestone" | Agent 12 (Bootstrap subset) | SH-018 | ADR-SH-014; Stage 2/3/4 `644c22c5…`; 79 tests × Stage 1/2/3; Rust suite 205 |
+| REQ-SH-019 | 2026-10-28 | Integrate P0–P3 workstreams and verify the final gates | User "make agents to handle each section" | Master orchestrator | SH-019…045 | Stage 2/3/4 `d270cd67…`; 241 checks × Stage 1/2/3; CLI 62; dumps 73; fuzz 326; `cargo test` 205; `repro-opt` opt1 `a5a09716…`, opt2 `e076f652…`, opt3 `76445b56…` |
+| REQ-SH-020 | 2026-10-28 | Spawn a master auditor for all P0–P3 claims | User "create a master auditor to audit all P0-P3" | Master orchestrator | SH-046 | Independent audit worktree; report in `worklogs/master-audit.md` |
 
 ## Open items
 
-None blocking. Non-blocking follow-ups are recorded in `master.md` §7.
+Outstanding after integration: SH-033 (threads/atomics/volatile/TLS/asm),
+SH-034 (`lib/corex` blocked), SH-037 (LSP/editor), SH-039 (full 205-test port),
+SH-043 (remote push/CI), SH-044 (P3 cleanup not merged), SH-046 (full
+acceptance). Details and evidence are in `tasks.md`.

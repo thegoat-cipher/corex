@@ -11,6 +11,8 @@ bootstrap.
 ## 2. Current stage
 
 **Stage 3 reproducibility verified (fixed point: Stage 2 == Stage 3 == Stage 4).**
+The integrated compiler is **469 functions / 15,065 lines** across 14
+`selfhost/*.cx` files.
 
 | Stage | Compiler | Output | Status |
 |---|---|---|---|
@@ -19,17 +21,17 @@ bootstrap.
 | 2 | Stage 1 | `build/stage3/corexc` | COMPLETED |
 | 3 | Stage 2 | `build/stage4/corexc` | COMPLETED |
 
-Hashes (final run, `--opt 0`):
+Hashes (final integrated run, `--opt 0`):
 
 ```text
-stage1 7b2f8837093d0dd5b6a4e4bce01c2e5dce2d908b7dfdd843fd6e2354df989601
-stage2 644c22c5bd3772b8a71365798731c52387b7c9349385030b62a573489244c7a8
-stage3 644c22c5bd3772b8a71365798731c52387b7c9349385030b62a573489244c7a8
-stage4 644c22c5bd3772b8a71365798731c52387b7c9349385030b62a573489244c7a8
+stage1 ccffc9721da61cd5cf880a1616e01f7c762fba53939e7618c29b299321447032
+stage2 d270cd6707df85fd01f5c2cb746e76900f1b5f6a9aaa64c5c667286a15711e20
+stage3 d270cd6707df85fd01f5c2cb746e76900f1b5f6a9aaa64c5c667286a15711e20
+stage4 d270cd6707df85fd01f5c2cb746e76900f1b5f6a9aaa64c5c667286a15711e20
 ```
 
 Stage 2/3/4 are byte-identical. Stage 1 is Rust-compiled and differs by design
-(backend/ABI), but passes the same behavioral corpus.
+(backend/ABI), but passes the same 241-check behavioural corpus.
 
 ## 3. Completed milestones
 
@@ -38,68 +40,104 @@ Stage 2/3/4 are byte-identical. Stage 1 is Rust-compiled and differs by design
   fork/exec/wait.
 - Lexer, AST, parser, type model, semantic analysis, LLVM IR backend, driver.
 - Stage 1, Stage 2, Stage 3, Stage 4 builds.
-- Reproducibility gate: Stage 2 == Stage 3 == Stage 4.
-- Behavioral corpus: 79 tests per stage (16 positive × 4 opt levels + 15
-  negative), passed by Stage 1, Stage 2, and Stage 3.
-- Slice support in the bootstrap subset: `[T]` values, `&array`/`&mut array`
-  coercion, params/returns/locals/struct fields, indexing, range slicing on
-  arrays/slices/`str`, `len`, `data_ptr`, `[u8]` print.
-- Runtime bounds checks for element indexing and slice ranges (exit 101),
-  frontend rejection of constant out-of-range array indices, and spec §3.3
-  `str` ↔ `[u8]` compatibility.
-- `vec<T>` support: `vec_new`, `vec_push`, `vec_free`, `vec_slice`, `len`,
-  checked indexing, struct/slice/str/nested elements, params/returns/fields,
-  arrays of vecs, shallow header copies.
-- CI step for self-hosting.
+- Reproducibility gate: Stage 2 == Stage 3 == Stage 4 at `--opt 0`.
+- Behavioural corpus: 241 checks per stage on Stage 1/2/3.
+- Slices and `vec<T>`: bounds checks, range slicing, `str`/`[u8]` compatibility,
+  shallow headers, nested/slice/str elements.
+- Floats: `f32`/`f64` literals, arithmetic, comparisons, casts, ABI, six-digit
+  `print`, special values.
+- Checked division/remainder (zero and `MIN/-1` abort 101).
+- Static aggregate/global initializers, `str_to_cstr`, `read_file`,
+  `write_file`.
+- Diagnostics with stable codes, parser recovery, malformed-input robustness.
+- Function types/pointers, indirect calls, struct fields and dispatch tables.
+- `for`/`do while`/labels/`goto`, union/bitfield/FAM/packed/`align(N)` layout.
+- File modules, mangling, `corex.toml`, `#[cfg]`, visibility, macros.
+- C `extern`, variadics, `--hosted`, shared/static libraries, `--emit obj`.
+- CLI parity: `run`, `exec`, `fmt`, `lint`, `doc`, `test`, `repl`, stdin,
+  `emit-ir --verify`, emit/link flags (`-g` rejected: no DWARF).
+- Differential token/AST/IR dumps with a Rust oracle; known IR ABI divergences
+  recorded in `tests/selfhosting/dump-ir-expected.txt`.
+- Fuzzing/ASan: 326 checks, no signals or sanitizer reports.
+- Performance baseline: 496 ms self-compile, 10.08 MB/s frontend.
+- Optimized reproducibility gate: `repro-opt.sh --corpus` passes at `--opt 1..3`.
+- CI updated for the integrated gates.
 
 ## 4. Active tasks
 
-None. See `tasks.md`; SH-001…SH-018 are COMPLETED.
+See `tasks.md`. Outstanding: **SH-033** (threads/atomics/volatile/TLS/asm),
+**SH-034** (`lib/corex` blocked), **SH-037** (LSP/editor), **SH-039** (full Rust
+suite against `corexc`), **SH-043** (remote push/CI), **SH-044** (P3 cleanup not
+merged), **SH-046** (full acceptance).
 
 ## 5. Blockers
 
-None.
+- SH-033: no `volatile`, atomic intrinsics, thread/TLS grammar, or inline asm in
+  the bootstrap; this blocks `std_sync`, `std_tls`, `std_thread`, and the
+  concurrency portion of the 205-test port.
+- SH-034: 10/16 `lib/corex` modules built at P1 time; floats are now integrated,
+  but SH-033 and remaining attribute/tooling gaps remain.
+- SH-037: LSP/line-editor parity is not ported.
+- SH-039: full behavioural-suite harvest requires SH-033 and remaining tooling.
+- SH-043: commits are local; remote CI has not run.
+- SH-044: P3 cleanup commits conflict with the much larger integrated branches;
+  they are non-functional and were not merged.
+- SH-046: AC-1…AC-9 cannot complete until the above are resolved.
 
 ## 6. Architectural decisions
 
-See `ADRs.md` (ADR-SH-001…014). Key choices: single unit via `import`, subset
-compiler instead of language changes, process-lifetime arena, textual LLVM IR,
-first-class aggregate ABI, explicit else blocks, masked shifts, no `Expr.index`
-reuse, str-compatible slices with runtime bounds checks, 24-byte `vec<T>` with
-spec growth and checked indexing, Stage2/3/4 hash equality, Rust Stage 0
-unchanged.
+See `ADRs.md` (ADR-SH-001…). Key choices: single textual translation unit via
+`import`, subset compiler instead of language changes, process-lifetime arena,
+textual LLVM IR, first-class aggregate ABI, explicit else blocks, masked
+shifts, no `Expr.index` reuse, str-compatible slices with runtime bounds checks,
+24-byte `vec<T>` with spec growth and checked indexing, Stage2/3/4 hash
+equality, Rust Stage 0 unchanged. The integrated compiler also uses separate
+AST fields for struct-literal names (`Expr.sfield`) versus member access
+(`Expr.field`) and a whole-program module build (visibility enforced in
+semantic analysis rather than by generated interface files).
 
 ## 7. Validation
 
-- `selfhost/bootstrap.sh` → Stage 1–4 built; hashes checked; corpus run.
-- `tests/selfhosting/run.sh <compiler>` → 79 passed for each stage.
-- `cargo test` in `compiler/` → 205 passed (reference suite unchanged).
-- `file build/stage2/corexc` → static ELF x86-64; `ldd` → not dynamic.
-- Explicit `emit-ir` + `llvm-as` → valid module.
-- Struct sizes match between Rust-built and self-built binaries (17 structs).
+```sh
+selfhost/bootstrap.sh                  # Stage 1-4, corpus, CLI, dumps, fuzz, perf
+selfhost/repro-opt.sh --corpus         # --opt 1..3 determinism/fixed point
+(cd compiler && cargo test)            # Rust reference suite 205/205
+```
+
+Final observed gates:
+
+```text
+check: ok: 469 function(s), entry `main`
+stage2 == stage3 == stage4 (d270cd67…)
+selfhosting tests: 241 passed, 0 failed (Stage 1/2/3)
+cli tests: 62 passed, 0 failed
+dump tests: 73 passed, 0 failed
+fuzz tests: 326 passed, 0 failed
+cargo test: 205 passed, 0 failed
+repro-opt: opt1 a5a09716…, opt2 e076f652…, opt3 76445b56…
+```
+
+`file build/stage2/corexc` → static ELF x86-64; `ldd` → not a dynamic
+executable.
 
 ## 8. Next implementation priorities
 
-The complete remaining list is `tasks.md` — Remaining Backlog (SH-019…SH-046).
-Order:
-
-1. **SH-019…SH-021:** `f32`/`f64` types, arithmetic/casts/ABI, and `print`.
-2. **SH-022…SH-024:** division/remainder aborts, static aggregate globals,
-   `str_to_cstr`/`read_file`/`write_file`.
-3. **SH-025, SH-038, SH-039:** diagnostics/fuzz parity, differential
-   token/AST/IR dumps, and the full 205-test behavior suite against `corexc`.
-4. **SH-030…SH-034:** modules/`corex.toml`, macros/cfg, C ABI/hosted,
-   threads/atomics/TLS/asm, then build `lib/corex`.
-5. **SH-035…SH-037, SH-040…SH-046:** CLI/tooling parity, debug/sanitizers,
-   memory fuzzing, performance, remote CI, and the final AC-1…AC-9 gates.
-
-`compiler/` remains the full-language Stage 0 oracle; do not delete it.
+1. **SH-033:** parser -> semantic builtins -> codegen for volatile, atomics,
+   TLS, threads, inline asm; port `tests/concurrency.rs`.
+2. **SH-034:** rebuild all 16 `lib/corex` modules and close the remaining gaps.
+3. **SH-039:** parameterize/harvest the 205 Rust tests against `corexc`.
+4. **SH-037:** LSP/editor and remaining tooling.
+5. **SH-043/046:** push, run remote CI, record final AC-1…AC-9 evidence.
+6. **SH-044:** redo the cleanup on the integrated tree if desired; it is
+   non-functional.
 
 ## 9. Known limits
 
-The bootstrap subset excludes floats, modules, function pointers, unions,
-bitfields, threads/TLS, inline asm, C `extern`, macros, `for`, `do while`,
-labels/goto. Slices and `vec<T>` are supported; element indexing and slice
-ranges are bounds-checked at runtime (exit 101). Vec constants and globals are
-rejected, and vec headers copy shallowly.
-See `bootstrap-architecture.md` §4 and `memory-audit.md` §5.
+Still absent from the bootstrap: threads, atomics, `volatile`, TLS, inline asm,
+LSP/line-editor parity, DWARF (`-g`), and full Rust-suite parity. Module builds
+are whole-program (no separate interface files). Aggregate/bool calling
+conventions differ from the Rust compiler, so objects from the two compilers are
+not link-compatible for aggregate parameters. Vec constants/globals are
+rejected; vec headers copy shallowly. REPL prints no prompts. See
+`bootstrap-architecture.md` §4`, `memory-audit.md` §5, and the worklogs for
+details.

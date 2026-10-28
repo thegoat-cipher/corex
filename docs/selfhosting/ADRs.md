@@ -386,5 +386,5 @@ capacity, not an element.
 
 **Consequences.** `vec<T>` works for scalar, struct, slice, `str`, and nested
 `vec` elements; vecs are locals, parameters, returns, struct fields, and array
-elements. The fixed point moves to Stage 2/3/4 `644c22c5…` (Stage 1 `7b2f8837…`).
+elements. The fixed point moves to Stage 2/3/4 `d270cd67…` (Stage 1 `ccffc972…`).
 Ownership stays manual and copies stay shallow, as specified.

@@ -176,7 +176,9 @@ and `cc`; it removes its temporary `.ll`, `.bc`, and `.o` files on success.
 3. Stage 2 builds Stage 3.
 4. `sha256(stage2) == sha256(stage3)` and `sha256(stage3) == sha256(stage4)`.
 5. `tests/selfhosting/run.sh` passes against Stage 1, Stage 2, and Stage 3
-   (79 tests: 16 positive cases × `--opt 0..3` + 15 negative cases).
+   (241 checks: positive cases at `--opt 0..3`, negative cases, module
+   projects, FFI, and abort cases). `cli.sh`, `dump.sh`, and `fuzz.sh` add
+   CLI, differential, and sanitizer coverage.
 6. Every `build` in the harness is implicitly validated by `llvm-as`; the
    harness runs each case at `--opt 0,1,2,3`.
 7. Negative cases are rejected with a diagnostic.
@@ -190,7 +192,10 @@ and `cc`; it removes its temporary `.ll`, `.bc`, and `.o` files on success.
   source itself relies on valid indices.
 - `vec` constants and globals are rejected (`vec_new` needs a runtime call);
   vec headers copy shallowly and ownership is manual, per the language spec.
-- No floating point, modules, function pointers, or C ABI in the bootstrap.
+- Threads, atomics, `volatile`, TLS, and inline asm are not implemented
+  (SH-033); LSP/line-editor parity and DWARF (`-g`) are also absent.
+- Modules are built as one whole program; visibility is enforced in semantic
+  analysis rather than through generated interface files.
 - The compiler is single-threaded and allocates from one arena per process.
 - Stage 0 (Rust) remains the oracle and the tool used for development tests;
   it is not replaced.
