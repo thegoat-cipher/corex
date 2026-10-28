@@ -1,0 +1,720 @@
+// Interactive REPL, following `compiler/src/repl.rs` behaviour for the parts
+// the bootstrap subset can support.
+//
+// The session keeps the source text of each top-level item the user submitted;
+// redefining an item replaces the old text. A submission is parsed as items
+// first; failing that it is wrapped as `fn main() -> i32 { <chunk> return 0; }`
+// (and as `print(<chunk>)` when it has no trailing semicolon) so single
+// expressions and statements run directly.
+//
+// Input rules: a blank line submits the accumulated block; `:command` lines are
+// handled only when no block is pending; EOF submits any pending block.
+
+struct RItem {
+    key: str,
+    text: str,
+    next: *mut RItem,
+}
+
+struct Session {
+    a: *mut Arena,
+    envp: **u8,
+    head: *mut RItem,
+    tail: *mut RItem,
+    opt: i32,
+}
+
+fn rs_new(a: *mut Arena, envp: **u8, opt: i32) -> Session {
+    return Session { a: a, envp: envp, head: null, tail: null, opt: opt };
+}
+
+fn rs_upsert(s: *mut Session, key: str, text: str) {
+    unsafe {
+        let mut it: *mut RItem = (*s).head;
+        while it != null {
+            if rt_eq((*it).key, key) {
+                (*it).text = text;
+                return;
+            }
+            it = (*it).next;
+        }
+        let n: *mut RItem = rt_alloc((*s).a, sizeof(RItem)) as *mut RItem;
+        (*n).key = rt_copy((*s).a, key);
+        (*n).text = rt_copy((*s).a, text);
+        (*n).next = null;
+        if (*s).tail == null {
+            (*s).head = n;
+        } else {
+            (*(*s).tail).next = n;
+        }
+        (*s).tail = n;
+    }
+}
+
+fn rs_clear(s: *mut Session) {
+    unsafe {
+        (*s).head = null;
+        (*s).tail = null;
+    }
+}
+
+fn rs_combined(s: *mut Session) -> str {
+    unsafe {
+        let mut b: Buf = rt_buf((*s).a);
+        let bp: *mut Buf = &mut b;
+        let mut it: *mut RItem = (*s).head;
+        let mut first: bool = true;
+        while it != null {
+            if !first {
+                rt_s(bp, "\n\n");
+            }
+            rt_s(bp, (*it).text);
+            first = false;
+            it = (*it).next;
+        }
+        return rt_view(bp);
+    }
+}
+
+// Session text without a stored entry point; the candidate supplies its own.
+fn rs_text_with(s: *mut Session, candidate: str) -> str {
+    unsafe {
+        let mut b: Buf = rt_buf((*s).a);
+        let bp: *mut Buf = &mut b;
+        let mut it: *mut RItem = (*s).head;
+        while it != null {
+            if !rt_eq((*it).key, "value:main") && !rt_eq((*it).key, "value:_start") {
+                rt_s(bp, (*it).text);
+                rt_s(bp, "\n\n");
+            }
+            it = (*it).next;
+        }
+        rt_s(bp, candidate);
+        return rt_view(bp);
+    }
+}
+
+fn rs_has_items(prog: *mut Program) -> bool {
+    unsafe {
+        return (*prog).items != null;
+    }
+}
+
+fn repl_trim_end_index(s: str) -> usize {
+    let mut e: usize = len(s);
+    while e > 0 && fmt_ws(s[e - 1]) {
+        e = e - 1;
+    }
+    return e;
+}
+
+fn repl_ends_with_semi(s: str) -> bool {
+    let e: usize = repl_trim_end_index(s);
+    return e > 0 && s[e - 1] == 59;
+}
+
+fn repl_ends_with_brace(s: str) -> bool {
+    let e: usize = repl_trim_end_index(s);
+    return e > 0 && s[e - 1] == 125;
+}
+
+fn repl_is_ident(c: u8) -> bool {
+    return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c == 95;
+}
+
+fn rs_line_start(src: str, at: usize) -> usize {
+    let mut i: usize = at;
+    while i > 0 && src[i - 1] != 10 {
+        i = i - 1;
+    }
+    return i;
+}
+
+fn rs_item_key(a: *mut Arena, line: str) -> str {
+    // Skip `pub`; take the keyword and the following identifier.
+    let mut i: usize = 0;
+    let n: usize = len(line);
+    while i < n && fmt_ws(line[i]) {
+        i = i + 1;
+    }
+    let mut w0: usize = i;
+    while i < n && repl_is_ident(line[i]) {
+        i = i + 1;
+    }
+    let w: str = rt_slice(line, w0, i);
+    if rt_eq(w, "pub") {
+        while i < n && fmt_ws(line[i]) {
+            i = i + 1;
+        }
+        w0 = i;
+        while i < n && repl_is_ident(line[i]) {
+            i = i + 1;
+        }
+    }
+    let kw: str = rt_slice(line, w0, i);
+    while i < n && fmt_ws(line[i]) {
+        i = i + 1;
+    }
+    let n0: usize = i;
+    while i < n && repl_is_ident(line[i]) {
+        i = i + 1;
+    }
+    let name: str = rt_slice(line, n0, i);
+    if len(name) == 0 {
+        return "";
+    }
+    let mut b: Buf = rt_buf(a);
+    let bp: *mut Buf = &mut b;
+    if rt_eq(kw, "fn") || rt_eq(kw, "const") || rt_eq(kw, "static") {
+        rt_s(bp, "value:");
+    } else if rt_eq(kw, "struct") || rt_eq(kw, "union") || rt_eq(kw, "enum") || rt_eq(kw, "typedef") {
+        rt_s(bp, "type:");
+    } else if rt_eq(kw, "import") {
+        rt_s(bp, "import:");
+    } else {
+        return "";
+    }
+    rt_s(bp, name);
+    return rt_view(bp);
+}
+
+fn rs_is_item_line(line: str) -> bool {
+    let mut i: usize = 0;
+    let n: usize = len(line);
+    while i < n && fmt_ws(line[i]) {
+        i = i + 1;
+    }
+    let s: str = rt_slice(line, i, n);
+    if rt_starts(s, "pub ") {
+        let r: str = rt_slice(s, 4, len(s));
+        return rt_starts(r, "fn ") || rt_starts(r, "struct ") || rt_starts(r, "enum ")
+            || rt_starts(r, "const ") || rt_starts(r, "static ") || rt_starts(r, "typedef ");
+    }
+    return rt_starts(s, "fn ") || rt_starts(s, "struct ") || rt_starts(s, "union ")
+        || rt_starts(s, "enum ") || rt_starts(s, "const ") || rt_starts(s, "static ")
+        || rt_starts(s, "typedef ") || rt_starts(s, "import ");
+}
+
+// Split a chunk into top-level items and upsert each into the session.
+fn rs_install(s: *mut Session, chunk: str) {
+    unsafe {
+    let n: usize = len(chunk);
+    let mut start: usize = 0;
+    let mut i: usize = 0;
+    let mut depth: i32 = 0;
+    let mut state: i32 = FMT_CODE;
+    let mut item_start: usize = 0;
+    let mut item_key: str = "";
+    let mut have_item: bool = false;
+    loop {
+        let at_end: bool = i >= n;
+        if at_end || chunk[i] == 10 {
+            let line: str = rt_slice(chunk, start, i);
+            let begins: bool = depth == 0 && state == FMT_CODE && rs_is_item_line(line);
+            if have_item && (at_end || begins) {
+                let mut e: usize = fmt_trim_end(chunk, item_start, start);
+                if e > item_start && chunk[e - 1] == 10 {
+                    e = e - 1;
+                }
+                if e > item_start && len(item_key) > 0 {
+                    rs_upsert(s, item_key, rt_copy((*s).a, rt_slice(chunk, item_start, e)));
+                }
+                have_item = false;
+            }
+            if !have_item && begins {
+                let key: str = rs_item_key((*s).a, line);
+                if len(key) > 0 {
+                    item_key = key;
+                    item_start = start;
+                    have_item = true;
+                }
+            }
+            depth = depth + fmt_brace_delta(line, &mut state);
+            if depth < 0 {
+                depth = 0;
+            }
+            start = i + 1;
+            if at_end {
+                break;
+            }
+        }
+        i = i + 1;
+    }
+
+    }}
+
+fn rs_install_candidate(s: *mut Session, candidate: str) {
+    rs_upsert(s, "value:main", candidate);
+}
+
+// Run the combined session program; print `[exit N]` like the Rust REPL.
+fn rs_run_current(s: *mut Session, quiet: bool) {
+    unsafe {
+        if (*s).head == null {
+            dr_outln("[repl] nothing defined yet");
+            return;
+        }
+        let text: str = rs_combined(s);
+        let mut d: Diags = diags_new();
+        let mut srcs: SrcList = srcs_new();
+        let mut prog: Program = parse_program_text((*s).a, &mut d, &mut srcs, "<repl>", text);
+        let sem: *mut Sem = sem_run((*s).a, &mut d, &mut srcs, &mut prog);
+        if d.count > 0 {
+            let mut only_entry: bool = true;
+            let mut dg: *mut Diag = d.head;
+            while dg != null {
+                if !rt_eq((*dg).msg, "no entry point: define main or _start") {
+                    only_entry = false;
+                }
+                dg = (*dg).next;
+            }
+            if only_entry {
+                if !quiet {
+                    dr_outln("[repl] no entry point yet: add `fn main() -> i32` or `fn _start()`");
+                }
+                return;
+            }
+            dr_diags((*s).a, &mut d, &mut srcs);
+            return;
+        }
+        let ir: str = cg_run((*s).a, &mut d, &mut srcs, &mut prog, sem);
+        if d.count > 0 {
+            dr_diags((*s).a, &mut d, &mut srcs);
+            return;
+        }
+        let ll: cstr = rt_temp_path((*s).a, ".repl.ll");
+        if rt_write_file(ll, ir) != 0 {
+            dr_errln("[repl] cannot write temporary IR");
+            return;
+        }
+        let bin: cstr = rt_temp_path((*s).a, ".repl");
+        let rc: i32 = dr_build((*s).a, (*s).envp, ll, bin, (*s).opt);
+        if rc != 0 {
+            return;
+        }
+        let code: i32 = dr_run_program((*s).a, (*s).envp, bin, null, 0, 0);
+        rt_unlink(bin);
+        let mut b: Buf = rt_buf((*s).a);
+        let bp: *mut Buf = &mut b;
+        rt_s(bp, "[exit ");
+        rt_i(bp, code as i64);
+        rt_s(bp, "]\n");
+        dr_s(1, rt_view(bp));
+    }
+}
+
+fn rs_print_ir(s: *mut Session) {
+    unsafe {
+        if (*s).head == null {
+            dr_outln("[repl] nothing defined yet");
+            return;
+        }
+        let text: str = rs_combined(s);
+        let mut d: Diags = diags_new();
+        let mut srcs: SrcList = srcs_new();
+        let mut prog: Program = parse_program_text((*s).a, &mut d, &mut srcs, "<repl>", text);
+        let sem: *mut Sem = sem_run((*s).a, &mut d, &mut srcs, &mut prog);
+        if d.count > 0 {
+            dr_diags((*s).a, &mut d, &mut srcs);
+            return;
+        }
+        let ir: str = cg_run((*s).a, &mut d, &mut srcs, &mut prog, sem);
+        dr_s(1, ir);
+        if dr_verify((*s).a, (*s).envp, ir) == 0 {
+            dr_outln("[repl] IR verified by llvm-as");
+        } else {
+            dr_errln("[repl] IR verification failed");
+        }
+    }
+}
+
+// Candidate programs for a submission, most specific first.
+fn rs_candidate_print(a: *mut Arena, chunk: str) -> str {
+    let mut b: Buf = rt_buf(a);
+    let bp: *mut Buf = &mut b;
+    rt_s(bp, "fn main() -> i32 {\n    print(");
+    rt_s(bp, chunk);
+    rt_s(bp, ");\n    return 0;\n}\n");
+    return rt_view(bp);
+}
+
+fn rs_candidate_stmt(a: *mut Arena, chunk: str) -> str {
+    let mut b: Buf = rt_buf(a);
+    let bp: *mut Buf = &mut b;
+    rt_s(bp, "fn main() -> i32 {\n");
+    rt_s(bp, chunk);
+    if !repl_ends_with_semi(chunk) && !repl_ends_with_brace(chunk) {
+        rt_s(bp, ";");
+    }
+    rt_s(bp, "\n    return 0;\n}\n");
+    return rt_view(bp);
+}
+
+// Does `text` analyze cleanly (session definitions plus the candidate)?
+fn rs_analyzes(a: *mut Arena, text: str, d: *mut Diags, srcs: *mut SrcList) -> bool {
+    unsafe {
+        let mut prog: Program = parse_program_text(a, d, srcs, "<repl>", text);
+        let _ = sem_run(a, d, srcs, &mut prog);
+        return (*d).count == 0;
+    }
+}
+
+fn rs_has_undefined(d: *mut Diags) -> bool {
+    unsafe {
+        let mut dg: *mut Diag = (*d).head;
+        while dg != null {
+            if rt_starts((*dg).msg, "undefined ") {
+                return true;
+            }
+            dg = (*dg).next;
+        }
+        return false;
+    }
+}
+
+fn rs_submit(s: *mut Session, chunk: str, quiet: bool) {
+    unsafe {
+        if len(chunk) == 0 {
+            return;
+        }
+        // 1. A chunk that parses as top-level items updates the definitions.
+        let mut d: Diags = diags_new();
+        let mut srcs: SrcList = srcs_new();
+        let mut prog: Program = parse_program_text((*s).a, &mut d, &mut srcs, "<repl>", chunk);
+        if d.count == 0 && rs_has_items(&mut prog) {
+            rs_install(s, chunk);
+            rs_run_current(s, quiet);
+            return;
+        }
+        // 2. Expression, then statement wrapper, checked with the session.
+        let mut last_d: Diags = diags_new();
+        let mut last_srcs: SrcList = srcs_new();
+        let mut have_err: bool = false;
+        let mut last_text: str = "";
+        if !repl_ends_with_semi(chunk) {
+            let cand: str = rs_candidate_print((*s).a, chunk);
+            let text: str = rs_text_with(s, cand);
+            let mut cd: Diags = diags_new();
+            let mut cs: SrcList = srcs_new();
+            if rs_analyzes((*s).a, text, &mut cd, &mut cs) {
+                rs_install_candidate(s, cand);
+                rs_run_current(s, quiet);
+                return;
+            }
+            last_d = cd;
+            last_srcs = cs;
+            have_err = true;
+            last_text = text;
+        }
+        let cand2: str = rs_candidate_stmt((*s).a, chunk);
+        let text2: str = rs_text_with(s, cand2);
+        let mut cd2: Diags = diags_new();
+        let mut cs2: SrcList = srcs_new();
+        if rs_analyzes((*s).a, text2, &mut cd2, &mut cs2) {
+            rs_install_candidate(s, cand2);
+            rs_run_current(s, quiet);
+            return;
+        }
+        last_d = cd2;
+        last_srcs = cs2;
+        have_err = true;
+        last_text = text2;
+        if have_err {
+            dr_diags((*s).a, &mut last_d, &mut last_srcs);
+            if rs_has_undefined(&mut last_d) {
+                dr_outln("[repl] bindings do not persist between submissions (each run is a new program);");
+                dr_outln("       submit related statements together, or wrap them in { ... } and use :submit");
+            }
+        }
+        let _ = last_text;
+    }
+}
+
+// True when the buffered text needs more input before it can be a complete
+// block: unbalanced brackets, an open string or block comment, or a trailing
+// token that cannot end a statement.
+fn rs_needs_more(chunk: str) -> bool {
+    let n: usize = len(chunk);
+    let mut depth: i32 = 0;
+    let mut in_line: bool = false;
+    let mut in_block: bool = false;
+    let mut in_str: bool = false;
+    let mut esc: bool = false;
+    let mut i: usize = 0;
+    while i < n {
+        let c: u8 = chunk[i];
+        let mut nx: i32 = -1;
+        if i + 1 < n {
+            nx = chunk[i + 1] as i32;
+        }
+        if in_line {
+            if c == 10 {
+                in_line = false;
+            }
+            i = i + 1;
+            continue;
+        }
+        if in_block {
+            if c == 42 && nx == 47 {
+                in_block = false;
+                i = i + 2;
+            } else {
+                i = i + 1;
+            }
+            continue;
+        }
+        if in_str {
+            if esc {
+                esc = false;
+            } else if c == 92 {
+                esc = true;
+            } else if c == 34 {
+                in_str = false;
+            }
+            i = i + 1;
+            continue;
+        }
+        if c == 47 && nx == 47 {
+            in_line = true;
+            i = i + 2;
+        } else if c == 47 && nx == 42 {
+            in_block = true;
+            i = i + 2;
+        } else if c == 34 {
+            in_str = true;
+            i = i + 1;
+        } else if c == 123 || c == 40 || c == 91 {
+            depth = depth + 1;
+            i = i + 1;
+        } else if c == 125 || c == 41 || c == 93 {
+            depth = depth - 1;
+            i = i + 1;
+        } else {
+            i = i + 1;
+        }
+    }
+    if depth > 0 || in_str || in_block {
+        return true;
+    }
+    let e: usize = repl_trim_end_index(chunk);
+    if e == 0 {
+        return false;
+    }
+    let last: u8 = chunk[e - 1];
+    if last == 61 || last == 43 || last == 45 || last == 42 || last == 47 || last == 37
+        || last == 38 || last == 124 || last == 94 || last == 60 || last == 62
+        || last == 44 || last == 58 || last == 46 || last == 40 || last == 123 || last == 91 {
+        return true;
+    }
+    // Last word check.
+    let mut w0: usize = e;
+    while w0 > 0 && !fmt_ws(chunk[w0 - 1]) {
+        w0 = w0 - 1;
+    }
+    let w: str = rt_slice(chunk, w0, e);
+    return rt_eq(w, "let") || rt_eq(w, "mut") || rt_eq(w, "fn") || rt_eq(w, "return")
+        || rt_eq(w, "as") || rt_eq(w, "if") || rt_eq(w, "else") || rt_eq(w, "while")
+        || rt_eq(w, "loop") || rt_eq(w, "unsafe");
+}
+
+fn rs_has_code(chunk: str) -> bool {
+    let n: usize = len(chunk);
+    let mut i: usize = 0;
+    while i < n {
+        let c: u8 = chunk[i];
+        if fmt_ws(c) {
+            i = i + 1;
+            continue;
+        }
+        if c == 47 && i + 1 < n && chunk[i + 1] == 47 {
+            while i < n && chunk[i] != 10 {
+                i = i + 1;
+            }
+            continue;
+        }
+        if c == 47 && i + 1 < n && chunk[i + 1] == 42 {
+            i = i + 2;
+            while i + 1 < n && !(chunk[i] == 42 && chunk[i + 1] == 47) {
+                i = i + 1;
+            }
+            i = i + 2;
+            continue;
+        }
+        return true;
+    }
+    return false;
+}
+
+fn rs_should_auto(a: *mut Arena, chunk: str) -> bool {
+    if !rs_has_code(chunk) {
+        return false;
+    }
+    let e: usize = repl_trim_end_index(chunk);
+    let trimmed: str = rt_slice(chunk, 0, e);
+    let mut i: usize = 0;
+    while i < len(trimmed) {
+        if trimmed[i] == 10 {
+            break;
+        }
+        i = i + 1;
+    }
+    if i >= len(trimmed) {
+        return true;
+    }
+    // Multi-line: run as soon as it defines an entry point.
+    let mut d: Diags = diags_new();
+    let mut srcs: SrcList = srcs_new();
+    let mut prog: Program = parse_program_text(a, &mut d, &mut srcs, "<repl>", trimmed);
+    if d.count > 0 {
+        return false;
+    }
+    let m: *mut Decl = sem_find_prog(&mut prog, "main");
+    let s: *mut Decl = sem_find_prog(&mut prog, "_start");
+    return m != null || s != null;
+}
+
+// Small helper: find an item by name without running semantic analysis.
+fn sem_find_prog(prog: *mut Program, name: str) -> *mut Decl {
+    unsafe {
+        let mut it: *mut Item = (*prog).items;
+        while it != null {
+            if (*it).decl != null && (*it).kind == I::Func && rt_eq((*(*it).decl).name, name) {
+                return (*it).decl;
+            }
+            it = (*it).next;
+        }
+        return null;
+    }
+}
+
+fn repl_run(envp: **u8, opt: i32) -> i32 {
+    unsafe {
+        let mut a: Arena = rt_arena(536870912);
+        let ap: *mut Arena = &mut a;
+        let mut sess: Session = rs_new(ap, envp, opt);
+        let sp: *mut Session = &mut sess;
+        let input: str = rt_read_stdin(ap).data;
+        dr_outln("CoreX REPL — finish a block with an empty line. Type :help for commands.");
+        let n: usize = len(input);
+        let mut chunk: Buf = rt_buf(ap);
+        let cp: *mut Buf = &mut chunk;
+        let mut start: usize = 0;
+        let mut i: usize = 0;
+        loop {
+            let at_end: bool = i >= n;
+            if at_end || input[i] == 10 {
+                let line: str = rt_slice(input, start, i);
+                // :commands only when no block is pending.
+                let mut is_cmd: bool = false;
+                let mut cmd: str = "";
+                if (*cp).len == 0 {
+                    let mut k: usize = 0;
+                    while k < len(line) && fmt_ws(line[k]) {
+                        k = k + 1;
+                    }
+                    if k < len(line) && line[k] == 58 {
+                        is_cmd = true;
+                        cmd = rt_slice(line, k + 1, len(line));
+                    }
+                }
+                if is_cmd {
+                    if rt_eq(cmd, "quit") || rt_eq(cmd, "q") || rt_eq(cmd, "exit") {
+                        return 0;
+                    }
+                    if rt_eq(cmd, "help") || rt_eq(cmd, "h") {
+                        dr_outln("  <code>          a complete one-liner runs on Enter; other blocks finish with an empty line");
+                        dr_outln("  fn f(..) { }    items accumulate; a redefinition replaces the old one");
+                        dr_outln("  :submit         compile and run the pending block");
+                        dr_outln("  :run            re-run the current program");
+                        dr_outln("  :ir             print the LLVM IR and verify it");
+                        dr_outln("  :show           print the combined program");
+                        dr_outln("  :reset          forget all definitions");
+                        dr_outln("  :quit           leave the REPL");
+                    } else if rt_eq(cmd, "reset") || rt_eq(cmd, "clear") {
+                        rs_clear(sp);
+                        dr_outln("[repl] cleared");
+                    } else if rt_eq(cmd, "show") {
+                        if (*sp).head == null {
+                            dr_outln("[repl] nothing defined yet");
+                        } else {
+                            dr_outln(rs_combined(sp));
+                        }
+                    } else if rt_eq(cmd, "run") {
+                        rs_run_current(sp, false);
+                    } else if rt_eq(cmd, "ir") {
+                        rs_print_ir(sp);
+                    } else if rt_eq(cmd, "submit") || rt_eq(cmd, "go") {
+                        if (*cp).len == 0 {
+                            dr_outln("[repl] nothing to submit");
+                        } else {
+                            let block: str = rt_copy(ap, rt_view(cp));
+                            rt_clear(cp);
+                            rs_submit(sp, block, false);
+                        }
+                    } else {
+                        let mut b: Buf = rt_buf(ap);
+                        let bp: *mut Buf = &mut b;
+                        rt_s(bp, "[repl] unknown command `:");
+                        rt_s(bp, cmd);
+                        rt_s(bp, "` (try :help)");
+                        dr_outln(rt_view(bp));
+                    }
+                    start = i + 1;
+                    if at_end {
+                        break;
+                    }
+                    i = i + 1;
+                    continue;
+                }
+                let mut blank: bool = true;
+                let mut k2: usize = 0;
+                while k2 < len(line) {
+                    if !fmt_ws(line[k2]) {
+                        blank = false;
+                    }
+                    k2 = k2 + 1;
+                }
+                if blank {
+                    if (*cp).len == 0 {
+                        start = i + 1;
+                        if at_end {
+                            break;
+                        }
+                        i = i + 1;
+                        continue;
+                    }
+                    let cur: str = rt_view(cp);
+                    if rs_needs_more(cur) {
+                        rt_b(cp, 10);
+                    } else if !rs_has_code(cur) {
+                        rt_clear(cp);
+                    } else {
+                        let block: str = rt_copy(ap, rt_view(cp));
+                        rt_clear(cp);
+                        rs_submit(sp, block, true);
+                    }
+                } else {
+                    rt_s(cp, line);
+                    rt_b(cp, 10);
+                    let cur2: str = rt_view(cp);
+                    if !rs_needs_more(cur2) && rs_should_auto(ap, cur2) {
+                        let block: str = rt_copy(ap, rt_view(cp));
+                        rt_clear(cp);
+                        rs_submit(sp, block, true);
+                    }
+                }
+                start = i + 1;
+                if at_end {
+                    break;
+                }
+            }
+            i = i + 1;
+        }
+        if (*cp).len != 0 {
+            let block: str = rt_copy(ap, rt_view(cp));
+            rt_clear(cp);
+            rs_submit(sp, block, true);
+        }
+        return 0;
+    }
+}

@@ -1,0 +1,409 @@
+// Static linter, ported from `compiler/src/lint.rs`.
+//
+// Reports unused local bindings and private items, statements after a
+// diverging statement, and constant conditions. Warnings only; syntax and type
+// errors come from the frontend. Diagnostic codes match the Rust linter:
+//   W0001 unused variable, W0002 unreachable statement,
+//   W0003 unused private item, W0004 constant condition.
+
+struct LBind {
+    name: str,
+    used: bool,
+    file: i32,
+    line: i32,
+    col: i32,
+    next: *mut LBind,
+}
+
+struct LScope {
+    parent: *mut LScope,
+    head: *mut LBind,
+    tail: *mut LBind,
+}
+
+struct LName {
+    name: str,
+    next: *mut LName,
+}
+
+struct Lint {
+    a: *mut Arena,
+    d: *mut Diags,
+    scope: *mut LScope,
+    refs: *mut LName,
+    prog: *mut Program,
+}
+
+fn lint_warn(l: *mut Lint, code: str, file: i32, line: i32, col: i32, msg: str) {
+    unsafe {
+        diag_warn((*l).d, (*l).a, file, line, col, code, msg);
+    }
+}
+
+fn lint_push(l: *mut Lint) {
+    unsafe {
+    let s: *mut LScope = rt_alloc((*l).a, sizeof(LScope)) as *mut LScope;
+    unsafe {
+        (*s).parent = (*l).scope;
+        (*s).head = null;
+        (*s).tail = null;
+        (*l).scope = s;
+    }
+
+    }}
+
+fn lint_pop(l: *mut Lint) {
+    unsafe {
+        let s: *mut LScope = (*l).scope;
+        if s == null {
+            return;
+        }
+        let mut b: *mut LBind = (*s).head;
+        while b != null {
+            if !(*b).used && !rt_starts((*b).name, "_") {
+                let mut mb: Buf = rt_buf((*l).a);
+                let mbp: *mut Buf = &mut mb;
+                rt_s(mbp, "unused variable `");
+                rt_s(mbp, (*b).name);
+                rt_s(mbp, "` (prefix with `_` to silence)");
+                lint_warn(l, "W0001", (*b).file, (*b).line, (*b).col, rt_view(mbp));
+            }
+            b = (*b).next;
+        }
+        (*l).scope = (*s).parent;
+    }
+}
+
+fn lint_declare(l: *mut Lint, name: str, file: i32, line: i32, col: i32) {
+    unsafe {
+        if rt_eq(name, "_") {
+            return;
+        }
+        let s: *mut LScope = (*l).scope;
+        if s == null {
+            return;
+        }
+        let b: *mut LBind = rt_alloc((*l).a, sizeof(LBind)) as *mut LBind;
+        (*b).name = name;
+        (*b).used = false;
+        (*b).file = file;
+        (*b).line = line;
+        (*b).col = col;
+        (*b).next = null;
+        if (*s).tail == null {
+            (*s).head = b;
+        } else {
+            (*(*s).tail).next = b;
+        }
+        (*s).tail = b;
+    }
+}
+
+fn lint_mark_used(l: *mut Lint, name: str) {
+    unsafe {
+        let mut s: *mut LScope = (*l).scope;
+        while s != null {
+            let mut b: *mut LBind = (*s).head;
+            while b != null {
+                if rt_eq((*b).name, name) {
+                    (*b).used = true;
+                    return;
+                }
+                b = (*b).next;
+            }
+            s = (*s).parent;
+        }
+    }
+}
+
+fn lint_ref(l: *mut Lint, name: str) {
+    unsafe {
+        let mut n: *mut LName = (*l).refs;
+        while n != null {
+            if rt_eq((*n).name, name) {
+                return;
+            }
+            n = (*n).next;
+        }
+        let r: *mut LName = rt_alloc((*l).a, sizeof(LName)) as *mut LName;
+        (*r).name = name;
+        (*r).next = (*l).refs;
+        (*l).refs = r;
+    }
+}
+
+fn lint_has_ref(l: *mut Lint, name: str) -> bool {
+    unsafe {
+        let mut n: *mut LName = (*l).refs;
+        while n != null {
+            if rt_eq((*n).name, name) {
+                return true;
+            }
+            n = (*n).next;
+        }
+        return false;
+    }
+}
+
+fn lint_ty(l: *mut Lint, ty: *mut Type) {
+    unsafe {
+        if ty == null {
+            return;
+        }
+        if (*ty).kind == K::Named {
+            lint_ref(l, (*ty).name);
+            return;
+        }
+        if (*ty).kind == K::Ptr || (*ty).kind == K::Array || (*ty).kind == K::Slice || (*ty).kind == K::Vec {
+            lint_ty(l, (*ty).elem);
+        }
+    }
+}
+
+fn lint_expr_diverges(e: *mut Expr) -> bool {
+    unsafe {
+        if e == null || (*e).kind != E::Call {
+            return false;
+        }
+        let callee: *mut Expr = (*e).lhs;
+        if callee == null {
+            return false;
+        }
+        let mut name: str = "";
+        if (*callee).kind == E::Ident {
+            name = (*callee).name;
+        } else if (*callee).kind == E::Path {
+            name = (*callee).field;
+        } else {
+            return false;
+        }
+        if rt_eq(name, "panic") {
+            return true;
+        }
+        if !rt_eq(name, "syscall") {
+            return false;
+        }
+        let a0: *mut Expr = (*e).args;
+        if a0 == null || (*a0).kind != E::IntLit {
+            return false;
+        }
+        return (*a0).ival == 60 || (*a0).ival == 231;
+    }
+}
+
+fn lint_stmt_diverges(s: *mut Stmt) -> bool {
+    unsafe {
+        if s == null {
+            return false;
+        }
+        if (*s).kind == S::Return || (*s).kind == S::Break || (*s).kind == S::Continue {
+            return true;
+        }
+        if (*s).kind == S::Expr {
+            return lint_expr_diverges((*s).expr);
+        }
+        if (*s).kind == S::Block || (*s).kind == S::Unsafe {
+            let mut t: *mut Stmt = (*s).body;
+            while t != null {
+                if lint_stmt_diverges(t) {
+                    return true;
+                }
+                t = (*t).next;
+            }
+        }
+        return false;
+    }
+}
+
+fn lint_expr(l: *mut Lint, e: *mut Expr) {
+    unsafe {
+        if e == null {
+            return;
+        }
+        let k: E = (*e).kind;
+        if k == E::Ident {
+            lint_mark_used(l, (*e).name);
+            lint_ref(l, (*e).name);
+            return;
+        }
+        if k == E::Path {
+            lint_mark_used(l, (*e).name);
+            let mut jb: Buf = rt_buf((*l).a);
+            let jbp: *mut Buf = &mut jb;
+            rt_s(jbp, (*e).name);
+            rt_s(jbp, "$");
+            rt_s(jbp, (*e).field);
+            lint_ref(l, rt_view(jbp));
+            lint_ref(l, (*e).name);
+            return;
+        }
+        if k == E::StructLit {
+            lint_ref(l, (*e).name);
+            let mut v: *mut Expr = (*e).args;
+            while v != null {
+                lint_expr(l, v);
+                v = (*v).next;
+            }
+            return;
+        }
+        if k == E::Offsetof {
+            lint_ref(l, (*e).field);
+            lint_ty(l, (*e).type_arg);
+            return;
+        }
+        if k == E::Sizeof || k == E::Alignof {
+            lint_ty(l, (*e).type_arg);
+            return;
+        }
+        if k == E::Cast {
+            lint_ty(l, (*e).type_arg);
+            lint_expr(l, (*e).lhs);
+            return;
+        }
+        if k == E::Field || k == E::Unary {
+            lint_expr(l, (*e).lhs);
+            return;
+        }
+        if k == E::Binary || k == E::Index {
+            lint_expr(l, (*e).lhs);
+            lint_expr(l, (*e).rhs);
+            return;
+        }
+        if k == E::Call {
+            lint_expr(l, (*e).lhs);
+            let mut a: *mut Expr = (*e).args;
+            while a != null {
+                lint_expr(l, a);
+                a = (*a).next;
+            }
+            return;
+        }
+        if k == E::ArrayLit {
+            let mut a: *mut Expr = (*e).args;
+            while a != null {
+                lint_expr(l, a);
+                a = (*a).next;
+            }
+            return;
+        }
+        if k == E::SliceRange {
+            lint_expr(l, (*e).lhs);
+            lint_expr(l, (*e).rhs);
+            lint_expr(l, (*e).args);
+            return;
+        }
+    }
+}
+
+fn lint_block(l: *mut Lint, first: *mut Stmt) {
+    unsafe {
+        lint_push(l);
+        let mut diverged: bool = false;
+        let mut s: *mut Stmt = first;
+        while s != null {
+            if diverged {
+                lint_warn(l, "W0002", (*s).file, (*s).line, (*s).col, "unreachable statement (the previous statement diverges)");
+                diverged = false;
+            }
+            // Statement dispatch.
+            if (*s).kind == S::Let {
+                lint_expr(l, (*s).expr);
+                lint_declare(l, (*s).name, (*s).file, (*s).line, (*s).col);
+            } else if (*s).kind == S::Assign {
+                lint_expr(l, (*s).expr);
+                lint_expr(l, (*s).rhs);
+            } else if (*s).kind == S::Expr {
+                lint_expr(l, (*s).expr);
+            } else if (*s).kind == S::If {
+                let c: *mut Expr = (*s).expr;
+                if c != null && (*c).kind == E::BoolLit {
+                    lint_warn(l, "W0004", (*c).file, (*c).line, (*c).col, "condition is a constant");
+                }
+                lint_expr(l, c);
+                lint_block(l, (*s).body);
+                if (*s).els != null {
+                    lint_block(l, (*s).els);
+                }
+            } else if (*s).kind == S::While {
+                let c: *mut Expr = (*s).expr;
+                if c != null && (*c).kind == E::BoolLit && (*c).ival == 0 {
+                    lint_warn(l, "W0004", (*c).file, (*c).line, (*c).col, "`while false` never runs");
+                }
+                lint_expr(l, c);
+                lint_block(l, (*s).body);
+            } else if (*s).kind == S::Loop {
+                lint_block(l, (*s).body);
+            } else if (*s).kind == S::Switch {
+                lint_expr(l, (*s).expr);
+                let mut c: *mut Case = (*s).cases;
+                while c != null {
+                    if (*c).expr != null {
+                        lint_expr(l, (*c).expr);
+                    }
+                    lint_block(l, (*c).body);
+                    c = (*c).next;
+                }
+            } else if (*s).kind == S::Return {
+                lint_expr(l, (*s).expr);
+            } else if (*s).kind == S::Unsafe || (*s).kind == S::Block {
+                lint_block(l, (*s).body);
+            }
+            if lint_stmt_diverges(s) {
+                diverged = true;
+            }
+            s = (*s).next;
+        }
+        lint_pop(l);
+    }
+}
+
+fn lint_program(a: *mut Arena, d: *mut Diags, prog: *mut Program) {
+    unsafe {
+    let l: *mut Lint = rt_alloc(a, sizeof(Lint)) as *mut Lint;
+    (*l).a = a;
+    (*l).d = d;
+    (*l).scope = null;
+    (*l).refs = null;
+    (*l).prog = prog;
+    let mut it: *mut Item = (*prog).items;
+    while it != null {
+        let decl: *mut Decl = (*it).decl;
+        if (*it).kind == I::Func && decl != null && (*decl).body != null {
+            lint_push(l);
+            lint_block(l, (*decl).body);
+            lint_pop(l);
+        }
+        it = (*it).next;
+    }
+    // Unused private items, in source order.
+    it = (*prog).items;
+    while it != null {
+        let decl: *mut Decl = (*it).decl;
+        if decl != null && !(*it).is_pub && !rt_starts((*decl).name, "_") {
+            let mut kind: str = "";
+            if (*it).kind == I::Func {
+                if !rt_eq((*decl).name, "main") && !rt_eq((*decl).name, "_start") {
+                    kind = "function";
+                }
+            } else if (*it).kind == I::Static {
+                if !(*decl).is_extern {
+                    kind = "global";
+                }
+            } else if (*it).kind == I::Const {
+                kind = "constant";
+            }
+            if len(kind) > 0 && !lint_has_ref(l, (*decl).name) {
+                let mut mb: Buf = rt_buf(a);
+                let mbp: *mut Buf = &mut mb;
+                rt_s(mbp, "private ");
+                rt_s(mbp, kind);
+                rt_s(mbp, " `");
+                rt_s(mbp, (*decl).name);
+                rt_s(mbp, "` is never used");
+                lint_warn(l, "W0003", (*decl).file, (*decl).line, (*decl).col, rt_view(mbp));
+            }
+        }
+        it = (*it).next;
+    }
+    }
+}

@@ -85,4 +85,9 @@ tests/selfhosting/run.sh "$STAGE2"
 tests/selfhosting/run.sh "$STAGE3"
 
 echo
+echo "== CLI parity =="
+tests/selfhosting/cli.sh "$STAGE1"
+tests/selfhosting/cli.sh "$STAGE2"
+
+echo
 echo "bootstrap ok"

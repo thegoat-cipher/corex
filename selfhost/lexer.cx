@@ -13,6 +13,10 @@ struct Diag {
     line: i32,
     col: i32,
     msg: str,
+    // Diagnostic code (`W0001` etc.) and severity for lint output; frontend
+    // errors leave `code` empty and render without a bracket code.
+    code: str,
+    warn: bool,
     next: *mut Diag,
 }
 
@@ -33,6 +37,8 @@ fn diag_add(d: *mut Diags, a: *mut Arena, file: i32, line: i32, col: i32, msg: s
         (*p).line = line;
         (*p).col = col;
         (*p).msg = msg;
+        (*p).code = "";
+        (*p).warn = false;
         (*p).next = null;
         if (*d).tail == null {
             (*d).head = p;
@@ -41,6 +47,16 @@ fn diag_add(d: *mut Diags, a: *mut Arena, file: i32, line: i32, col: i32, msg: s
         }
         (*d).tail = p;
         (*d).count = (*d).count + 1;
+    }
+}
+
+// Warning with a stable code, used by the linter (`W0001` … `W0004`).
+fn diag_warn(d: *mut Diags, a: *mut Arena, file: i32, line: i32, col: i32, code: str, msg: str) {
+    diag_add(d, a, file, line, col, msg);
+    unsafe {
+        let p: *mut Diag = (*d).tail;
+        (*p).code = code;
+        (*p).warn = true;
     }
 }
 

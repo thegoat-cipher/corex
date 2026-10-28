@@ -1,0 +1,369 @@
+// Markdown documentation generator, ported from `compiler/src/docgen.rs`.
+//
+// `///` doc comments attach to the next item; the output lists the file, type
+// aliases, enums, structs, constants, globals, and functions with signatures.
+
+struct DocEnt {
+    line: i32,
+    text: str,
+    next: *mut DocEnt,
+}
+
+struct DocMap {
+    head: *mut DocEnt,
+    tail: *mut DocEnt,
+}
+
+fn doc_map_new() -> DocMap {
+    return DocMap { head: null, tail: null };
+}
+
+fn doc_map_add(d: *mut DocMap, a: *mut Arena, line: i32, text: str) {
+    unsafe {
+        let e: *mut DocEnt = rt_alloc(a, sizeof(DocEnt)) as *mut DocEnt;
+        (*e).line = line;
+        (*e).text = rt_copy(a, text);
+        (*e).next = null;
+        if (*d).tail == null {
+            (*d).head = e;
+        } else {
+            (*(*d).tail).next = e;
+        }
+        (*d).tail = e;
+    }
+}
+
+fn doc_map_get(d: *mut DocMap, line: i32) -> str {
+    unsafe {
+        let mut e: *mut DocEnt = (*d).head;
+        while e != null {
+            if (*e).line == line {
+                return (*e).text;
+            }
+            e = (*e).next;
+        }
+        return "";
+    }
+}
+
+// Map item line number -> contiguous `///` doc comment lines.
+fn doc_collect(a: *mut Arena, source: str) -> DocMap {
+    let mut dm: DocMap = doc_map_new();
+    let mut pending: Buf = rt_buf(a);
+    let pp: *mut Buf = &mut pending;
+    let mut have_pending: bool = false;
+    let mut in_block: bool = false;
+    let n: usize = len(source);
+    let mut start: usize = 0;
+    let mut i: usize = 0;
+    let mut line_no: i32 = 0;
+    loop {
+        let at_end: bool = i >= n;
+        if at_end || source[i] == 10 {
+            line_no = line_no + 1;
+            let raw: str = rt_slice(source, start, i);
+            let b: usize = fmt_trim_start(raw, 0, len(raw));
+            let e: usize = fmt_trim_end(raw, b, len(raw));
+            let line: str = rt_slice(raw, b, e);
+            let mut consumed: bool = false;
+            if in_block {
+                if rt_find(line, "*/") >= 0 {
+                    in_block = false;
+                }
+                consumed = true;
+            } else if rt_starts(line, "///") {
+                if have_pending {
+                    rt_b(pp, 10);
+                }
+                rt_s(pp, line);
+                have_pending = true;
+                consumed = true;
+            } else if rt_starts(line, "//") {
+                consumed = true;
+            } else if len(line) == 0 {
+                consumed = true;
+            } else if rt_starts(line, "#[") {
+                consumed = true;
+            } else if rt_starts(line, "/*") {
+                if rt_find(line, "*/") < 0 {
+                    in_block = true;
+                }
+                consumed = true;
+            }
+            if !consumed && have_pending {
+                doc_map_add(&mut dm, a, line_no, rt_view(pp));
+                have_pending = false;
+                rt_clear(pp);
+            }
+            start = i + 1;
+            if at_end {
+                break;
+            }
+        }
+        i = i + 1;
+    }
+    return dm;
+}
+
+fn doc_type(out: *mut Buf, ty: *mut Type) {
+    unsafe {
+        if ty == null {
+            rt_s(out, "void");
+            return;
+        }
+        let k: K = (*ty).kind;
+        if k == K::Ptr {
+            if (*ty).mutable {
+                rt_s(out, "*mut ");
+            } else {
+                rt_s(out, "*");
+            }
+            doc_type(out, (*ty).elem);
+            return;
+        }
+        if k == K::Array {
+            rt_s(out, "[");
+            doc_type(out, (*ty).elem);
+            rt_s(out, "; ");
+            rt_i(out, (*ty).len as i64);
+            rt_s(out, "]");
+            return;
+        }
+        if k == K::Slice {
+            rt_s(out, "[");
+            doc_type(out, (*ty).elem);
+            rt_s(out, "]");
+            return;
+        }
+        if k == K::Vec {
+            rt_s(out, "vec<");
+            doc_type(out, (*ty).elem);
+            rt_s(out, ">");
+            return;
+        }
+        if k == K::Named || k == K::Struct || k == K::Enum {
+            rt_s(out, (*ty).name);
+            return;
+        }
+        if k == K::Void { rt_s(out, "void"); return; }
+        if k == K::Bool { rt_s(out, "bool"); return; }
+        if k == K::Char { rt_s(out, "char"); return; }
+        if k == K::I8 { rt_s(out, "i8"); return; }
+        if k == K::I16 { rt_s(out, "i16"); return; }
+        if k == K::I32 { rt_s(out, "i32"); return; }
+        if k == K::I64 { rt_s(out, "i64"); return; }
+        if k == K::U8 { rt_s(out, "u8"); return; }
+        if k == K::U16 { rt_s(out, "u16"); return; }
+        if k == K::U32 { rt_s(out, "u32"); return; }
+        if k == K::U64 { rt_s(out, "u64"); return; }
+        if k == K::Usize { rt_s(out, "usize"); return; }
+        if k == K::Isize { rt_s(out, "isize"); return; }
+        if k == K::F32 { rt_s(out, "f32"); return; }
+        if k == K::F64 { rt_s(out, "f64"); return; }
+        if k == K::Str { rt_s(out, "str"); return; }
+        if k == K::CStr { rt_s(out, "cstr"); return; }
+        rt_s(out, "?");
+    }
+}
+
+fn doc_ty_str(a: *mut Arena, ty: *mut Type) -> str {
+    let mut b: Buf = rt_buf(a);
+    let bp: *mut Buf = &mut b;
+    doc_type(bp, ty);
+    return rt_view(bp);
+}
+
+fn doc_sig(a: *mut Arena, d: *mut Decl) -> str {
+    unsafe {
+        let mut b: Buf = rt_buf(a);
+        let bp: *mut Buf = &mut b;
+        rt_s(bp, "fn ");
+        rt_s(bp, (*d).name);
+        rt_s(bp, "(");
+        let mut p: *mut Param = (*d).params;
+        let mut first: bool = true;
+        while p != null {
+            if !first {
+                rt_s(bp, ", ");
+            }
+            rt_s(bp, (*p).name);
+            rt_s(bp, ": ");
+            doc_type(bp, (*p).ty);
+            first = false;
+            p = (*p).next;
+        }
+        rt_s(bp, ")");
+        if (*d).ty != null && (*(*d).ty).kind != K::Void {
+            rt_s(bp, " -> ");
+            doc_type(bp, (*d).ty);
+        }
+        return rt_view(bp);
+    }
+}
+
+// Doc body: strip `///`, trim, join with newlines, then a blank line.
+fn doc_body(a: *mut Arena, dm: *mut DocMap, line: i32) -> str {
+    let raw: str = doc_map_get(dm, line);
+    if len(raw) == 0 {
+        return "";
+    }
+    let mut b: Buf = rt_buf(a);
+    let bp: *mut Buf = &mut b;
+    let n: usize = len(raw);
+    // Simple line walk (the buffer holds one `///` line per source line).
+    let mut start: usize = 0;
+    let mut j: usize = 0;
+    loop {
+        let at_end: bool = j >= n;
+        if at_end || raw[j] == 10 {
+            let seg: str = rt_slice(raw, start, j);
+            let s0: usize = fmt_trim_start(seg, 0, len(seg));
+            let s1: usize = fmt_trim_end(seg, s0, len(seg));
+            let body: str = rt_slice(seg, s0, s1);
+            // Strip a leading `///`.
+            let mut k: usize = 0;
+            if len(body) >= 3 && body[0] == 47 && body[1] == 47 && body[2] == 47 {
+                k = 3;
+            }
+            let t0: usize = fmt_trim_start(body, k, len(body));
+            let t1: usize = fmt_trim_end(body, t0, len(body));
+            rt_s(bp, rt_slice(body, t0, t1));
+            rt_s(bp, "\n");
+            start = j + 1;
+            if at_end {
+                break;
+            }
+        }
+        j = j + 1;
+    }
+    rt_s(bp, "\n");
+    return rt_view(bp);
+}
+
+fn doc_item(out: *mut Buf, a: *mut Arena, dm: *mut DocMap, it: *mut Item) {
+    unsafe {
+        let d: *mut Decl = (*it).decl;
+        if d == null {
+            return;
+        }
+        if (*it).kind == I::Typedef {
+            rt_s(out, "### `typedef ");
+            rt_s(out, (*d).name);
+            rt_s(out, " = ");
+            doc_type(out, (*d).ty);
+            rt_s(out, "`\n\n");
+            rt_s(out, doc_body(a, dm, (*d).line));
+            return;
+        }
+        if (*it).kind == I::Enum {
+            rt_s(out, "### `enum ");
+            rt_s(out, (*d).name);
+            rt_s(out, "`\n\n");
+            rt_s(out, doc_body(a, dm, (*d).line));
+            if (*d).variants != null {
+                rt_s(out, "| Variant |\n|---|\n");
+                let mut v: *mut Variant = (*d).variants;
+                while v != null {
+                    rt_s(out, "| `");
+                    rt_s(out, (*v).name);
+                    rt_s(out, "` |\n");
+                    v = (*v).next;
+                }
+                rt_s(out, "\n");
+            }
+            return;
+        }
+        if (*it).kind == I::Struct {
+            rt_s(out, "### `struct ");
+            rt_s(out, (*d).name);
+            rt_s(out, "`\n\n");
+            rt_s(out, doc_body(a, dm, (*d).line));
+            if (*d).fields != null {
+                rt_s(out, "| Field | Type |\n|---|---|\n");
+                let mut f: *mut Field = (*d).fields;
+                while f != null {
+                    rt_s(out, "| `");
+                    rt_s(out, (*f).name);
+                    rt_s(out, "` | `");
+                    doc_type(out, (*f).ty);
+                    rt_s(out, "` |\n");
+                    f = (*f).next;
+                }
+                rt_s(out, "\n");
+            }
+            return;
+        }
+        if (*it).kind == I::Const {
+            rt_s(out, "### `const ");
+            rt_s(out, (*d).name);
+            rt_s(out, ": ");
+            doc_type(out, (*d).ty);
+            rt_s(out, "`\n\n");
+            rt_s(out, doc_body(a, dm, (*d).line));
+            return;
+        }
+        if (*it).kind == I::Static {
+            rt_s(out, "### `static ");
+            if (*d).is_mut {
+                rt_s(out, "mut ");
+            }
+            rt_s(out, (*d).name);
+            rt_s(out, ": ");
+            doc_type(out, (*d).ty);
+            rt_s(out, "`\n\n");
+            rt_s(out, doc_body(a, dm, (*d).line));
+            return;
+        }
+        if (*it).kind == I::Func {
+            rt_s(out, "### `");
+            rt_s(out, doc_sig(a, d));
+            rt_s(out, "`\n\n");
+            rt_s(out, doc_body(a, dm, (*d).line));
+            return;
+        }
+    }
+}
+
+fn doc_section(out: *mut Buf, a: *mut Arena, dm: *mut DocMap, prog: *mut Program,
+               kind: I, title: str) -> bool {
+    unsafe {
+        let mut any: bool = false;
+        let mut it: *mut Item = (*prog).items;
+        while it != null {
+            if (*it).kind == kind {
+                any = true;
+            }
+            it = (*it).next;
+        }
+        if !any {
+            return false;
+        }
+        rt_s(out, title);
+        rt_s(out, "\n\n");
+        it = (*prog).items;
+        while it != null {
+            if (*it).kind == kind {
+                doc_item(out, a, dm, it);
+            }
+            it = (*it).next;
+        }
+        return true;
+    }
+}
+
+fn doc_generate(a: *mut Arena, name: str, text: str, prog: *mut Program) -> str {
+    let mut dm: DocMap = doc_collect(a, text);
+    let dmp: *mut DocMap = &mut dm;
+    let mut o: Buf = rt_buf(a);
+    let out: *mut Buf = &mut o;
+    rt_s(out, "# `");
+    rt_s(out, name);
+    rt_s(out, "`\n\n");
+    doc_section(out, a, dmp, prog, I::Typedef, "## Type aliases");
+    doc_section(out, a, dmp, prog, I::Enum, "## Enums");
+    doc_section(out, a, dmp, prog, I::Struct, "## Types");
+    doc_section(out, a, dmp, prog, I::Const, "## Constants");
+    doc_section(out, a, dmp, prog, I::Static, "## Globals");
+    doc_section(out, a, dmp, prog, I::Func, "## Functions");
+    return rt_view(out);
+}

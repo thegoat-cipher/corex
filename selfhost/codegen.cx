@@ -2318,45 +2318,52 @@ fn gen_entry(cg: *mut Cg, out: *mut Buf) {
     }
 }
 
-fn cg_run(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program, sem: *mut Sem) -> str {
-    unsafe {
-    unsafe {
+fn cg_init(a: *mut Arena, sem: *mut Sem) -> *mut Cg {
     let cg: *mut Cg = rt_alloc(a, sizeof(Cg)) as *mut Cg;
-    (*cg).a = a;
-    (*cg).sem = sem;
-    (*cg).str_ty = type_new(a, K::Str);
-    (*cg).types = cg_buf(cg);
-    (*cg).globals = cg_buf(cg);
-    (*cg).strings = cg_buf(cg);
-    (*cg).decls = cg_buf(cg);
-    (*cg).defs = cg_buf(cg);
-    (*cg).strs = 0;
-    (*cg).used_syscall = true;
-    (*cg).used_alloc = false;
-    (*cg).used_free = false;
-    (*cg).used_print_i64 = false;
-    (*cg).used_print_u64 = false;
-    (*cg).used_print_bool = false;
-    (*cg).used_print_char = false;
-    (*cg).used_print_str = false;
-    (*cg).used_fatal = false;
-    (*cg).used_cstr_len = false;
-    (*cg).used_cstr_str = false;
-    (*cg).used_assert = false;
-    gen_types(cg);
-    gen_globals(cg);
-    let mut g: *mut Decl = (*sem).globals;
-    while g != null {
-        if (*g).kind == D::Func {
-            gen_fn(cg, g);
-        }
-        g = (*g).next;
+    unsafe {
+        (*cg).a = a;
+        (*cg).sem = sem;
+        (*cg).str_ty = type_new(a, K::Str);
+        (*cg).types = cg_buf(cg);
+        (*cg).globals = cg_buf(cg);
+        (*cg).strings = cg_buf(cg);
+        (*cg).decls = cg_buf(cg);
+        (*cg).defs = cg_buf(cg);
+        (*cg).strs = 0;
+        (*cg).used_syscall = true;
+        (*cg).used_alloc = false;
+        (*cg).used_free = false;
+        (*cg).used_print_i64 = false;
+        (*cg).used_print_u64 = false;
+        (*cg).used_print_bool = false;
+        (*cg).used_print_char = false;
+        (*cg).used_print_str = false;
+        (*cg).used_fatal = false;
+        (*cg).used_cstr_len = false;
+        (*cg).used_cstr_str = false;
+        (*cg).used_assert = false;
     }
-    let mut entry: Buf = rt_buf(a);
-    let ep: *mut Buf = &mut entry;
-    gen_entry(cg, ep);
+    return cg;
+}
+
+fn cg_prelude(cg: *mut Cg) {
+    unsafe {
+        gen_types(cg);
+        gen_globals(cg);
+        let mut g: *mut Decl = (*(*cg).sem).globals;
+        while g != null {
+            if (*g).kind == D::Func {
+                gen_fn(cg, g);
+            }
+            g = (*g).next;
+        }
+    }
+}
+
+fn cg_module(cg: *mut Cg, ep: *mut Buf) -> str {
+    unsafe {
     gen_helpers(cg);
-    let mut out: Buf = rt_buf(a);
+    let mut out: Buf = rt_buf((*cg).a);
     let op: *mut Buf = &mut out;
     rt_s(op, "; CoreX module: corexc\nsource_filename = \"corexc\"\ntarget triple = \"x86_64-unknown-linux-gnu\"\n\n");
     rt_s(op, rt_view((*cg).types));
@@ -2367,6 +2374,132 @@ fn cg_run(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program, 
     rt_s(op, rt_view(ep));
     rt_s(op, "attributes #0 = { alignstack=16 }\n");
     return rt_view(op);
+    }
+}
+
+fn cg_run(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program, sem: *mut Sem) -> str {
+    unsafe {
+    unsafe {
+    let cg: *mut Cg = cg_init(a, sem);
+    cg_prelude(cg);
+    let mut entry: Buf = rt_buf(a);
+    let ep: *mut Buf = &mut entry;
+    gen_entry(cg, ep);
+    return cg_module(cg, ep);
+    }
+
+    }
+}
+
+// `corexc test`: emit `_start` that calls every `test_*` function, prints
+// `test <name> ... ok|FAILED`, and exits nonzero when any test fails.
+fn cg_test_entry(cg: *mut Cg, out: *mut Buf) {
+    unsafe {
+    let mut count: i32 = 0;
+    let mut g: *mut Decl = (*(*cg).sem).globals;
+    while g != null {
+        if (*g).kind == D::Func && (*g).body != null && rt_starts((*g).name, "test_") {
+            if (*g).ty == null || (*(*g).ty).kind != K::Bool {
+                let mut mb: Buf = rt_buf((*cg).a);
+                let mbp: *mut Buf = &mut mb;
+                rt_s(mbp, "test `");
+                rt_s(mbp, (*g).name);
+                rt_s(mbp, "` must return `bool` (true = pass)");
+                diag_add((*(*cg).sem).d, (*cg).a, (*g).file, (*g).line, (*g).col, rt_view(mbp));
+            }
+            count = count + 1;
+        }
+        g = (*g).next;
+    }
+    if count == 0 {
+        diag_add((*(*cg).sem).d, (*cg).a, 0, 0, 0, "no tests found: define `fn test_something() -> bool`");
+        return;
+    }
+    rt_s(out, "define void @_start() #0 {\nentry:\n  %failures = alloca i32, align 4\n  store i32 0, ptr %failures, align 4\n");
+    let mut idx: i32 = 0;
+    g = (*(*cg).sem).globals;
+    while g != null {
+        if (*g).kind == D::Func && (*g).body != null && rt_starts((*g).name, "test_") {
+            let mut okb: Buf = rt_buf((*cg).a);
+            let okp: *mut Buf = &mut okb;
+            rt_s(okp, "test ");
+            rt_s(okp, (*g).name);
+            rt_s(okp, " ... ok\n");
+            let ok_msg: str = rt_view(okp);
+            let ok_id: i32 = add_string(cg, ok_msg);
+            let mut fb: Buf = rt_buf((*cg).a);
+            let fbp: *mut Buf = &mut fb;
+            rt_s(fbp, "test ");
+            rt_s(fbp, (*g).name);
+            rt_s(fbp, " ... FAILED\n");
+            let fail_msg: str = rt_view(fbp);
+            let fail_id: i32 = add_string(cg, fail_msg);
+            rt_s(out, "  %r");
+            rt_i(out, idx as i64);
+            rt_s(out, " = call i1 @");
+            rt_s(out, (*g).name);
+            rt_s(out, "()\n  br i1 %r");
+            rt_i(out, idx as i64);
+            rt_s(out, ", label %pass");
+            rt_i(out, idx as i64);
+            rt_s(out, ", label %fail");
+            rt_i(out, idx as i64);
+            rt_s(out, "\npass");
+            rt_i(out, idx as i64);
+            rt_s(out, ":\n  %pok");
+            rt_i(out, idx as i64);
+            rt_s(out, " = ptrtoint ptr @.str");
+            rt_i(out, ok_id as i64);
+            rt_s(out, " to i64\n  %pw");
+            rt_i(out, idx as i64);
+            rt_s(out, " = call i64 @_cx_syscall(i64 1, i64 1, i64 %pok");
+            rt_i(out, idx as i64);
+            rt_s(out, ", i64 ");
+            rt_i(out, len(ok_msg) as i64);
+            rt_s(out, ", i64 0, i64 0, i64 0)\n  br label %next");
+            rt_i(out, idx as i64);
+            rt_s(out, "\nfail");
+            rt_i(out, idx as i64);
+            rt_s(out, ":\n  %fp");
+            rt_i(out, idx as i64);
+            rt_s(out, " = ptrtoint ptr @.str");
+            rt_i(out, fail_id as i64);
+            rt_s(out, " to i64\n  %fw");
+            rt_i(out, idx as i64);
+            rt_s(out, " = call i64 @_cx_syscall(i64 1, i64 1, i64 %fp");
+            rt_i(out, idx as i64);
+            rt_s(out, ", i64 ");
+            rt_i(out, len(fail_msg) as i64);
+            rt_s(out, ", i64 0, i64 0, i64 0)\n  %fc");
+            rt_i(out, idx as i64);
+            rt_s(out, " = load i32, ptr %failures, align 4\n  %fn");
+            rt_i(out, idx as i64);
+            rt_s(out, " = add i32 %fc");
+            rt_i(out, idx as i64);
+            rt_s(out, ", 1\n  store i32 %fn");
+            rt_i(out, idx as i64);
+            rt_s(out, ", ptr %failures, align 4\n  br label %next");
+            rt_i(out, idx as i64);
+            rt_s(out, "\nnext");
+            rt_i(out, idx as i64);
+            rt_s(out, ":\n");
+            idx = idx + 1;
+        }
+        g = (*g).next;
+    }
+    rt_s(out, "  %fc = load i32, ptr %failures, align 4\n  %bad = icmp ne i32 %fc, 0\n  %code = select i1 %bad, i32 1, i32 0\n  %ext = sext i32 %code to i64\n  %exit = call i64 @_cx_syscall(i64 60, i64 %ext, i64 0, i64 0, i64 0, i64 0, i64 0)\n  unreachable\n}\n\n");
+    }
+}
+
+fn cg_run_tests(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program, sem: *mut Sem) -> str {
+    unsafe {
+    unsafe {
+    let cg: *mut Cg = cg_init(a, sem);
+    cg_prelude(cg);
+    let mut entry: Buf = rt_buf(a);
+    let ep: *mut Buf = &mut entry;
+    cg_test_entry(cg, ep);
+    return cg_module(cg, ep);
     }
 
     }

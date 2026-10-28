@@ -9,4 +9,8 @@ import "ast.cx";
 import "parser.cx";
 import "semantic.cx";
 import "codegen.cx";
+import "fmt.cx";
+import "lint.cx";
+import "doc.cx";
+import "repl.cx";
 import "driver.cx";
