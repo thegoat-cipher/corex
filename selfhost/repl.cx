@@ -22,10 +22,16 @@ struct Session {
     head: *mut RItem,
     tail: *mut RItem,
     opt: i32,
+    o: *mut Opts,
 }
 
 fn rs_new(a: *mut Arena, envp: **u8, opt: i32) -> Session {
-    return Session { a: a, envp: envp, head: null, tail: null, opt: opt };
+    let o: *mut Opts = rt_alloc(a, sizeof(Opts)) as *mut Opts;
+    unsafe {
+        (*o) = opts_new(a, 1);
+        (*o).opt = opt;
+    }
+    return Session { a: a, envp: envp, head: null, tail: null, opt: opt, o: o };
 }
 
 fn rs_upsert(s: *mut Session, key: str, text: str) {
@@ -288,7 +294,7 @@ fn rs_run_current(s: *mut Session, quiet: bool) {
             return;
         }
         let bin: cstr = rt_temp_path((*s).a, ".repl");
-        let rc: i32 = dr_build((*s).a, (*s).envp, ll, bin, (*s).opt);
+        let rc: i32 = dr_build((*s).a, (*s).envp, ll, bin, (*s).opt, (*s).o, false);
         if rc != 0 {
             return;
         }

@@ -38,6 +38,13 @@ struct Cg {
     used_cstr_len: bool,
     used_cstr_str: bool,
     used_assert: bool,
+    // `--sanitize`: trap on signed integer overflow. Bounds checks are always
+    // emitted, matching the Rust oracle's sanitize mode plus its defaults.
+    sanitize: bool,
+    // `--hosted`: the C runtime provides `_start`; do not synthesize one.
+    hosted: bool,
+    // Shared/static-library output has no entry point.
+    make_entry: bool,
 }
 
 struct Fn {
@@ -819,9 +826,59 @@ fn null_val() -> Val {
     }
 }
 
+fn checked_int(ty: *mut Type) -> bool {
+    unsafe {
+        let k: K = (*ty).kind;
+        return k == K::I8 || k == K::I16 || k == K::I32 || k == K::I64;
+    }
+}
+
+// `--sanitize`: `llvm.{sadd,ssub,smul}.with.overflow` plus a trap, matching the
+// Rust oracle's checked arithmetic.
+fn gen_checked_arith(f: *mut Fn, op: T, a: str, b: str, ty: *mut Type) -> str {
+    unsafe {
+        let bits: i32 = int_bits(ty);
+        let mut nb: Buf = rt_buf((*(*f).cg).a);
+        let nbp: *mut Buf = &mut nb;
+        if op == T::Plus {
+            rt_s(nbp, "sadd");
+        } else if op == T::Minus {
+            rt_s(nbp, "ssub");
+        } else {
+            rt_s(nbp, "smul");
+        }
+        let nonce: i32 = fnewtmp(f);
+        rt_s(nbp, ".with.overflow.i");
+        rt_i(nbp, bits as i64);
+        let intr: str = rt_view(nbp);
+        fs(f, "  %t"); fi(f, nonce as i64);
+        fs(f, " = call {i"); fi(f, bits as i64); fs(f, ", i1} @llvm.");
+        fs(f, intr);
+        fs(f, "(i"); fi(f, bits as i64); fs(f, " "); fs(f, a);
+        fs(f, ", i"); fi(f, bits as i64); fs(f, " "); fs(f, b); fs(f, ")\n");
+        let vtmp: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, vtmp as i64);
+        fs(f, " = extractvalue {i"); fi(f, bits as i64); fs(f, ", i1} %t");
+        fi(f, nonce as i64); fs(f, ", 0\n");
+        let otmp: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, otmp as i64);
+        fs(f, " = extractvalue {i"); fi(f, bits as i64); fs(f, ", i1} %t");
+        fi(f, nonce as i64); fs(f, ", 1\n");
+        // `gen_abort_if` aborts when its condition is false: pass "no overflow".
+        let ok: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, ok as i64);
+        fs(f, " = xor i1 %t"); fi(f, otmp as i64); fs(f, ", true\n");
+        gen_abort_if(f, reg_of(f, ok), "corex: integer overflow\n");
+        return reg_of(f, vtmp);
+    }
+}
+
 fn gen_simple_bin(f: *mut Fn, op: T, a: str, b: str, ty: *mut Type) -> str {
     unsafe {
     unsafe {
+    if (*((*f).cg)).sanitize && checked_int(ty) && (op == T::Plus || op == T::Minus || op == T::Star) {
+        return gen_checked_arith(f, op, a, b, ty);
+    }
     let mut rhs: str = b;
     if op == T::Shl || op == T::Shr {
         let bits: i32 = int_bits(ty);
@@ -2298,6 +2355,11 @@ done:
 fn gen_entry(cg: *mut Cg, out: *mut Buf) {
     unsafe {
     unsafe {
+    // `--hosted` leaves `_start` to the C runtime; shared/static-library
+    // output has no entry point at all.
+    if (*cg).hosted || !(*cg).make_entry {
+        return;
+    }
     let m: *mut Decl = sem_find((*cg).sem, "main");
     let s: *mut Decl = sem_find((*cg).sem, "_start");
     if s != null {
@@ -2318,7 +2380,8 @@ fn gen_entry(cg: *mut Cg, out: *mut Buf) {
     }
 }
 
-fn cg_init(a: *mut Arena, sem: *mut Sem) -> *mut Cg {
+fn cg_init(a: *mut Arena, sem: *mut Sem, sanitize: bool, hosted: bool,
+           make_entry: bool) -> *mut Cg {
     let cg: *mut Cg = rt_alloc(a, sizeof(Cg)) as *mut Cg;
     unsafe {
         (*cg).a = a;
@@ -2342,6 +2405,15 @@ fn cg_init(a: *mut Arena, sem: *mut Sem) -> *mut Cg {
         (*cg).used_cstr_len = false;
         (*cg).used_cstr_str = false;
         (*cg).used_assert = false;
+        (*cg).sanitize = sanitize;
+        (*cg).hosted = hosted;
+        (*cg).make_entry = make_entry;
+        if sanitize {
+            rt_s((*cg).decls, "declare {i8, i1} @llvm.sadd.with.overflow.i8(i8, i8)\ndeclare {i8, i1} @llvm.ssub.with.overflow.i8(i8, i8)\ndeclare {i8, i1} @llvm.smul.with.overflow.i8(i8, i8)\n");
+            rt_s((*cg).decls, "declare {i16, i1} @llvm.sadd.with.overflow.i16(i16, i16)\ndeclare {i16, i1} @llvm.ssub.with.overflow.i16(i16, i16)\ndeclare {i16, i1} @llvm.smul.with.overflow.i16(i16, i16)\n");
+            rt_s((*cg).decls, "declare {i32, i1} @llvm.sadd.with.overflow.i32(i32, i32)\ndeclare {i32, i1} @llvm.ssub.with.overflow.i32(i32, i32)\ndeclare {i32, i1} @llvm.smul.with.overflow.i32(i32, i32)\n");
+            rt_s((*cg).decls, "declare {i64, i1} @llvm.sadd.with.overflow.i64(i64, i64)\ndeclare {i64, i1} @llvm.ssub.with.overflow.i64(i64, i64)\ndeclare {i64, i1} @llvm.smul.with.overflow.i64(i64, i64)\n\n");
+        }
     }
     return cg;
 }
@@ -2377,18 +2449,20 @@ fn cg_module(cg: *mut Cg, ep: *mut Buf) -> str {
     }
 }
 
-fn cg_run(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program, sem: *mut Sem) -> str {
+fn cg_run_ex(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program,
+             sem: *mut Sem, sanitize: bool, hosted: bool, make_entry: bool) -> str {
     unsafe {
-    unsafe {
-    let cg: *mut Cg = cg_init(a, sem);
+    let cg: *mut Cg = cg_init(a, sem, sanitize, hosted, make_entry);
     cg_prelude(cg);
     let mut entry: Buf = rt_buf(a);
     let ep: *mut Buf = &mut entry;
     gen_entry(cg, ep);
     return cg_module(cg, ep);
     }
+}
 
-    }
+fn cg_run(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program, sem: *mut Sem) -> str {
+    return cg_run_ex(a, d, srcs, prog, sem, false, false, true);
 }
 
 // `corexc test`: emit `_start` that calls every `test_*` function, prints
@@ -2494,7 +2568,7 @@ fn cg_test_entry(cg: *mut Cg, out: *mut Buf) {
 fn cg_run_tests(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program, sem: *mut Sem) -> str {
     unsafe {
     unsafe {
-    let cg: *mut Cg = cg_init(a, sem);
+    let cg: *mut Cg = cg_init(a, sem, false, false, true);
     cg_prelude(cg);
     let mut entry: Buf = rt_buf(a);
     let ep: *mut Buf = &mut entry;

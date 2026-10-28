@@ -201,6 +201,154 @@ rc=$?
 set -e
 expect_rc "$(cat "$ROOT/tests/selfhosting/cases/positive/arith.rc")" "$rc" "default output runs"
 
+# --- link/emit flags (SH-036) ---------------------------------------------
+cat >"$TMP/lib.cx" <<'CXEOF'
+pub fn add(a: i32, b: i32) -> i32 { return a + b; }
+CXEOF
+
+# --emit obj requires an entry point (same rule as the Rust CLI).
+printf 'fn main() -> i32 { return 0; }\n' >"$TMP/entry.cx"
+"$COMPILER" build "$TMP/entry.cx" --emit obj -o "$TMP/entry.o" >/dev/null
+if file "$TMP/entry.o" | grep -q "relocatable"; then ok; else bad "--emit obj is not relocatable"; fi
+set +e
+"$COMPILER" build "$TMP/lib.cx" --emit obj -o "$TMP/noentry.o" >/dev/null 2>&1
+rc=$?
+set -e
+expect_rc 1 "$rc" "--emit obj without entry point"
+
+# --emit staticlib: no entry point needed; archive holds one object.
+"$COMPILER" build "$TMP/lib.cx" --emit staticlib -o "$TMP/libadd.a" >/dev/null
+[ "$(llvm-ar t "$TMP/libadd.a" | wc -l)" = "1" ] && ok || bad "--emit staticlib member count"
+
+# --emit shared: no entry point needed; exported symbol is callable from C.
+"$COMPILER" build "$TMP/lib.cx" --emit shared -o "$TMP/libadd.so" >/dev/null
+if file "$TMP/libadd.so" | grep -q "shared object"; then ok; else bad "--emit shared is not a shared object"; fi
+if nm -D "$TMP/libadd.so" | grep -q " T add"; then ok; else bad "--emit shared does not export add"; fi
+
+cat >"$TMP/host.c" <<'CEOF'
+#include <stdio.h>
+extern int add(int, int);
+int main(void) { printf("%d\n", add(20, 22)); return 0; }
+CEOF
+if cc "$TMP/host.c" "$TMP/libadd.a" -o "$TMP/host" 2>/dev/null; then
+  out="$("$TMP/host")"
+  [ "$out" = "42" ] && ok || bad "staticlib link output: $out"
+else
+  bad "cc could not link against libadd.a"
+fi
+# The shared object loads and the symbol is callable through the dynamic loader.
+if command -v python3 >/dev/null 2>&1; then
+  out="$(cd "$TMP" && python3 -c 'import ctypes; print(ctypes.CDLL("./libadd.so").add(19, 23))' 2>/dev/null)"
+  [ "$out" = "42" ] && ok || bad "shared object call returned: $out"
+fi
+
+# --link / -L / -l against a C object.
+cat >"$TMP/twice.c" <<'CEOF'
+int twice(int x) { return x * 2; }
+CEOF
+cc -c "$TMP/twice.c" -o "$TMP/twice.o"
+cat >"$TMP/usetwice.cx" <<'CXEOF'
+extern "C" fn twice(x: i32) -> i32;
+fn main() -> i32 { return twice(21); }
+CXEOF
+"$COMPILER" build "$TMP/usetwice.cx" --link "$TMP/twice.o" -o "$TMP/usetwice" >/dev/null
+set +e
+"$TMP/usetwice" >/dev/null 2>&1
+rc=$?
+set -e
+expect_rc 42 "$rc" "--link object"
+ar rcs "$TMP/libtwice.a" "$TMP/twice.o"
+"$COMPILER" build "$TMP/usetwice.cx" -L "$TMP" -l twice -o "$TMP/usetwice2" >/dev/null
+set +e
+"$TMP/usetwice2" >/dev/null 2>&1
+rc=$?
+set -e
+expect_rc 42 "$rc" "-L/-l static library"
+
+# --hosted links against the C runtime and keeps main as the entry point.
+printf 'fn main() -> i32 { return 3; }\n' >"$TMP/hostmain.cx"
+"$COMPILER" build "$TMP/hostmain.cx" --hosted -o "$TMP/hostmain" >/dev/null
+file "$TMP/hostmain" | grep -q "dynamically linked" && ok || bad "--hosted is not dynamically linked"
+set +e
+"$TMP/hostmain" >/dev/null 2>&1
+rc=$?
+set -e
+expect_rc 3 "$rc" "--hosted program"
+
+# --sanitize traps on signed integer overflow; the default wraps.
+cat >"$TMP/ovf.cx" <<'CXEOF'
+fn main() -> i32 {
+    let a: i32 = 2147483647;
+    let b: i32 = a + 1;
+    return b;
+}
+CXEOF
+"$COMPILER" build "$TMP/ovf.cx" --sanitize -o "$TMP/ovf" >/dev/null
+set +e
+msg="$("$TMP/ovf" 2>&1)"
+rc=$?
+set -e
+expect_rc 101 "$rc" "--sanitize overflow trap"
+case "$msg" in
+  *"integer overflow"*) ok ;;
+  *) bad "--sanitize message: $msg" ;;
+esac
+"$COMPILER" build "$TMP/ovf.cx" -o "$TMP/ovf0" >/dev/null
+set +e
+"$TMP/ovf0" >/dev/null 2>&1
+rc=$?
+set -e
+expect_rc 0 "$rc" "default wrapping arithmetic"
+
+# -I searches include directories for `import`.
+mkdir -p "$TMP/inc"
+printf 'fn triple(x: i32) -> i32 { return x * 3; }\n' >"$TMP/inc/util.cx"
+cat >"$TMP/useimp.cx" <<'CXEOF'
+import "util.cx";
+fn main() -> i32 { return triple(14); }
+CXEOF
+"$COMPILER" build "$TMP/useimp.cx" -I "$TMP/inc" -o "$TMP/useimp" >/dev/null
+set +e
+"$TMP/useimp" >/dev/null 2>&1
+rc=$?
+set -e
+expect_rc 42 "$rc" "-I import search path"
+set +e
+"$COMPILER" check "$TMP/useimp.cx" >/dev/null 2>&1
+rc=$?
+set -e
+expect_rc 1 "$rc" "import without -I fails"
+
+# --cfg is accepted (it only gates `#[cfg]`, which the bootstrap rejects).
+"$COMPILER" build "$TMP/hostmain.cx" --cfg feature=fast -o "$TMP/cfgmain" >/dev/null
+set +e
+"$TMP/cfgmain" >/dev/null 2>&1
+rc=$?
+set -e
+expect_rc 3 "$rc" "--cfg accepted"
+
+# -g fails with a diagnostic instead of silently emitting nothing.
+set +e
+err="$("$COMPILER" build "$TMP/hostmain.cx" -g -o "$TMP/nodbg" 2>&1 >/dev/null)"
+rc=$?
+set -e
+expect_rc 2 "$rc" "-g rejected"
+case "$err" in
+  *"debug info"*) ok ;;
+  *) bad "-g message: $err" ;;
+esac
+
+# Unknown --emit values are usage errors.
+set +e
+"$COMPILER" build "$TMP/hostmain.cx" --emit elf -o "$TMP/x" >/dev/null 2>&1
+rc=$?
+set -e
+expect_rc 2 "$rc" "unknown --emit value"
+
+# --shared link flag on a program with an entry point.
+"$COMPILER" build "$TMP/hostmain.cx" --shared -o "$TMP/hshared.so" >/dev/null
+file "$TMP/hshared.so" | grep -q "shared object" && ok || bad "--shared is not a shared object"
+
 # --- usage errors ----------------------------------------------------------
 set +e
 "$COMPILER" >/dev/null 2>&1
