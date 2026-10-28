@@ -1,0 +1,29 @@
+fn main() -> i32 {
+    let mut i: i32 = 0;
+    let mut sum: i32 = 0;
+    while i < 5 {
+        i += 1;
+        if i == 2 { continue; }
+        if i == 4 { break; }
+        sum += i;
+    }
+    print(sum);
+    let mut n: i32 = 0;
+    loop {
+        n += 1;
+        if n == 3 { break; }
+    }
+    print(n);
+    let mut x: i32 = 2;
+    switch x {
+        case 1 { print(10); }
+        case 2 { print(20); }
+        case 3 { print(30); }
+        default { print(99); }
+    }
+    switch x {
+        case 1 { print(11); }
+        default { print(22); }
+    }
+    return 0;
+}

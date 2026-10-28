@@ -1,0 +1,116 @@
+// vec<T> surface: vec_new/vec_push/vec_free/vec_slice, len, indexing,
+// struct elements, parameters/returns, struct fields, arrays of vecs,
+// shallow header copies, layout, and the runtime index check.
+
+struct Point {
+    x: i32,
+    y: i32,
+}
+
+struct Bag {
+    items: vec<i32>,
+    tag: i32,
+}
+
+fn total(v: vec<i32>) -> i32 {
+    let mut sum: i32 = 0;
+    let mut i: usize = 0;
+    while i < len(v) {
+        sum += v[i];
+        i += 1;
+    }
+    return sum;
+}
+
+fn build(n: i32) -> vec<i32> {
+    let mut v: vec<i32> = vec_new(0);
+    let mut i: i32 = 0;
+    while i < n {
+        vec_push(&mut v, i * 10);
+        i += 1;
+    }
+    return v;
+}
+
+fn main() -> i32 {
+    let empty: vec<i32> = vec_new(0);
+    print(len(empty));
+    print(sizeof(vec<i32>));
+    print(alignof(vec<i32>));
+
+    let mut v: vec<i32> = vec_new(2);
+    vec_push(&mut v, 10);
+    vec_push(&mut v, 20);
+    print(len(v));
+    print(v[0]);
+    print(v[1]);
+    vec_push(&mut v, 30);
+    vec_push(&mut v, 40);
+    vec_push(&mut v, 50);
+    print(len(v));
+    print(v[2]);
+    print(v[4]);
+    v[1] = 21;
+    print(v[1]);
+    print(total(v));
+
+    let built: vec<i32> = build(3);
+    print(len(built));
+    print(built[0]);
+    print(built[2]);
+
+    let s: [i32] = vec_slice(&built);
+    print(len(s));
+    print(s[1]);
+    let s2: [i32] = vec_slice(&v);
+    print(len(s2));
+    print(s2[3]);
+
+    let mut ps: vec<Point> = vec_new(2);
+    vec_push(&mut ps, Point { x: 1, y: 2 });
+    vec_push(&mut ps, Point { x: 3, y: 4 });
+    vec_push(&mut ps, Point { x: 5, y: 6 });
+    print(len(ps));
+    print(ps[0].x);
+    print(ps[1].y);
+    ps[1].x = 30;
+    print(ps[1].x);
+    print(ps[2].y);
+
+    let mut bag: Bag = Bag { items: built, tag: 7 };
+    print(bag.tag);
+    print(len(bag.items));
+    vec_push(&mut bag.items, 99);
+    print(len(bag.items));
+    print(bag.items[3]);
+    print(len(built));
+
+    let mut pair: [vec<i32>; 2] = [vec_new(1), vec_new(2)];
+    vec_push(&mut pair[0], 5);
+    vec_push(&mut pair[1], 6);
+    print(len(pair[0]));
+    print(pair[0][0]);
+    print(len(pair[1]));
+    print(pair[1][0]);
+
+    let mut a: vec<i32> = vec_new(2);
+    vec_push(&mut a, 11);
+    let mut b: vec<i32> = a;
+    print(len(a));
+    print(len(b));
+    vec_push(&mut b, 22);
+    print(len(a));
+    print(len(b));
+    print(b[1]);
+    let pa: *i32 = data_ptr(vec_slice(&a));
+    let pb: *i32 = data_ptr(vec_slice(&b));
+    print(pa == pb);
+
+    let mut tmp: vec<i32> = vec_new(4);
+    vec_push(&mut tmp, 1);
+    vec_push(&mut tmp, 2);
+    vec_free(&mut tmp);
+    print(len(tmp));
+
+    return 0;
+}

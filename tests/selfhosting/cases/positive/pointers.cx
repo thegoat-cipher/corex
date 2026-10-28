@@ -1,0 +1,19 @@
+fn main() -> i32 {
+    unsafe {
+        let raw: *mut u8 = alloc(16);
+        let slot: *mut u64 = raw as *mut u64;
+        *slot = 12345;
+        let read: *u64 = slot as *u64;
+        print(*read);
+        let second: *mut u64 = (raw + 8) as *mut u64;
+        *second = 67890;
+        print(*second);
+        print(*(raw as *u64));
+        free(raw, 16);
+    }
+    let mut x: i32 = 3;
+    let p: *mut i32 = &mut x;
+    unsafe { *p = 9; }
+    print(x);
+    return 0;
+}

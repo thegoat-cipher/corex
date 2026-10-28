@@ -1,0 +1,1929 @@
+// CoreX bootstrap semantic analysis: symbol collection, type resolution,
+// struct layout, constant evaluation, type checking, mutability and unsafe
+// gating, and return analysis. The AST is annotated in place; codegen consumes
+// `expr.ty`, `expr.decl`, `expr.index`, `expr.opty`, and `stmt.decl`.
+
+struct Sem {
+    a: *mut Arena,
+    d: *mut Diags,
+    srcs: *mut SrcList,
+    prog: *mut Program,
+    globals: *mut Decl,
+    gtail: *mut Decl,
+    scope: *mut Scope,
+    cur_fn: *mut Decl,
+    unsafe_depth: i32,
+    loop_depth: i32,
+    switch_depth: i32,
+    slot: i32,
+    errors: i32,
+}
+
+fn sdiag(s: *mut Sem, file: i32, line: i32, col: i32, msg: str) {
+    unsafe {
+    diag_add((*s).d, (*s).a, file, line, col, msg);
+    (*s).errors = (*s).errors + 1;
+
+    }
+}
+
+fn tkind_of(t: *mut Type) -> K {
+    unsafe {
+    return (*t).kind;
+
+    }
+}
+
+fn type_is_int(t: *mut Type) -> bool {
+    unsafe {
+    if t == null {
+        return false;
+    }
+    let k: K = (*t).kind;
+    return k == K::I8 || k == K::I16 || k == K::I32 || k == K::I64
+        || k == K::U8 || k == K::U16 || k == K::U32 || k == K::U64
+        || k == K::Usize || k == K::Isize || k == K::Char;
+
+    }
+}
+
+fn type_is_signed(t: *mut Type) -> bool {
+    unsafe {
+    if t == null { return false; }
+    let k: K = (*t).kind;
+    return k == K::I8 || k == K::I16 || k == K::I32 || k == K::I64 || k == K::Isize;
+
+    }
+}
+
+fn type_ok(s: *mut Sem, t: *mut Type) -> bool {
+    unsafe {
+    if t == null { return false; }
+    let base: usize = (*(*s).a).base as usize;
+    let cap: usize = (*(*s).a).cap;
+    let p: usize = t as usize;
+    if p < base || p + sizeof(Type) > base + cap { return false; }
+    let k: i32 = (*t).kind as i32;
+    return k >= 0 && k <= 23;
+
+    }
+}
+
+fn type_is_ptr(t: *mut Type) -> bool {
+    unsafe {
+    if t == null { return false; }
+    return (*t).kind == K::Ptr || (*t).kind == K::CStr;
+
+    }
+}
+
+fn type_is_aggregate(t: *mut Type) -> bool {
+    unsafe {
+    if t == null { return false; }
+    let k: K = (*t).kind;
+    return k == K::Str || k == K::Slice || k == K::Array || k == K::Struct || k == K::Vec;
+
+    }
+}
+
+fn type_eq(a: *mut Type, b: *mut Type) -> bool {
+    unsafe {
+    if a == null || b == null {
+        return a == b;
+    }
+    if (*a).kind != (*b).kind {
+        return false;
+    }
+    let k: K = (*a).kind;
+    if k == K::Ptr {
+        return type_eq((*a).elem, (*b).elem);
+    }
+    if k == K::Array {
+        return (*a).len == (*b).len && type_eq((*a).elem, (*b).elem);
+    }
+    if k == K::Slice || k == K::Vec {
+        return type_eq((*a).elem, (*b).elem);
+    }
+    if k == K::Struct || k == K::Enum {
+        return (*a).decl == (*b).decl;
+    }
+    return true;
+
+    }
+}
+
+fn type_compat(expected: *mut Type, actual: *mut Type) -> bool {
+    unsafe {
+    if expected == null || actual == null {
+        return expected == actual;
+    }
+    if type_eq(expected, actual) {
+        return true;
+    }
+    if (*expected).kind == K::Ptr && (*actual).kind == K::Ptr {
+        if !(*expected).mutable && type_eq((*expected).elem, (*actual).elem) {
+            return true;
+        }
+    }
+    if (*expected).kind == K::Str && (*actual).kind == K::Slice {
+        return (*actual).elem != null && (*((*actual).elem)).kind == K::U8;
+    }
+    if (*expected).kind == K::Slice && (*actual).kind == K::Str {
+        return (*expected).elem != null && (*((*expected).elem)).kind == K::U8;
+    }
+    return false;
+
+    }
+}
+
+fn align_to(v: usize, a: usize) -> usize {
+    unsafe {
+    if a <= 1 {
+        return v;
+    }
+    return (v + a - 1) & (0 - a);
+
+    }
+}
+
+fn sem_find(s: *mut Sem, name: str) -> *mut Decl {
+    unsafe {
+    let mut d: *mut Decl = (*s).globals;
+    while d != null {
+        if rt_eq((*d).name, name) {
+            return d;
+        }
+        d = (*d).next;
+    }
+    return null;
+
+    }
+}
+
+fn sem_add_global(s: *mut Sem, d: *mut Decl) {
+    unsafe {
+    let old: *mut Decl = sem_find(s, (*d).name);
+    if old != null {
+        sdiag(s, (*d).file, (*d).line, (*d).col, "duplicate declaration");
+        return;
+    }
+    if (*s).gtail == null {
+        (*s).globals = d;
+    } else {
+        (*(*s).gtail).next = d;
+    }
+    (*s).gtail = d;
+
+    }
+}
+
+fn scope_push(s: *mut Sem) {
+    unsafe {
+    let sc: *mut Scope = rt_alloc((*s).a, sizeof(Scope)) as *mut Scope;
+    (*sc).parent = (*s).scope;
+    (*sc).vars = null;
+    (*s).scope = sc;
+
+    }
+}
+
+fn scope_pop(s: *mut Sem) {
+    unsafe {
+    (*s).scope = (*(*s).scope).parent;
+
+    }
+}
+
+fn scope_add(s: *mut Sem, d: *mut Decl) {
+    unsafe {
+    if rt_eq((*d).name, "_") {
+        return;
+    }
+    (*d).next_local = (*(*s).scope).vars;
+    (*(*s).scope).vars = d;
+
+    }
+}
+
+fn lookup(s: *mut Sem, name: str) -> *mut Decl {
+    unsafe {
+    let mut sc: *mut Scope = (*s).scope;
+    while sc != null {
+        let mut d: *mut Decl = (*sc).vars;
+        while d != null {
+            if rt_eq((*d).name, name) {
+                return d;
+            }
+            d = (*d).next_local;
+        }
+        sc = (*sc).parent;
+    }
+    return sem_find(s, name);
+
+    }
+}
+
+fn find_field(d: *mut Decl, name: str) -> *mut Field {
+    unsafe {
+    let mut f: *mut Field = (*d).fields;
+    while f != null {
+        if rt_eq((*f).name, name) {
+            return f;
+        }
+        f = (*f).next;
+    }
+    return null;
+
+    }
+}
+
+fn find_variant(d: *mut Decl, name: str) -> *mut Variant {
+    unsafe {
+    let mut v: *mut Variant = (*d).variants;
+    while v != null {
+        if rt_eq((*v).name, name) {
+            return v;
+        }
+        v = (*v).next;
+    }
+    return null;
+
+    }
+}
+
+fn type_size(s: *mut Sem, t: *mut Type) -> usize {
+    unsafe {
+    if t == null {
+        return 8;
+    }
+    let k: K = (*t).kind;
+    if k == K::Void {
+        return 0;
+    }
+    if k == K::Bool || k == K::I8 || k == K::U8 || k == K::Char {
+        return 1;
+    }
+    if k == K::I16 || k == K::U16 {
+        return 2;
+    }
+    if k == K::I32 || k == K::U32 || k == K::F32 || k == K::Enum {
+        return 4;
+    }
+    if k == K::I64 || k == K::U64 || k == K::Usize || k == K::Isize || k == K::F64 || k == K::Ptr || k == K::CStr {
+        return 8;
+    }
+    if k == K::Str || k == K::Slice {
+        return 16;
+    }
+    if k == K::Vec {
+        return 24;
+    }
+    if k == K::Array {
+        return (*t).len * type_size(s, (*t).elem);
+    }
+    if k == K::Struct {
+        if (*t).decl != null {
+            if (*((*t).decl)).size == 0 && (*(*t).decl).nfields > 0 {
+                layout_struct(s, (*t).decl);
+            }
+            return (*((*t).decl)).size;
+        }
+        return 0;
+    }
+    return 8;
+
+    }
+}
+
+fn type_align(s: *mut Sem, t: *mut Type) -> usize {
+    unsafe {
+    if t == null {
+        return 8;
+    }
+    let k: K = (*t).kind;
+    if k == K::Void || k == K::Bool || k == K::I8 || k == K::U8 || k == K::Char {
+        return 1;
+    }
+    if k == K::I16 || k == K::U16 {
+        return 2;
+    }
+    if k == K::I32 || k == K::U32 || k == K::F32 || k == K::Enum {
+        return 4;
+    }
+    if k == K::I64 || k == K::U64 || k == K::Usize || k == K::Isize || k == K::F64 || k == K::Ptr || k == K::CStr {
+        return 8;
+    }
+    if k == K::Str || k == K::Slice || k == K::Vec {
+        return 8;
+    }
+    if k == K::Array {
+        return type_align(s, (*t).elem);
+    }
+    if k == K::Struct {
+        if (*t).decl != null {
+            if (*((*t).decl)).size == 0 && (*(*t).decl).nfields > 0 {
+                layout_struct(s, (*t).decl);
+            }
+            return (*((*t).decl)).alignment;
+        }
+        return 1;
+    }
+    return 8;
+
+    }
+}
+
+fn layout_struct(s: *mut Sem, d: *mut Decl) {
+    unsafe {
+    if (*d).laid_out {
+        return;
+    }
+    (*d).busy = true;
+    let mut off: usize = 0;
+    let mut al: usize = 1;
+    let mut f: *mut Field = (*d).fields;
+    while f != null {
+        let ft: *mut Type = resolve_type(s, (*f).ty);
+        let fa: usize = type_align(s, ft);
+        let fs: usize = type_size(s, ft);
+        off = align_to(off, fa);
+        (*f).offset = off;
+        (*f).size = fs;
+        (*f).alignment = fa;
+        off = off + fs;
+        if fa > al {
+            al = fa;
+        }
+        f = (*f).next;
+    }
+    (*d).alignment = al;
+    (*d).size = align_to(off, al);
+    (*d).busy = false;
+    (*d).laid_out = true;
+
+    }
+}
+
+fn resolve_type(s: *mut Sem, t: *mut Type) -> *mut Type {
+    unsafe {
+    if t == null {
+        return null;
+    }
+    let k: K = (*t).kind;
+    if k == K::Named {
+        let d: *mut Decl = sem_find(s, (*t).name);
+        if d == null {
+            sdiag(s, 0, 0, 0, "unknown type");
+            (*t).kind = K::I32;
+            return t;
+        }
+        if (*d).kind == D::Struct {
+            (*t).kind = K::Struct;
+            (*t).decl = d;
+            return t;
+        }
+        if (*d).kind == D::Enum {
+            (*t).kind = K::Enum;
+            (*t).decl = d;
+            return t;
+        }
+        if (*d).kind == D::Typedef {
+            let target: *mut Type = resolve_type(s, (*d).ty);
+            (*t).kind = (*target).kind;
+            (*t).elem = (*target).elem;
+            (*t).len = (*target).len;
+            (*t).len_expr = (*target).len_expr;
+            (*t).decl = (*target).decl;
+            (*t).mutable = (*target).mutable;
+            (*t).name = (*target).name;
+            return t;
+        }
+        sdiag(s, 0, 0, 0, "type name does not denote a type");
+        (*t).kind = K::I32;
+        return t;
+    }
+    if k == K::Ptr || k == K::Slice || k == K::Array || k == K::Vec {
+        (*t).elem = resolve_type(s, (*t).elem);
+        if k == K::Array && (*t).len_expr != null {
+            (*t).len = eval_int(s, (*t).len_expr) as usize;
+            (*t).len_expr = null;
+        }
+        return t;
+    }
+    return t;
+
+    }
+}
+
+fn eval_str(s: *mut Sem, e: *mut Expr) -> str {
+    unsafe {
+    if e == null {
+        return "";
+    }
+    if (*e).kind == E::StrLit {
+        return (*e).text;
+    }
+    if (*e).kind == E::Ident {
+        let d: *mut Decl = lookup(s, (*e).name);
+        if d != null && (*d).kind == D::Const && (*d).cval_kind == 2 {
+            return (*d).cval_s;
+        }
+    }
+    return "";
+
+    }
+}
+
+fn eval_int(s: *mut Sem, e: *mut Expr) -> i64 {
+    unsafe {
+    if e == null {
+        return 0;
+    }
+    let k: E = (*e).kind;
+    if k == E::IntLit || k == E::CharLit || k == E::BoolLit {
+        return (*e).ival;
+    }
+    if k == E::NullLit {
+        return 0;
+    }
+    if k == E::Ident {
+        let d: *mut Decl = lookup(s, (*e).name);
+        if d != null && (*d).kind == D::Const && (*d).cval_kind == 1 {
+            return (*d).cval;
+        }
+        if d != null && (*d).kind == D::Enum {
+            return 0;
+        }
+        return 0;
+    }
+    if k == E::Path {
+        let d: *mut Decl = sem_find(s, (*e).name);
+        if d != null && (*d).kind == D::Enum {
+            let v: *mut Variant = find_variant(d, (*e).field);
+            if v != null {
+                return (*v).value;
+            }
+        }
+        return 0;
+    }
+    if k == E::Sizeof {
+        let t: *mut Type = resolve_type(s, (*e).type_arg);
+        return type_size(s, t) as i64;
+    }
+    if k == E::Alignof {
+        let t: *mut Type = resolve_type(s, (*e).type_arg);
+        return type_align(s, t) as i64;
+    }
+    if k == E::Offsetof {
+        let t: *mut Type = resolve_type(s, (*e).type_arg);
+        if (*t).kind == K::Struct && (*t).decl != null {
+            let f: *mut Field = find_field((*t).decl, (*e).field);
+            if f != null {
+                return (*f).offset as i64;
+            }
+        }
+        return 0;
+    }
+    if k == E::Cast {
+        return eval_int(s, (*e).lhs);
+    }
+    if k == E::Unary {
+        let v: i64 = eval_int(s, (*e).lhs);
+        if (*e).op == T::Minus {
+            return 0 - v;
+        }
+        if (*e).op == T::Bang {
+            if v == 0 { return 1; }
+            return 0;
+        }
+        return v;
+    }
+    if k == E::Binary {
+        let a: i64 = eval_int(s, (*e).lhs);
+        let b: i64 = eval_int(s, (*e).rhs);
+        let op: T = (*e).op;
+        if op == T::Plus { return a + b; }
+        if op == T::Minus { return a - b; }
+        if op == T::Star { return a * b; }
+        if op == T::Slash { if b == 0 { return 0; } return a / b; }
+        if op == T::Percent { if b == 0 { return 0; } return a % b; }
+        if op == T::Amp { return a & b; }
+        if op == T::Pipe { return a | b; }
+        if op == T::Caret { return a ^ b; }
+        if op == T::Shl { return a << b; }
+        if op == T::Shr { return a >> b; }
+        if op == T::EqEq { if a == b { return 1; } return 0; }
+        if op == T::Ne { if a != b { return 1; } return 0; }
+        if op == T::Lt { if a < b { return 1; } return 0; }
+        if op == T::Le { if a <= b { return 1; } return 0; }
+        if op == T::Gt { if a > b { return 1; } return 0; }
+        if op == T::Ge { if a >= b { return 1; } return 0; }
+        if op == T::AmpAmp { if a != 0 && b != 0 { return 1; } return 0; }
+        if op == T::PipePipe { if a != 0 || b != 0 { return 1; } return 0; }
+    }
+    return 0;
+
+    }
+}
+
+fn is_untyped(e: *mut Expr) -> bool {
+    unsafe {
+    if e == null {
+        return false;
+    }
+    if (*e).kind == E::IntLit {
+        return true;
+    }
+    if (*e).kind == E::Unary {
+        if (*e).op == T::Minus || (*e).op == T::Bang {
+            return is_untyped((*e).lhs);
+        }
+    }
+    if (*e).kind == E::Binary {
+        let op: T = (*e).op;
+        if op == T::Plus || op == T::Minus || op == T::Star || op == T::Slash
+            || op == T::Percent || op == T::Amp || op == T::Pipe || op == T::Caret
+            || op == T::Shl || op == T::Shr {
+            return is_untyped((*e).lhs) && is_untyped((*e).rhs);
+        }
+    }
+    return false;
+
+    }
+}
+
+fn is_place(e: *mut Expr) -> bool {
+    unsafe {
+    if e == null {
+        return false;
+    }
+    let k: E = (*e).kind;
+    if k == E::Ident || k == E::Field || k == E::Index {
+        return true;
+    }
+    return k == E::Unary && (*e).op == T::Star;
+
+    }
+}
+
+fn place_mut(s: *mut Sem, e: *mut Expr) -> bool {
+    unsafe {
+    if e == null {
+        return false;
+    }
+    let k: E = (*e).kind;
+    if k == E::Ident {
+        if (*e).decl == null {
+            return false;
+        }
+        return (*((*e).decl)).is_mut;
+    }
+    if k == E::Field || k == E::Index {
+        return place_mut(s, (*e).lhs);
+    }
+    if k == E::Unary && (*e).op == T::Star {
+        let t: *mut Type = (*e).opty;
+        return t != null && (*t).kind == K::Ptr && (*t).mutable;
+    }
+    return false;
+
+    }
+}
+
+fn type_ptr_elem(t: *mut Type) -> *mut Type {
+    unsafe {
+    return (*t).elem;
+
+    }
+}
+
+fn check_expr(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
+    unsafe {
+    if e == null {
+        return null;
+    }
+    if expected != null && !type_ok(s, expected) {
+        sdiag(s, (*e).file, (*e).line, (*e).col, "internal: invalid expected type two");
+        let bad: *mut Type = type_new((*s).a, K::I32);
+        (*e).ty = bad;
+        return bad;
+    }
+    let k: E = (*e).kind;
+    if k == E::IntLit {
+        if expected != null && type_is_int(expected) {
+            (*e).ty = expected;
+            return expected;
+        }
+        let t: *mut Type = type_new((*s).a, K::I32);
+        (*e).ty = t;
+        return t;
+    }
+    if k == E::FloatLit {
+        sdiag(s, (*e).file, (*e).line, (*e).col, "floating point is not supported by the bootstrap compiler");
+        let t: *mut Type = type_new((*s).a, K::I32);
+        (*e).ty = t;
+        return t;
+    }
+    if k == E::StrLit {
+        if expected != null && (*expected).kind == K::Array && (*((*expected).elem)).kind == K::U8
+            && (*expected).len == len((*e).text) {
+            (*e).ty = expected;
+            return expected;
+        }
+        let t: *mut Type = type_new((*s).a, K::Str);
+        (*e).ty = t;
+        return t;
+    }
+    if k == E::CStrLit {
+        let t: *mut Type = type_new((*s).a, K::CStr);
+        (*e).ty = t;
+        return t;
+    }
+    if k == E::CharLit {
+        let t: *mut Type = type_new((*s).a, K::Char);
+        (*e).ty = t;
+        return t;
+    }
+    if k == E::BoolLit {
+        let t: *mut Type = type_new((*s).a, K::Bool);
+        (*e).ty = t;
+        return t;
+    }
+    if k == E::NullLit {
+        if expected != null && type_is_ptr(expected) {
+            (*e).ty = expected;
+            return expected;
+        }
+        sdiag(s, (*e).file, (*e).line, (*e).col, "cannot infer the type of null");
+        let t: *mut Type = type_new((*s).a, K::Ptr);
+        (*e).ty = t;
+        return t;
+    }
+    if k == E::Ident {
+        let d: *mut Decl = lookup(s, (*e).name);
+        if d == null {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "undefined name");
+            let t: *mut Type = type_new((*s).a, K::I32);
+            (*e).ty = t;
+            return t;
+        }
+        (*e).decl = d;
+        if (*d).kind == D::Func {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "function values are not supported");
+            let t: *mut Type = type_new((*s).a, K::I32);
+            (*e).ty = t;
+            return t;
+        }
+        (*e).ty = (*d).ty;
+        return (*d).ty;
+    }
+    if k == E::Path {
+        let d: *mut Decl = sem_find(s, (*e).name);
+        if d == null || (*d).kind != D::Enum {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "unknown enum");
+            let t: *mut Type = type_new((*s).a, K::I32);
+            (*e).ty = t;
+            return t;
+        }
+        let v: *mut Variant = find_variant(d, (*e).field);
+        if v == null {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "unknown enum variant");
+            let t: *mut Type = type_new((*s).a, K::I32);
+            (*e).ty = t;
+            return t;
+        }
+        (*e).decl = d;
+        (*e).index = (*v).value as i32;
+        let t: *mut Type = type_new((*s).a, K::Enum);
+        (*t).decl = d;
+        (*e).ty = t;
+        return t;
+    }
+    if k == E::Call {
+        return check_call(s, e, expected);
+    }
+    if k == E::Index {
+        let bt: *mut Type = resolve_type(s, check_expr(s, (*e).lhs, null));
+        let mut elem: *mut Type = null;
+        if (*bt).kind == K::Array || (*bt).kind == K::Slice || (*bt).kind == K::Vec {
+            elem = (*bt).elem;
+        } else if (*bt).kind == K::Str {
+            elem = type_new((*s).a, K::U8);
+        } else {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "indexing requires an array, slice, str, or vec");
+            elem = type_new((*s).a, K::I32);
+        }
+        let ut: *mut Type = type_new((*s).a, K::Usize);
+        let it: *mut Type = resolve_type(s, check_expr(s, (*e).rhs, ut));
+        if !type_compat(ut, it) {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "index must be usize");
+        }
+        if (*e).rhs != null && (*bt).kind == K::Array && (*((*e).rhs)).kind == E::IntLit {
+            let v: i64 = (*((*e).rhs)).ival;
+            if v < 0 || v >= (*bt).len as i64 {
+                sdiag(s, (*((*e).rhs)).file, (*((*e).rhs)).line, (*((*e).rhs)).col, "array index is out of bounds");
+            }
+        }
+        (*e).opty = bt;
+        (*e).ty = elem;
+        return elem;
+    }
+    if k == E::SliceRange {
+        let bt: *mut Type = resolve_type(s, check_expr(s, (*e).lhs, null));
+        let bk: K = (*bt).kind;
+        let mut res: *mut Type = null;
+        if bk == K::Array {
+            res = type_new((*s).a, K::Slice);
+            (*res).elem = (*bt).elem;
+        } else if bk == K::Slice || bk == K::Str {
+            res = bt;
+        } else {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "cannot slice a value of this type");
+            res = type_new((*s).a, K::Slice);
+            (*res).elem = type_new((*s).a, K::I32);
+        }
+        let ut: *mut Type = type_new((*s).a, K::Usize);
+        if (*e).rhs != null {
+            let st: *mut Type = resolve_type(s, check_expr(s, (*e).rhs, ut));
+            if !type_compat(ut, st) {
+                sdiag(s, (*((*e).rhs)).file, (*((*e).rhs)).line, (*((*e).rhs)).col, "slice bound must be usize");
+            }
+        }
+        if (*e).args != null {
+            let et: *mut Type = resolve_type(s, check_expr(s, (*e).args, ut));
+            if !type_compat(ut, et) {
+                sdiag(s, (*((*e).args)).file, (*((*e).args)).line, (*((*e).args)).col, "slice bound must be usize");
+            }
+        }
+        let mut start_const: bool = true;
+        let mut start_lit: i64 = 0;
+        if (*e).rhs != null {
+            if (*((*e).rhs)).kind == E::IntLit {
+                start_lit = (*((*e).rhs)).ival;
+            } else {
+                start_const = false;
+            }
+        }
+        if start_const && bk == K::Array && start_lit > (*bt).len as i64 {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "slice start exceeds length");
+        }
+        if (*e).args != null && (*((*e).args)).kind == E::IntLit {
+            let end_lit: i64 = (*((*e).args)).ival;
+            if start_const && start_lit > end_lit {
+                sdiag(s, (*e).file, (*e).line, (*e).col, "slice start is greater than end");
+            }
+            if bk == K::Array && end_lit > (*bt).len as i64 {
+                sdiag(s, (*e).file, (*e).line, (*e).col, "slice end exceeds length");
+            }
+        }
+        (*e).opty = bt;
+        (*e).ty = res;
+        return res;
+    }
+    if k == E::Field {
+        let bt: *mut Type = resolve_type(s, check_expr(s, (*e).lhs, null));
+        if (*bt).kind != K::Struct || (*bt).decl == null {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "field access requires a struct");
+            let t: *mut Type = type_new((*s).a, K::I32);
+            (*e).ty = t;
+            return t;
+        }
+        let f: *mut Field = find_field((*bt).decl, (*e).field);
+        if f == null {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "unknown field");
+            let t: *mut Type = type_new((*s).a, K::I32);
+            (*e).ty = t;
+            return t;
+        }
+        (*e).index = (*f).index;
+        (*e).opty = bt;
+        (*e).ty = (*f).ty;
+        return (*f).ty;
+    }
+    if k == E::Unary {
+        let op: T = (*e).op;
+        if op == T::Amp {
+            let bt: *mut Type = resolve_type(s, check_expr(s, (*e).lhs, null));
+            if (*e).is_mut && !place_mut(s, (*e).lhs) {
+                sdiag(s, (*e).file, (*e).line, (*e).col, "cannot take a mutable reference to this place");
+            }
+            (*e).opty = bt;
+            if expected != null && (*expected).kind == K::Slice && (*bt).kind == K::Array
+                && type_eq((*expected).elem, (*bt).elem) {
+                (*e).ty = expected;
+                return expected;
+            }
+            let t: *mut Type = type_ptr((*s).a, bt, (*e).is_mut);
+            (*e).ty = t;
+            return t;
+        }
+        if op == T::Star {
+            let bt: *mut Type = resolve_type(s, check_expr(s, (*e).lhs, null));
+            if !type_is_ptr(bt) {
+                sdiag(s, (*e).file, (*e).line, (*e).col, "dereference requires a pointer");
+                let t: *mut Type = type_new((*s).a, K::I32);
+                (*e).ty = t;
+                return t;
+            }
+            if (*s).unsafe_depth == 0 {
+                sdiag(s, (*e).file, (*e).line, (*e).col, "dereference requires unsafe");
+            }
+            (*e).opty = bt;
+            if !type_is_ptr(bt) {
+                let bad: *mut Type = type_new((*s).a, K::I32);
+                (*e).ty = bad;
+                return bad;
+            }
+            (*e).ty = type_ptr_elem(bt);
+            return (*e).ty;
+        }
+        if op == T::Minus {
+            let bt: *mut Type = resolve_type(s, check_expr(s, (*e).lhs, expected));
+            if !type_is_int(bt) {
+                sdiag(s, (*e).file, (*e).line, (*e).col, "unary minus requires an integer");
+            }
+            (*e).opty = bt;
+            (*e).ty = bt;
+            return bt;
+        }
+        let bt: *mut Type = resolve_type(s, check_expr(s, (*e).lhs, null));
+        if (*bt).kind == K::Bool {
+            (*e).opty = bt;
+            (*e).ty = bt;
+            return bt;
+        }
+        if !type_is_int(bt) {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "operator ! requires bool or an integer");
+        }
+        (*e).opty = bt;
+        (*e).ty = bt;
+        return bt;
+    }
+    if k == E::Binary {
+        return check_binary(s, e, expected);
+    }
+    if k == E::Cast {
+        let tt: *mut Type = resolve_type(s, (*e).type_arg);
+        let bt: *mut Type = resolve_type(s, check_expr(s, (*e).lhs, null));
+        let from_i: bool = type_is_int(bt);
+        let to_i: bool = type_is_int(tt);
+        let from_p: bool = type_is_ptr(bt);
+        let to_p: bool = type_is_ptr(tt);
+        if (*bt).kind == K::Enum && to_i {
+            // enum -> integer
+        } else if from_i && to_i {
+            // integer -> integer
+        } else if from_p && to_p {
+            // pointer -> pointer
+        } else if (from_i && to_p) || (from_p && to_i) {
+            if (*s).unsafe_depth == 0 {
+                sdiag(s, (*e).file, (*e).line, (*e).col, "integer/pointer casts require unsafe");
+            }
+        } else {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "invalid cast");
+        }
+        (*e).opty = bt;
+        (*e).ty = tt;
+        return tt;
+    }
+    if k == E::Sizeof || k == E::Alignof || k == E::Offsetof {
+        let tt: *mut Type = resolve_type(s, (*e).type_arg);
+        if k == E::Sizeof {
+            (*e).ival = type_size(s, tt) as i64;
+        } else if k == E::Alignof {
+            (*e).ival = type_align(s, tt) as i64;
+        } else {
+            if (*tt).kind == K::Struct && (*tt).decl != null {
+                let f: *mut Field = find_field((*tt).decl, (*e).field);
+                if f != null {
+                    (*e).ival = (*f).offset as i64;
+                }
+            }
+        }
+        let t: *mut Type = type_new((*s).a, K::Usize);
+        (*e).opty = tt;
+        (*e).ty = t;
+        return t;
+    }
+    if k == E::StructLit {
+        let d: *mut Decl = sem_find(s, (*e).name);
+        if d == null || (*d).kind != D::Struct {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "unknown struct type");
+            let t: *mut Type = type_new((*s).a, K::I32);
+            (*e).ty = t;
+            return t;
+        }
+        let st: *mut Type = type_new((*s).a, K::Struct);
+        (*st).decl = d;
+        let mut arg: *mut Expr = (*e).args;
+        while arg != null {
+            let f: *mut Field = find_field(d, (*arg).field);
+            if f == null {
+                sdiag(s, (*arg).file, (*arg).line, (*arg).col, "unknown field");
+            } else {
+                let vt: *mut Type = resolve_type(s, check_expr(s, arg, (*f).ty));
+                if !type_compat((*f).ty, vt) {
+                    sdiag(s, (*arg).file, (*arg).line, (*arg).col, "field type mismatch");
+                }
+            }
+            arg = (*arg).next;
+        }
+        let mut f: *mut Field = (*d).fields;
+        while f != null {
+            let mut found: bool = false;
+            let mut arg2: *mut Expr = (*e).args;
+            while arg2 != null {
+                if rt_eq((*arg2).field, (*f).name) {
+                    found = true;
+                }
+                arg2 = (*arg2).next;
+            }
+            if !found {
+                sdiag(s, (*e).file, (*e).line, (*e).col, "missing struct field");
+            }
+            f = (*f).next;
+        }
+        (*e).ty = st;
+        return st;
+    }
+    if k == E::ArrayLit {
+        let mut elem: *mut Type = null;
+        if expected != null && (*expected).kind == K::Array {
+            elem = (*expected).elem;
+        }
+        if (*e).index == 1 {
+            let first: *mut Expr = (*e).args;
+            if elem == null {
+                elem = resolve_type(s, check_expr(s, first, null));
+            } else {
+                check_expr(s, first, elem);
+            }
+            let count: usize = eval_int(s, (*e).rhs) as usize;
+            (*e).ival = count as i64;
+            let t: *mut Type = type_array((*s).a, elem, count, null);
+            (*e).ty = t;
+            return t;
+        }
+        let mut n: usize = 0;
+        let mut arg: *mut Expr = (*e).args;
+        while arg != null {
+            if elem == null {
+                elem = resolve_type(s, check_expr(s, arg, null));
+            } else {
+                let at: *mut Type = resolve_type(s, check_expr(s, arg, elem));
+                if !type_compat(elem, at) {
+                    sdiag(s, (*arg).file, (*arg).line, (*arg).col, "array element type mismatch");
+                }
+            }
+            n = n + 1;
+            arg = (*arg).next;
+        }
+        let t: *mut Type = type_array((*s).a, elem, n, null);
+        (*e).ty = t;
+        return t;
+    }
+    let t: *mut Type = type_new((*s).a, K::Void);
+    (*e).ty = t;
+    return t;
+
+    }
+}
+
+fn ck(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
+    unsafe {
+    let t: *mut Type = check_expr(s, e, expected);
+    if !type_ok(s, t) {
+        let mut f: i32 = 0;
+        let mut l: i32 = 0;
+        let mut c: i32 = 0;
+        if e != null { f = (*e).file; l = (*e).line; c = (*e).col; }
+        sdiag(s, f, l, c, "internal: bad type from subexpression");
+        return type_new((*s).a, K::I32);
+    }
+    return t;
+    }
+}
+
+fn check_binary(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
+    unsafe {
+    if expected != null && !type_ok(s, expected) {
+        sdiag(s, (*e).file, (*e).line, (*e).col, "internal: invalid expected type");
+        let bad: *mut Type = type_new((*s).a, K::I32);
+        (*e).ty = bad;
+        return bad;
+    }
+    let op: T = (*e).op;
+    if op == T::AmpAmp || op == T::PipePipe {
+        let bt: *mut Type = type_new((*s).a, K::Bool);
+        let t1: *mut Type = resolve_type(s, ck(s, (*e).lhs, bt));
+        let t2: *mut Type = resolve_type(s, ck(s, (*e).rhs, bt));
+        if (*t1).kind != K::Bool || (*t2).kind != K::Bool {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "logical operators require bool");
+        }
+        (*e).opty = bt;
+        (*e).ty = bt;
+        return bt;
+    }
+    let is_cmp: bool = op == T::EqEq || op == T::Ne || op == T::Lt || op == T::Le || op == T::Gt || op == T::Ge;
+    if is_cmp {
+        let mut t1: *mut Type = null;
+        let mut t2: *mut Type = null;
+        let lhs_null: bool = (*((*e).lhs)).kind == E::NullLit;
+        let rhs_null: bool = (*((*e).rhs)).kind == E::NullLit;
+        if lhs_null {
+            t2 = resolve_type(s, ck(s, (*e).rhs, null));
+            if type_is_ptr(t2) {
+                t1 = resolve_type(s, ck(s, (*e).lhs, t2));
+            } else {
+                sdiag(s, (*e).file, (*e).line, (*e).col, "null comparison requires a pointer");
+                t1 = t2;
+            }
+        } else {
+            t1 = resolve_type(s, ck(s, (*e).lhs, null));
+            if rhs_null {
+                if type_is_ptr(t1) {
+                    t2 = resolve_type(s, ck(s, (*e).rhs, t1));
+                } else {
+                    sdiag(s, (*e).file, (*e).line, (*e).col, "null comparison requires a pointer");
+                    t2 = t1;
+                }
+            } else if is_untyped((*e).rhs) && type_is_int(t1) {
+                t2 = resolve_type(s, ck(s, (*e).rhs, t1));
+            } else {
+                t2 = resolve_type(s, ck(s, (*e).rhs, null));
+            }
+            if is_untyped((*e).lhs) && type_is_int(t2) {
+                t1 = resolve_type(s, ck(s, (*e).lhs, t2));
+            }
+        }
+        let ptr_cmp: bool = type_is_ptr(t1) && type_is_ptr(t2);
+        let ok: bool = type_compat(t1, t2) || type_compat(t2, t1);
+        if !ok {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "comparison operands have different types");
+        }
+        if ptr_cmp && op != T::EqEq && op != T::Ne {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "pointer ordering is not allowed");
+        }
+        let bt: *mut Type = type_new((*s).a, K::Bool);
+        (*e).opty = t1;
+        (*e).ty = bt;
+        return bt;
+    }
+    let mut t1: *mut Type = null;
+    if op == T::Plus || op == T::Minus {
+        let l0: *mut Type = resolve_type(s, ck(s, (*e).lhs, null));
+        if !type_ok(s, l0) {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "internal: invalid operand type");
+            let bad: *mut Type = type_new((*s).a, K::I32);
+            (*e).opty = bad;
+            (*e).ty = bad;
+            return bad;
+        }
+        if type_is_ptr(l0) {
+            let ut: *mut Type = type_new((*s).a, K::Usize);
+            let t2: *mut Type = resolve_type(s, ck(s, (*e).rhs, ut));
+            if !type_compat(ut, t2) {
+                sdiag(s, (*e).file, (*e).line, (*e).col, "pointer arithmetic requires a usize offset");
+            }
+            if (*s).unsafe_depth == 0 {
+                sdiag(s, (*e).file, (*e).line, (*e).col, "pointer arithmetic requires unsafe");
+            }
+            (*e).opty = l0;
+            (*e).ty = l0;
+            return l0;
+        }
+    }
+    if expected != null && type_is_int(expected) {
+        t1 = resolve_type(s, ck(s, (*e).lhs, expected));
+    } else {
+        t1 = resolve_type(s, ck(s, (*e).lhs, null));
+    }
+    let t2: *mut Type = resolve_type(s, ck(s, (*e).rhs, t1));
+    if is_untyped((*e).lhs) && type_is_int(t2) {
+        t1 = resolve_type(s, ck(s, (*e).lhs, t2));
+    }
+    if !type_is_int(t1) || !type_is_int(t2) {
+        if (*t1).kind == K::Bool && (*t2).kind == K::Bool {
+            let bt: *mut Type = type_new((*s).a, K::Bool);
+            (*e).opty = bt;
+            (*e).ty = bt;
+            return bt;
+        }
+        sdiag(s, (*e).file, (*e).line, (*e).col, "arithmetic requires integer operands");
+    }
+    (*e).opty = t1;
+    (*e).ty = t1;
+    return t1;
+
+    }
+}
+
+fn builtin_id(name: str) -> i32 {
+    unsafe {
+    if rt_eq(name, "print") { return 1; }
+    if rt_eq(name, "len") { return 2; }
+    if rt_eq(name, "syscall") { return 3; }
+    if rt_eq(name, "alloc") { return 4; }
+    if rt_eq(name, "free") { return 5; }
+    if rt_eq(name, "assert") { return 6; }
+    if rt_eq(name, "panic") { return 7; }
+    if rt_eq(name, "data_ptr") { return 8; }
+    if rt_eq(name, "str_from_raw") { return 9; }
+    if rt_eq(name, "cstr_len") { return 10; }
+    if rt_eq(name, "cstr_to_str") { return 11; }
+    if rt_eq(name, "str_to_cstr") { return 12; }
+    if rt_eq(name, "vec_new") { return 13; }
+    if rt_eq(name, "vec_push") { return 14; }
+    if rt_eq(name, "vec_free") { return 15; }
+    if rt_eq(name, "vec_slice") { return 16; }
+    return 0;
+
+    }
+}
+
+fn check_call(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
+    unsafe {
+    if (*e).lhs == null || (*e).lhs != null && (*((*e).lhs)).kind != E::Ident {
+        sdiag(s, (*e).file, (*e).line, (*e).col, "callee must be a function name");
+        let t: *mut Type = type_new((*s).a, K::I32);
+        (*e).ty = t;
+        return t;
+    }
+    let name: str = (*((*e).lhs)).name;
+    let bid: i32 = builtin_id(name);
+    if bid != 0 {
+        (*e).index = bid;
+    } else {
+        let d: *mut Decl = sem_find(s, name);
+        if d != null && (*d).kind == D::Func {
+            (*e).decl = d;
+            let mut arg: *mut Expr = (*e).args;
+            let mut par: *mut Param = (*d).params;
+            let mut n: i32 = 0;
+            while par != null {
+                if arg == null {
+                    sdiag(s, (*e).file, (*e).line, (*e).col, "missing function argument");
+                    break;
+                }
+                let pt: *mut Type = resolve_type(s, (*par).ty);
+                let at: *mut Type = resolve_type(s, check_expr(s, arg, pt));
+                if !type_compat(pt, at) {
+                    sdiag(s, (*arg).file, (*arg).line, (*arg).col, "argument type mismatch");
+                }
+                arg = (*arg).next;
+                par = (*par).next;
+                n = n + 1;
+            }
+            if arg != null {
+                sdiag(s, (*e).file, (*e).line, (*e).col, "too many function arguments");
+            }
+            let rt: *mut Type = resolve_type(s, (*d).ty);
+            (*e).ty = rt;
+            return rt;
+        }
+        sdiag(s, (*e).file, (*e).line, (*e).col, "call to unknown function");
+        let t: *mut Type = type_new((*s).a, K::I32);
+        (*e).ty = t;
+        return t;
+    }
+    let ut: *mut Type = type_new((*s).a, K::Usize);
+    if bid == 1 {
+        let arg: *mut Expr = (*e).args;
+        if arg == null || (*arg).next != null {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "print takes one argument");
+        }
+        let at: *mut Type = resolve_type(s, check_expr(s, arg, null));
+        let kk: K = (*at).kind;
+        let printable: bool = type_is_int(at) || kk == K::Bool || kk == K::Str
+            || (kk == K::Array && (*((*at).elem)).kind == K::U8)
+            || (kk == K::Slice && (*((*at).elem)).kind == K::U8) || kk == K::Enum;
+        if !printable {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "print does not accept this type");
+        }
+        (*e).opty = at;
+        let vt: *mut Type = type_new((*s).a, K::Void);
+        (*e).ty = vt;
+        return vt;
+    }
+    if bid == 2 {
+        let arg: *mut Expr = (*e).args;
+        if arg == null || (*arg).next != null {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "len takes one argument");
+        }
+        let at: *mut Type = resolve_type(s, check_expr(s, arg, null));
+        let kk: K = (*at).kind;
+        if kk != K::Array && kk != K::Slice && kk != K::Str && kk != K::Vec {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "len requires an array, slice, str, or vec");
+        }
+        (*e).opty = at;
+        (*e).ty = ut;
+        return ut;
+    }
+    if bid == 3 {
+        let mut n: i32 = 0;
+        let mut arg: *mut Expr = (*e).args;
+        while arg != null {
+            let _ = resolve_type(s, check_expr(s, arg, ut));
+            n = n + 1;
+            arg = (*arg).next;
+        }
+        if n < 1 || n > 7 {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "syscall takes 1 to 7 arguments");
+        }
+        if (*s).unsafe_depth == 0 {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "syscall requires unsafe");
+        }
+        let t: *mut Type = type_new((*s).a, K::Isize);
+        (*e).ty = t;
+        return t;
+    }
+    if bid == 4 {
+        let arg: *mut Expr = (*e).args;
+        if arg == null || (*arg).next != null {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "alloc takes one argument");
+        }
+        let _ = resolve_type(s, check_expr(s, arg, ut));
+        if (*s).unsafe_depth == 0 {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "alloc requires unsafe");
+        }
+        let u8t: *mut Type = type_new((*s).a, K::U8);
+        let t: *mut Type = type_ptr((*s).a, u8t, true);
+        (*e).ty = t;
+        return t;
+    }
+    if bid == 5 {
+        let arg: *mut Expr = (*e).args;
+        if arg != null {
+            let _ = resolve_type(s, check_expr(s, arg, null));
+            if (*arg).next != null {
+                let _ = resolve_type(s, check_expr(s, (*arg).next, ut));
+            }
+        }
+        if (*s).unsafe_depth == 0 {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "free requires unsafe");
+        }
+        let vt: *mut Type = type_new((*s).a, K::Void);
+        (*e).ty = vt;
+        return vt;
+    }
+    if bid == 6 {
+        let arg: *mut Expr = (*e).args;
+        let bt: *mut Type = type_new((*s).a, K::Bool);
+        let st: *mut Type = type_new((*s).a, K::Str);
+        if arg != null {
+            let _ = resolve_type(s, check_expr(s, arg, bt));
+            if (*arg).next != null {
+                let _ = resolve_type(s, check_expr(s, (*arg).next, st));
+            }
+        }
+        let vt: *mut Type = type_new((*s).a, K::Void);
+        (*e).ty = vt;
+        return vt;
+    }
+    if bid == 7 {
+        let arg: *mut Expr = (*e).args;
+        let st: *mut Type = type_new((*s).a, K::Str);
+        if arg != null {
+            let _ = resolve_type(s, check_expr(s, arg, st));
+        }
+        let vt: *mut Type = type_new((*s).a, K::Void);
+        (*e).ty = vt;
+        return vt;
+    }
+    if bid == 8 {
+        let arg: *mut Expr = (*e).args;
+        let at: *mut Type = resolve_type(s, check_expr(s, arg, null));
+        let kk: K = (*at).kind;
+        if kk != K::Str && kk != K::Slice {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "data_ptr requires str or a slice");
+        }
+        let mut et: *mut Type = type_new((*s).a, K::U8);
+        if kk == K::Slice && (*at).elem != null {
+            et = (*at).elem;
+        }
+        let t: *mut Type = type_ptr((*s).a, et, false);
+        (*e).opty = at;
+        (*e).ty = t;
+        return t;
+    }
+    if bid == 9 {
+        let arg: *mut Expr = (*e).args;
+        let u8t: *mut Type = type_new((*s).a, K::U8);
+        let p8: *mut Type = type_ptr((*s).a, u8t, false);
+        if arg != null {
+            let _ = resolve_type(s, check_expr(s, arg, p8));
+            if (*arg).next != null {
+                let _ = resolve_type(s, check_expr(s, (*arg).next, ut));
+            }
+        }
+        let t: *mut Type = type_new((*s).a, K::Str);
+        (*e).ty = t;
+        return t;
+    }
+    if bid == 10 {
+        let arg: *mut Expr = (*e).args;
+        let ct: *mut Type = type_new((*s).a, K::CStr);
+        if arg != null {
+            let _ = resolve_type(s, check_expr(s, arg, ct));
+        }
+        (*e).ty = ut;
+        return ut;
+    }
+    if bid == 11 {
+        let arg: *mut Expr = (*e).args;
+        let ct: *mut Type = type_new((*s).a, K::CStr);
+        if arg != null {
+            let _ = resolve_type(s, check_expr(s, arg, ct));
+        }
+        let t: *mut Type = type_new((*s).a, K::Str);
+        (*e).ty = t;
+        return t;
+    }
+    if bid == 13 {
+        let arg: *mut Expr = (*e).args;
+        let cap_ty: *mut Type = type_new((*s).a, K::Usize);
+        if arg == null || (*arg).next != null {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "vec_new takes one argument");
+        }
+        if arg != null {
+            let at: *mut Type = resolve_type(s, check_expr(s, arg, cap_ty));
+            if !type_compat(cap_ty, at) {
+                sdiag(s, (*arg).file, (*arg).line, (*arg).col, "vec_new capacity must be usize");
+            }
+        }
+        let mut elem: *mut Type = null;
+        let mut inferred: bool = false;
+        if expected != null {
+            let ex: *mut Type = resolve_type(s, expected);
+            if (*ex).kind == K::Vec {
+                elem = (*ex).elem;
+                inferred = true;
+            }
+        }
+        if !inferred {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "cannot infer the element type of vec_new; annotate the binding or context");
+            let bad: *mut Type = type_new((*s).a, K::I32);
+            (*e).ty = bad;
+            return bad;
+        }
+        if elem == null || (*elem).kind == K::Void {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "vec element type must not be void");
+            let bad2: *mut Type = type_new((*s).a, K::I32);
+            (*e).ty = bad2;
+            return bad2;
+        }
+        let vt: *mut Type = type_vec((*s).a, elem);
+        (*e).ty = vt;
+        return vt;
+    }
+    if bid == 14 {
+        let arg: *mut Expr = (*e).args;
+        let mut elem: *mut Type = null;
+        let mut okv: bool = false;
+        if arg == null {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "vec_push takes two arguments");
+            let vt0: *mut Type = type_new((*s).a, K::Void);
+            (*e).ty = vt0;
+            return vt0;
+        }
+        let at: *mut Type = resolve_type(s, check_expr(s, arg, null));
+        if (*at).kind == K::Ptr && (*at).mutable && (*at).elem != null && (*(*at).elem).kind == K::Vec {
+            elem = (*(*at).elem).elem;
+            okv = true;
+        } else {
+            sdiag(s, (*arg).file, (*arg).line, (*arg).col, "vec_push expects &mut vec<T>");
+        }
+        let val: *mut Expr = (*arg).next;
+        if val == null {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "vec_push takes two arguments");
+        } else {
+            if okv {
+                let vt: *mut Type = resolve_type(s, check_expr(s, val, elem));
+                if !type_compat(elem, vt) {
+                    sdiag(s, (*val).file, (*val).line, (*val).col, "vec_push value type mismatch");
+                }
+            } else {
+                let _ = resolve_type(s, check_expr(s, val, null));
+            }
+            if (*val).next != null {
+                sdiag(s, (*e).file, (*e).line, (*e).col, "vec_push takes two arguments");
+            }
+        }
+        let vt1: *mut Type = type_new((*s).a, K::Void);
+        (*e).ty = vt1;
+        return vt1;
+    }
+    if bid == 15 {
+        let arg: *mut Expr = (*e).args;
+        if arg == null {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "vec_free takes one argument");
+        } else {
+            let at2: *mut Type = resolve_type(s, check_expr(s, arg, null));
+            if !((*at2).kind == K::Ptr && (*at2).mutable && (*at2).elem != null && (*(*at2).elem).kind == K::Vec) {
+                sdiag(s, (*arg).file, (*arg).line, (*arg).col, "vec_free expects &mut vec<T>");
+            }
+            if (*arg).next != null {
+                sdiag(s, (*e).file, (*e).line, (*e).col, "vec_free takes one argument");
+            }
+        }
+        let vt2: *mut Type = type_new((*s).a, K::Void);
+        (*e).ty = vt2;
+        return vt2;
+    }
+    if bid == 16 {
+        let arg: *mut Expr = (*e).args;
+        let mut elem4: *mut Type = null;
+        let mut ok4: bool = false;
+        if arg == null {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "vec_slice takes one argument");
+        } else {
+            let at3: *mut Type = resolve_type(s, check_expr(s, arg, null));
+            if (*at3).kind == K::Ptr && (*at3).elem != null && (*(*at3).elem).kind == K::Vec {
+                elem4 = (*(*at3).elem).elem;
+                ok4 = true;
+            } else {
+                sdiag(s, (*arg).file, (*arg).line, (*arg).col, "vec_slice expects a reference to vec<T>");
+            }
+            if (*arg).next != null {
+                sdiag(s, (*e).file, (*e).line, (*e).col, "vec_slice takes one argument");
+            }
+        }
+        if !ok4 || elem4 == null {
+            let bad4: *mut Type = type_new((*s).a, K::I32);
+            (*e).ty = bad4;
+            return bad4;
+        }
+        let st: *mut Type = type_new((*s).a, K::Slice);
+        (*st).elem = elem4;
+        (*e).ty = st;
+        return st;
+    }
+    let u8t: *mut Type = type_new((*s).a, K::U8);
+    let pm: *mut Type = type_ptr((*s).a, u8t, true);
+    let st: *mut Type = type_new((*s).a, K::Str);
+    let arg: *mut Expr = (*e).args;
+    if arg != null {
+        let _ = resolve_type(s, check_expr(s, arg, pm));
+        if (*arg).next != null {
+            let _ = resolve_type(s, check_expr(s, (*arg).next, ut));
+            if (*(*arg).next).next != null {
+                let _ = resolve_type(s, check_expr(s, (*(*arg).next).next, st));
+            }
+        }
+    }
+    if (*s).unsafe_depth == 0 {
+        sdiag(s, (*e).file, (*e).line, (*e).col, "str_to_cstr requires unsafe");
+    }
+    let ct: *mut Type = type_new((*s).a, K::CStr);
+    (*e).ty = ct;
+    return ct;
+
+    }
+}
+
+fn check_block(s: *mut Sem, head: *mut Stmt) {
+    unsafe {
+    scope_push(s);
+    let mut st: *mut Stmt = head;
+    while st != null {
+        check_stmt(s, st);
+        st = (*st).next;
+    }
+    scope_pop(s);
+
+    }
+}
+
+fn check_stmt(s: *mut Sem, st: *mut Stmt) {
+    unsafe {
+    let k: S = (*st).kind;
+    if k == S::Let {
+        let mut t: *mut Type = null;
+        if (*st).ty != null {
+            t = resolve_type(s, (*st).ty);
+        }
+        let it: *mut Type = resolve_type(s, check_expr(s, (*st).expr, t));
+        if t == null {
+            t = it;
+        } else if !type_compat(t, it) {
+            sdiag(s, (*st).file, (*st).line, (*st).col, "initializer type mismatch");
+        }
+        if (*t).kind == K::Void {
+            sdiag(s, (*st).file, (*st).line, (*st).col, "cannot bind a void value");
+        }
+        let d: *mut Decl = decl_new((*s).a, D::Var, (*st).name, (*st).file, (*st).line, (*st).col);
+        (*d).ty = t;
+        (*d).is_mut = (*st).is_mut;
+        (*d).slot = (*s).slot;
+        (*s).slot = (*s).slot + 1;
+        (*st).decl = d;
+        scope_add(s, d);
+        return;
+    }
+    if k == S::Assign {
+        let lt: *mut Type = resolve_type(s, check_expr(s, (*st).expr, null));
+        let rt: *mut Type = resolve_type(s, check_expr(s, (*st).rhs, lt));
+        if !type_compat(lt, rt) {
+            sdiag(s, (*st).file, (*st).line, (*st).col, "assignment type mismatch");
+        }
+        if !is_place((*st).expr) {
+            sdiag(s, (*st).file, (*st).line, (*st).col, "assignment target is not a place");
+        } else if !place_mut(s, (*st).expr) {
+            sdiag(s, (*st).file, (*st).line, (*st).col, "cannot assign to an immutable place");
+        }
+        if (*st).op != T::Eq && !type_is_int(lt) {
+            sdiag(s, (*st).file, (*st).line, (*st).col, "compound assignment requires an integer");
+        }
+        return;
+    }
+    if k == S::Expr {
+        let _ = resolve_type(s, check_expr(s, (*st).expr, null));
+        return;
+    }
+    if k == S::If {
+        let bt: *mut Type = type_new((*s).a, K::Bool);
+        let ct: *mut Type = resolve_type(s, check_expr(s, (*st).expr, bt));
+        if (*ct).kind != K::Bool {
+            sdiag(s, (*st).file, (*st).line, (*st).col, "if condition must be bool");
+        }
+        check_block(s, (*st).body);
+        if (*st).els != null {
+            check_stmt(s, (*st).els);
+        }
+        return;
+    }
+    if k == S::While {
+        let bt: *mut Type = type_new((*s).a, K::Bool);
+        let ct: *mut Type = resolve_type(s, check_expr(s, (*st).expr, bt));
+        if (*ct).kind != K::Bool {
+            sdiag(s, (*st).file, (*st).line, (*st).col, "while condition must be bool");
+        }
+        (*s).loop_depth = (*s).loop_depth + 1;
+        check_block(s, (*st).body);
+        (*s).loop_depth = (*s).loop_depth - 1;
+        return;
+    }
+    if k == S::Loop {
+        (*s).loop_depth = (*s).loop_depth + 1;
+        check_block(s, (*st).body);
+        (*s).loop_depth = (*s).loop_depth - 1;
+        return;
+    }
+    if k == S::Break {
+        if (*s).loop_depth == 0 && (*s).switch_depth == 0 {
+            sdiag(s, (*st).file, (*st).line, (*st).col, "break outside a loop or switch");
+        }
+        return;
+    }
+    if k == S::Continue {
+        if (*s).loop_depth == 0 {
+            sdiag(s, (*st).file, (*st).line, (*st).col, "continue outside a loop");
+        }
+        return;
+    }
+    if k == S::Return {
+        let mut rt: *mut Type = null;
+        if (*s).cur_fn != null {
+            rt = (*((*s).cur_fn)).ty;
+        }
+        if (*s).cur_fn != null && (*rt).kind == K::Void {
+            if (*st).expr != null {
+                sdiag(s, (*st).file, (*st).line, (*st).col, "void function cannot return a value");
+            }
+        } else if rt != null {
+            if (*st).expr == null {
+                sdiag(s, (*st).file, (*st).line, (*st).col, "missing return value");
+            } else {
+                let at: *mut Type = resolve_type(s, check_expr(s, (*st).expr, rt));
+                if !type_compat(rt, at) {
+                    sdiag(s, (*st).file, (*st).line, (*st).col, "return type mismatch");
+                }
+            }
+        }
+        return;
+    }
+    if k == S::Unsafe {
+        (*s).unsafe_depth = (*s).unsafe_depth + 1;
+        check_block(s, (*st).body);
+        (*s).unsafe_depth = (*s).unsafe_depth - 1;
+        return;
+    }
+    if k == S::Block {
+        check_block(s, (*st).body);
+        return;
+    }
+    if k == S::Switch {
+        let ct: *mut Type = resolve_type(s, check_expr(s, (*st).expr, null));
+        let kk: K = (*ct).kind;
+        if !type_is_int(ct) && kk != K::Enum {
+            sdiag(s, (*st).file, (*st).line, (*st).col, "switch requires an integer or enum");
+        }
+        (*s).switch_depth = (*s).switch_depth + 1;
+        let mut c: *mut Case = (*st).cases;
+        while c != null {
+            if !(*c).is_default && (*c).expr != null {
+                let _ = resolve_type(s, check_expr(s, (*c).expr, ct));
+                let _ = eval_int(s, (*c).expr);
+            }
+            check_block(s, (*c).body);
+            c = (*c).next;
+        }
+        (*s).switch_depth = (*s).switch_depth - 1;
+        return;
+    }
+
+    }
+}
+
+fn has_break(st: *mut Stmt) -> bool {
+    unsafe {
+    let mut p: *mut Stmt = st;
+    while p != null {
+        let k: S = (*p).kind;
+        if k == S::Break {
+            return true;
+        }
+        if k == S::If {
+            if has_break((*p).body) || has_break((*p).els) {
+                return true;
+            }
+        }
+        if k == S::Unsafe || k == S::Block {
+            if has_break((*p).body) {
+                return true;
+            }
+        }
+        p = (*p).next;
+    }
+    return false;
+
+    }
+}
+
+fn last_stmt(head: *mut Stmt) -> *mut Stmt {
+    unsafe {
+    let mut p: *mut Stmt = head;
+    let mut last: *mut Stmt = null;
+    while p != null {
+        last = p;
+        p = (*p).next;
+    }
+    return last;
+
+    }
+}
+
+fn expr_exits(e: *mut Expr) -> bool {
+    unsafe {
+    if e == null || (*e).kind != E::Call {
+        return false;
+    }
+    if (*e).lhs == null || (*((*e).lhs)).kind != E::Ident {
+        return false;
+    }
+    if !rt_eq((*((*e).lhs)).name, "syscall") {
+        return false;
+    }
+    let a: *mut Expr = (*e).args;
+    if a == null || (*a).kind != E::IntLit {
+        return false;
+    }
+    return (*a).ival == 60 || (*a).ival == 231;
+
+    }
+}
+
+fn diverges(st: *mut Stmt) -> bool {
+    unsafe {
+    if st == null {
+        return false;
+    }
+    let k: S = (*st).kind;
+    if k == S::Return {
+        return true;
+    }
+    if k == S::Loop {
+        return !has_break((*st).body);
+    }
+    if k == S::While {
+        if (*st).expr != null && (*((*st).expr)).kind == E::BoolLit && (*((*st).expr)).ival != 0 {
+            return !has_break((*st).body);
+        }
+        return false;
+    }
+    if k == S::If {
+        if (*st).els != null {
+            return diverges(last_stmt((*st).body)) && diverges((*st).els);
+        }
+        return false;
+    }
+    if k == S::Unsafe || k == S::Block {
+        return diverges(last_stmt((*st).body));
+    }
+    if k == S::Switch {
+        let mut has_default: bool = false;
+        let mut ok: bool = true;
+        let mut c: *mut Case = (*st).cases;
+        while c != null {
+            if (*c).is_default {
+                has_default = true;
+            }
+            if has_break((*c).body) || !diverges(last_stmt((*c).body)) {
+                ok = false;
+            }
+            c = (*c).next;
+        }
+        return has_default && ok;
+    }
+    if k == S::Let {
+        return expr_exits((*st).expr);
+    }
+    if k == S::Expr {
+        return expr_exits((*st).expr);
+    }
+    return false;
+
+    }
+}
+
+fn check_fn(s: *mut Sem, d: *mut Decl) {
+    unsafe {
+    if (*d).body == null {
+        return;
+    }
+    (*s).cur_fn = d;
+    (*s).slot = 0;
+    (*s).unsafe_depth = 0;
+    (*s).loop_depth = 0;
+    (*s).switch_depth = 0;
+    scope_push(s);
+    let mut p: *mut Param = (*d).params;
+    while p != null {
+        let pt: *mut Type = resolve_type(s, (*p).ty);
+        let vd: *mut Decl = decl_new((*s).a, D::Var, (*p).name, (*d).file, (*d).line, (*d).col);
+        (*vd).ty = pt;
+        (*vd).is_mut = false;
+        (*vd).slot = (*s).slot;
+        (*s).slot = (*s).slot + 1;
+        (*p).decl = vd;
+        scope_add(s, vd);
+        p = (*p).next;
+    }
+    check_block(s, (*d).body);
+    scope_pop(s);
+    let rt: *mut Type = resolve_type(s, (*d).ty);
+    if (*rt).kind != K::Void && !diverges(last_stmt((*d).body)) {
+        sdiag(s, (*d).file, (*d).line, (*d).col, "function can reach the end without returning");
+    }
+    (*s).cur_fn = null;
+
+    }
+}
+
+fn resolve_all_types(s: *mut Sem) {
+    unsafe {
+    let mut d: *mut Decl = (*s).globals;
+    while d != null {
+        if (*d).kind == D::Func {
+            (*d).ty = resolve_type(s, (*d).ty);
+            let mut p: *mut Param = (*d).params;
+            while p != null {
+                (*p).ty = resolve_type(s, (*p).ty);
+                p = (*p).next;
+            }
+        } else if (*d).kind == D::Struct {
+            let mut f: *mut Field = (*d).fields;
+            while f != null {
+                (*f).ty = resolve_type(s, (*f).ty);
+                f = (*f).next;
+            }
+        } else if (*d).kind == D::Global || (*d).kind == D::Const {
+            (*d).ty = resolve_type(s, (*d).ty);
+        } else if (*d).kind == D::Typedef {
+            (*d).ty = resolve_type(s, (*d).ty);
+        }
+        d = (*d).next;
+    }
+
+    }
+}
+
+fn layout_all(s: *mut Sem) {
+    unsafe {
+    let mut d: *mut Decl = (*s).globals;
+    while d != null {
+        if (*d).kind == D::Struct {
+            layout_struct(s, d);
+        }
+        d = (*d).next;
+    }
+
+    }
+}
+
+fn sem_run(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program) -> *mut Sem {
+    unsafe {
+    let s: *mut Sem = rt_alloc(a, sizeof(Sem)) as *mut Sem;
+    (*s).a = a;
+    (*s).d = d;
+    (*s).srcs = srcs;
+    (*s).prog = prog;
+    (*s).globals = null;
+    (*s).gtail = null;
+    (*s).scope = null;
+    (*s).cur_fn = null;
+    (*s).unsafe_depth = 0;
+    (*s).loop_depth = 0;
+    (*s).switch_depth = 0;
+    (*s).slot = 0;
+    (*s).errors = 0;
+    let mut it: *mut Item = (*prog).items;
+    while it != null {
+        if (*it).decl != null {
+            sem_add_global(s, (*it).decl);
+        }
+        it = (*it).next;
+    }
+    let mut g: *mut Decl = (*s).globals;
+    while g != null {
+        if (*g).kind == D::Enum {
+            let mut v: *mut Variant = (*g).variants;
+            let mut next: i64 = 0;
+            while v != null {
+                if (*v).expr != null {
+                    (*v).value = eval_int(s, (*v).expr);
+                } else {
+                    (*v).value = next;
+                }
+                next = (*v).value + 1;
+                v = (*v).next;
+            }
+            (*g).size = 4;
+            (*g).alignment = 4;
+        }
+        g = (*g).next;
+    }
+    g = (*s).globals;
+    while g != null {
+        if (*g).kind == D::Const {
+            (*g).ty = resolve_type(s, (*g).ty);
+            if (*((*g).ty)).kind == K::Str {
+                (*g).cval_kind = 2;
+                (*g).cval_s = eval_str(s, (*g).init);
+            } else if (*((*g).ty)).kind == K::Vec {
+                sdiag(s, (*g).file, (*g).line, (*g).col, "vec constants are not supported by the bootstrap compiler");
+                (*g).cval_kind = 1;
+                (*g).cval = 0;
+            } else {
+                (*g).cval_kind = 1;
+                (*g).cval = eval_int(s, (*g).init);
+            }
+        }
+        g = (*g).next;
+    }
+    resolve_all_types(s);
+    layout_all(s);
+    let mentry: *mut Decl = sem_find(s, "main");
+    let sentry: *mut Decl = sem_find(s, "_start");
+    if mentry == null && sentry == null {
+        sdiag(s, 0, 0, 0, "no entry point: define main or _start");
+    }
+    if mentry != null && (*mentry).kind == D::Func {
+        if (*mentry).nparams != 0 && (*mentry).nparams != 3 {
+            sdiag(s, (*mentry).file, (*mentry).line, (*mentry).col, "main must take 0 or 3 parameters");
+        }
+        if (*mentry).ty != null && (*(*mentry).ty).kind != K::I32 {
+            sdiag(s, (*mentry).file, (*mentry).line, (*mentry).col, "main must return i32");
+        }
+    }
+    if sentry != null && (*sentry).kind == D::Func && (*sentry).nparams != 0 {
+        sdiag(s, (*sentry).file, (*sentry).line, (*sentry).col, "_start must take no parameters");
+    }
+    g = (*s).globals;
+    while g != null {
+        if (*g).kind == D::Global {
+            let gt: *mut Type = resolve_type(s, (*g).ty);
+            if (*gt).kind == K::Vec {
+                sdiag(s, (*g).file, (*g).line, (*g).col, "vec globals are not supported by the bootstrap compiler");
+            } else if (*g).init == null {
+                sdiag(s, (*g).file, (*g).line, (*g).col, "global requires an initializer");
+            } else {
+                let at: *mut Type = resolve_type(s, check_expr(s, (*g).init, gt));
+                if !type_compat(gt, at) {
+                    sdiag(s, (*g).file, (*g).line, (*g).col, "global initializer type mismatch");
+                }
+            }
+        }
+        g = (*g).next;
+    }
+    g = (*s).globals;
+    while g != null {
+        if (*g).kind == D::Func {
+            check_fn(s, g);
+        }
+        g = (*g).next;
+    }
+    return s;
+
+    }
+}

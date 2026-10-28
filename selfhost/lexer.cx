@@ -1,0 +1,695 @@
+// CoreX bootstrap lexer. Byte-oriented, no Unicode, no macro expansion.
+// Token kinds mirror docs/grammar.ebnf for the bootstrap subset.
+
+struct Src {
+    id: i32,
+    path: str,
+    data: str,
+    next: *mut Src,
+}
+
+struct Diag {
+    file: i32,
+    line: i32,
+    col: i32,
+    msg: str,
+    next: *mut Diag,
+}
+
+struct Diags {
+    head: *mut Diag,
+    tail: *mut Diag,
+    count: i32,
+}
+
+fn diags_new() -> Diags {
+    return Diags { head: null, tail: null, count: 0 };
+}
+
+fn diag_add(d: *mut Diags, a: *mut Arena, file: i32, line: i32, col: i32, msg: str) {
+    let p: *mut Diag = rt_alloc(a, sizeof(Diag)) as *mut Diag;
+    unsafe {
+        (*p).file = file;
+        (*p).line = line;
+        (*p).col = col;
+        (*p).msg = msg;
+        (*p).next = null;
+        if (*d).tail == null {
+            (*d).head = p;
+        } else {
+            (*(*d).tail).next = p;
+        }
+        (*d).tail = p;
+        (*d).count = (*d).count + 1;
+    }
+}
+
+enum T {
+    Eof, Ident, Int, Float, Str, CStr, Char,
+    KwFn, KwLet, KwMut, KwReturn, KwIf, KwElse, KwWhile, KwLoop, KwBreak,
+    KwContinue, KwStruct, KwEnum, KwConst, KwStatic, KwUnsafe, KwImport,
+    KwAs, KwSizeof, KwAlignof, KwOffsetof, KwTrue, KwFalse, KwNull,
+    KwExtern, KwTypedef, KwSwitch, KwCase, KwDefault, KwFor, KwDo, KwPub,
+    KwModule, KwMod, KwMacro, KwGoto, KwVolatile, KwUnion, KwRepr,
+    KwPacked, KwAlign,
+    TyI8, TyI16, TyI32, TyI64, TyU8, TyU16, TyU32, TyU64, TyUsize,
+    TyIsize, TyBool, TyChar, TyF32, TyF64, TyStr, TyCStr, TyVec,
+    LParen, RParen, LBrace, RBrace, LBracket, RBracket,
+    Comma, Semi, Colon, ColonColon, Dot, DotDot, Arrow, Ellipsis,
+    Plus, Minus, Star, Slash, Percent, Amp, AmpAmp, Pipe, PipePipe,
+    Caret, Bang, Tilde, Eq, EqEq, Ne, Lt, Le, Gt, Ge, Shl, Shr,
+    PlusEq, MinusEq, StarEq, SlashEq, PercentEq, AmpEq, PipeEq,
+    CaretEq, ShlEq, ShrEq, Question, Hash, At
+}
+
+struct Tok {
+    kind: T,
+    file: i32,
+    line: i32,
+    col: i32,
+    start: usize,
+    len: usize,
+    text: str,
+    ival: i64,
+}
+
+struct TokArr {
+    data: *mut Tok,
+    len: usize,
+    cap: usize,
+}
+
+struct Lex {
+    a: *mut Arena,
+    file: i32,
+    src: str,
+    pos: usize,
+    line: i32,
+    col: i32,
+    toks: *mut Tok,
+    ntoks: usize,
+    cap: usize,
+    d: *mut Diags,
+}
+
+fn lx_new(a: *mut Arena, f: *mut Src, d: *mut Diags) -> *mut Lex {
+    let l: *mut Lex = rt_alloc(a, sizeof(Lex)) as *mut Lex;
+    let mut cap: usize = 0;
+    unsafe {
+        cap = len((*f).data) + 2;
+        (*l).a = a;
+        (*l).file = (*f).id;
+        (*l).src = (*f).data;
+        (*l).pos = 0;
+        (*l).line = 1;
+        (*l).col = 1;
+        (*l).cap = cap;
+        (*l).toks = rt_alloc(a, cap * sizeof(Tok)) as *mut Tok;
+        (*l).ntoks = 0;
+        (*l).d = d;
+    }
+    return l;
+}
+
+fn lx_peek(l: *mut Lex, off: usize) -> u8 {
+    unsafe {
+        let at: usize = (*l).pos + off;
+        if at >= len((*l).src) {
+            return 0;
+        }
+        return (*l).src[at];
+    }
+}
+
+fn lx_at(l: *mut Lex) -> u8 {
+    return lx_peek(l, 0);
+}
+
+fn lx_bump(l: *mut Lex) {
+    unsafe {
+        if (*l).pos >= len((*l).src) {
+            return;
+        }
+        let c: u8 = (*l).src[(*l).pos];
+        (*l).pos = (*l).pos + 1;
+        if c == 10 {
+            (*l).line = (*l).line + 1;
+            (*l).col = 1;
+        } else {
+            (*l).col = (*l).col + 1;
+        }
+    }
+}
+
+fn lx_error(l: *mut Lex, msg: str) {
+    unsafe {
+        diag_add((*l).d, (*l).a, (*l).file, (*l).line, (*l).col, msg);
+    }
+}
+
+fn lx_push(l: *mut Lex, kind: T) -> *mut Tok {
+    let mut t: *mut Tok = null;
+    unsafe {
+        let idx: usize = (*l).ntoks;
+        t = (*l).toks + idx;
+        (*t).kind = kind;
+        (*t).file = (*l).file;
+        (*t).line = (*l).line;
+        (*t).col = (*l).col;
+        (*t).start = (*l).pos;
+        (*t).len = 0;
+        (*t).text = "";
+        (*t).ival = 0;
+        (*l).ntoks = idx + 1;
+    }
+    return t;
+}
+
+fn lx_ident_char(c: u8) -> bool {
+    if c >= 97 && c <= 122 {
+        return true;
+    }
+    if c >= 65 && c <= 90 {
+        return true;
+    }
+    if c >= 48 && c <= 57 {
+        return true;
+    }
+    return c == 95 || c == 36;
+}
+
+fn lx_digit(c: u8) -> bool {
+    return c >= 48 && c <= 57;
+}
+
+fn lx_hexdigit(c: u8) -> bool {
+    if c >= 48 && c <= 57 {
+        return true;
+    }
+    if c >= 97 && c <= 102 {
+        return true;
+    }
+    return c >= 65 && c <= 70;
+}
+
+fn lx_hexval(c: u8) -> i32 {
+    if c >= 48 && c <= 57 {
+        return (c - 48) as i32;
+    }
+    if c >= 97 && c <= 102 {
+        return (c - 97 + 10) as i32;
+    }
+    return (c - 65 + 10) as i32;
+}
+
+fn lx_kw(s: str) -> T {
+    if rt_eq(s, "fn") { return T::KwFn; }
+    if rt_eq(s, "let") { return T::KwLet; }
+    if rt_eq(s, "mut") { return T::KwMut; }
+    if rt_eq(s, "return") { return T::KwReturn; }
+    if rt_eq(s, "if") { return T::KwIf; }
+    if rt_eq(s, "else") { return T::KwElse; }
+    if rt_eq(s, "while") { return T::KwWhile; }
+    if rt_eq(s, "loop") { return T::KwLoop; }
+    if rt_eq(s, "break") { return T::KwBreak; }
+    if rt_eq(s, "continue") { return T::KwContinue; }
+    if rt_eq(s, "struct") { return T::KwStruct; }
+    if rt_eq(s, "enum") { return T::KwEnum; }
+    if rt_eq(s, "const") { return T::KwConst; }
+    if rt_eq(s, "static") { return T::KwStatic; }
+    if rt_eq(s, "unsafe") { return T::KwUnsafe; }
+    if rt_eq(s, "import") { return T::KwImport; }
+    if rt_eq(s, "as") { return T::KwAs; }
+    if rt_eq(s, "sizeof") { return T::KwSizeof; }
+    if rt_eq(s, "alignof") { return T::KwAlignof; }
+    if rt_eq(s, "offsetof") { return T::KwOffsetof; }
+    if rt_eq(s, "true") { return T::KwTrue; }
+    if rt_eq(s, "false") { return T::KwFalse; }
+    if rt_eq(s, "null") { return T::KwNull; }
+    if rt_eq(s, "extern") { return T::KwExtern; }
+    if rt_eq(s, "typedef") { return T::KwTypedef; }
+    if rt_eq(s, "switch") { return T::KwSwitch; }
+    if rt_eq(s, "case") { return T::KwCase; }
+    if rt_eq(s, "default") { return T::KwDefault; }
+    if rt_eq(s, "for") { return T::KwFor; }
+    if rt_eq(s, "do") { return T::KwDo; }
+    if rt_eq(s, "pub") { return T::KwPub; }
+    if rt_eq(s, "module") { return T::KwModule; }
+    if rt_eq(s, "mod") { return T::KwMod; }
+    if rt_eq(s, "macro") { return T::KwMacro; }
+    if rt_eq(s, "goto") { return T::KwGoto; }
+    if rt_eq(s, "volatile") { return T::KwVolatile; }
+    if rt_eq(s, "union") { return T::KwUnion; }
+    if rt_eq(s, "repr") { return T::KwRepr; }
+    if rt_eq(s, "packed") { return T::KwPacked; }
+    if rt_eq(s, "align") { return T::KwAlign; }
+    if rt_eq(s, "i8") { return T::TyI8; }
+    if rt_eq(s, "i16") { return T::TyI16; }
+    if rt_eq(s, "i32") { return T::TyI32; }
+    if rt_eq(s, "i64") { return T::TyI64; }
+    if rt_eq(s, "u8") { return T::TyU8; }
+    if rt_eq(s, "u16") { return T::TyU16; }
+    if rt_eq(s, "u32") { return T::TyU32; }
+    if rt_eq(s, "u64") { return T::TyU64; }
+    if rt_eq(s, "usize") { return T::TyUsize; }
+    if rt_eq(s, "isize") { return T::TyIsize; }
+    if rt_eq(s, "bool") { return T::TyBool; }
+    if rt_eq(s, "char") { return T::TyChar; }
+    if rt_eq(s, "f32") { return T::TyF32; }
+    if rt_eq(s, "f64") { return T::TyF64; }
+    if rt_eq(s, "str") { return T::TyStr; }
+    if rt_eq(s, "cstr") { return T::TyCStr; }
+    if rt_eq(s, "vec") { return T::TyVec; }
+    return T::Ident;
+}
+
+fn lx_skip_space(l: *mut Lex) {
+    loop {
+        let c: u8 = lx_at(l);
+        if c == 32 || c == 9 || c == 13 || c == 10 {
+            lx_bump(l);
+            continue;
+        }
+        if c == 47 && lx_peek(l, 1) == 47 {
+            while lx_at(l) != 0 && lx_at(l) != 10 {
+                lx_bump(l);
+            }
+            continue;
+        }
+        if c == 47 && lx_peek(l, 1) == 42 {
+            let sl: i32 = lx_line(l);
+            let sc: i32 = lx_col(l);
+            lx_bump(l);
+            lx_bump(l);
+            loop {
+                if lx_at(l) == 0 {
+                    unsafe {
+                        diag_add((*l).d, (*l).a, (*l).file, sl, sc, "unterminated block comment");
+                    }
+                    return;
+                }
+                if lx_at(l) == 42 && lx_peek(l, 1) == 47 {
+                    lx_bump(l);
+                    lx_bump(l);
+                    break;
+                }
+                lx_bump(l);
+            }
+            continue;
+        }
+        return;
+    }
+}
+
+fn lx_line(l: *mut Lex) -> i32 {
+    unsafe { return (*l).line; }
+}
+
+fn lx_col(l: *mut Lex) -> i32 {
+    unsafe { return (*l).col; }
+}
+
+fn lx_decode(b: *mut Buf, l: *mut Lex, quote: u8) -> str {
+    let start: usize = 0;
+    let _ = start;
+    loop {
+        let c: u8 = lx_at(l);
+        if c == 0 {
+            lx_error(l, "unterminated string literal");
+            break;
+        }
+        if c == quote {
+            lx_bump(l);
+            break;
+        }
+        if c == 92 {
+            lx_bump(l);
+            let e: u8 = lx_at(l);
+            if e == 0 {
+                lx_error(l, "unterminated escape");
+                break;
+            }
+            lx_bump(l);
+            if e == 110 {
+                rt_b(b, 10);
+            } else if e == 116 {
+                rt_b(b, 9);
+            } else if e == 114 {
+                rt_b(b, 13);
+            } else if e == 48 {
+                rt_b(b, 0);
+            } else if e == 92 {
+                rt_b(b, 92);
+            } else if e == 34 {
+                rt_b(b, 34);
+            } else if e == 39 {
+                rt_b(b, 39);
+            } else if e == 120 {
+                let h1: u8 = lx_at(l);
+                let h2: u8 = lx_peek(l, 1);
+                if !lx_hexdigit(h1) || !lx_hexdigit(h2) {
+                    lx_error(l, "invalid hex escape");
+                } else {
+                    let v: i32 = lx_hexval(h1) * 16 + lx_hexval(h2);
+                    rt_b(b, v as u8);
+                    lx_bump(l);
+                    lx_bump(l);
+                }
+            } else {
+                lx_error(l, "unknown escape sequence");
+            }
+            continue;
+        }
+        rt_b(b, c);
+        lx_bump(l);
+    }
+    return rt_view(b);
+}
+
+fn lx_lex_string(l: *mut Lex, kind: T) {
+    let mut a: *mut Arena = null;
+    unsafe { a = (*l).a; }
+    let b: Buf = rt_buf(a);
+    let bp: *mut Buf = rt_alloc(a, sizeof(Buf)) as *mut Buf;
+    unsafe {
+        (*bp) = b;
+    }
+    let t: *mut Tok = lx_push(l, kind);
+    unsafe {
+        if kind == T::Str {
+            (*t).start = (*t).start - 1;
+        } else {
+            (*t).start = (*t).start - 2;
+        }
+    }
+    let text: str = lx_decode(bp, l, 34);
+    unsafe {
+        (*t).len = (*l).pos - (*t).start;
+        (*t).text = text;
+    }
+}
+
+fn lx_lex_char(l: *mut Lex) {
+    let t: *mut Tok = lx_push(l, T::Char);
+    lx_bump(l);
+    let c: u8 = lx_at(l);
+    if c == 92 {
+        lx_bump(l);
+        let e: u8 = lx_at(l);
+        lx_bump(l);
+        let mut v: u8 = 0;
+        if e == 110 { v = 10; }
+        else if e == 116 { v = 9; }
+        else if e == 114 { v = 13; }
+        else if e == 48 { v = 0; }
+        else if e == 92 { v = 92; }
+        else if e == 34 { v = 34; }
+        else if e == 39 { v = 39; }
+        else if e == 120 {
+            let h1: u8 = lx_at(l);
+            let h2: u8 = lx_peek(l, 1);
+            if lx_hexdigit(h1) && lx_hexdigit(h2) {
+                v = (lx_hexval(h1) * 16 + lx_hexval(h2)) as u8;
+                lx_bump(l);
+                lx_bump(l);
+            } else {
+                lx_error(l, "invalid hex escape");
+            }
+        } else {
+            lx_error(l, "unknown escape sequence");
+        }
+        unsafe { (*t).ival = v as i64; }
+    } else {
+        unsafe { (*t).ival = c as i64; }
+        lx_bump(l);
+    }
+    if lx_at(l) == 39 {
+        lx_bump(l);
+    } else {
+        lx_error(l, "unterminated character literal");
+    }
+    unsafe {
+        (*t).len = (*l).pos - (*t).start;
+        (*t).text = rt_slice((*l).src, (*t).start, (*l).pos);
+    }
+}
+
+fn lx_lex_number(l: *mut Lex) {
+    let t: *mut Tok = lx_push(l, T::Int);
+    let mut start: usize = 0;
+    unsafe { start = (*t).start; }
+    let mut base: u64 = 10;
+    if lx_at(l) == 48 && (lx_peek(l, 1) == 120 || lx_peek(l, 1) == 88) {
+        base = 16;
+        lx_bump(l);
+        lx_bump(l);
+    } else if lx_at(l) == 48 && (lx_peek(l, 1) == 98 || lx_peek(l, 1) == 66) {
+        base = 2;
+        lx_bump(l);
+        lx_bump(l);
+    } else if lx_at(l) == 48 && (lx_peek(l, 1) == 111 || lx_peek(l, 1) == 79) {
+        base = 8;
+        lx_bump(l);
+        lx_bump(l);
+    }
+    let mut v: u64 = 0;
+    loop {
+        let c: u8 = lx_at(l);
+        if c == 95 {
+            lx_bump(l);
+            continue;
+        }
+        if !lx_hexdigit(c) {
+            break;
+        }
+        let d: u64 = lx_hexval(c) as u64;
+        if d >= base {
+            lx_error(l, "digit out of range for base");
+        }
+        v = v * base + d;
+        lx_bump(l);
+    }
+    if base == 10 && ((lx_at(l) == 46 && lx_digit(lx_peek(l, 1)))
+                      || lx_at(l) == 101 || lx_at(l) == 69) {
+        unsafe { (*t).kind = T::Float; }
+        if lx_at(l) == 46 {
+            lx_bump(l);
+            while lx_digit(lx_at(l)) {
+                lx_bump(l);
+            }
+        }
+        if lx_at(l) == 101 || lx_at(l) == 69 {
+            lx_bump(l);
+            if lx_at(l) == 45 || lx_at(l) == 43 {
+                lx_bump(l);
+            }
+            while lx_digit(lx_at(l)) {
+                lx_bump(l);
+            }
+        }
+    }
+    unsafe {
+        (*t).ival = v as i64;
+        (*t).len = (*l).pos - start;
+        (*t).text = rt_slice((*l).src, start, (*l).pos);
+    }
+}
+
+fn lx_lex_ident(l: *mut Lex) {
+    let mut start: usize = 0;
+    let mut line: i32 = 0;
+    let mut col: i32 = 0;
+    unsafe {
+        start = (*l).pos;
+        line = (*l).line;
+        col = (*l).col;
+    }
+    while lx_ident_char(lx_at(l)) {
+        lx_bump(l);
+    }
+    let mut text: str = "";
+    unsafe { text = rt_slice((*l).src, start, (*l).pos); }
+    let kind: T = lx_kw(text);
+    let t: *mut Tok = lx_push(l, kind);
+    unsafe {
+        (*t).line = line;
+        (*t).col = col;
+        (*t).start = start;
+        (*t).len = (*l).pos - start;
+        (*t).text = text;
+    }
+}
+
+fn lx_punct(l: *mut Lex) -> T {
+    let c: u8 = lx_at(l);
+    if c == 40 { return T::LParen; }
+    if c == 41 { return T::RParen; }
+    if c == 123 { return T::LBrace; }
+    if c == 125 { return T::RBrace; }
+    if c == 91 { return T::LBracket; }
+    if c == 93 { return T::RBracket; }
+    if c == 44 { return T::Comma; }
+    if c == 59 { return T::Semi; }
+    if c == 58 {
+        if lx_peek(l, 1) == 58 { return T::ColonColon; }
+        return T::Colon;
+    }
+    if c == 46 {
+        if lx_peek(l, 1) == 46 && lx_peek(l, 2) == 46 { return T::Ellipsis; }
+        if lx_peek(l, 1) == 46 { return T::DotDot; }
+        return T::Dot;
+    }
+    if c == 45 {
+        if lx_peek(l, 1) == 62 { return T::Arrow; }
+        if lx_peek(l, 1) == 61 { return T::MinusEq; }
+        return T::Minus;
+    }
+    if c == 43 {
+        if lx_peek(l, 1) == 61 { return T::PlusEq; }
+        return T::Plus;
+    }
+    if c == 42 {
+        if lx_peek(l, 1) == 61 { return T::StarEq; }
+        return T::Star;
+    }
+    if c == 47 {
+        if lx_peek(l, 1) == 61 { return T::SlashEq; }
+        return T::Slash;
+    }
+    if c == 37 {
+        if lx_peek(l, 1) == 61 { return T::PercentEq; }
+        return T::Percent;
+    }
+    if c == 38 {
+        if lx_peek(l, 1) == 38 { return T::AmpAmp; }
+        if lx_peek(l, 1) == 61 { return T::AmpEq; }
+        return T::Amp;
+    }
+    if c == 124 {
+        if lx_peek(l, 1) == 124 { return T::PipePipe; }
+        if lx_peek(l, 1) == 61 { return T::PipeEq; }
+        return T::Pipe;
+    }
+    if c == 94 {
+        if lx_peek(l, 1) == 61 { return T::CaretEq; }
+        return T::Caret;
+    }
+    if c == 33 {
+        if lx_peek(l, 1) == 61 { return T::Ne; }
+        return T::Bang;
+    }
+    if c == 126 { return T::Tilde; }
+    if c == 61 {
+        if lx_peek(l, 1) == 61 { return T::EqEq; }
+        return T::Eq;
+    }
+    if c == 60 {
+        if lx_peek(l, 1) == 60 {
+            if lx_peek(l, 2) == 61 { return T::ShlEq; }
+            return T::Shl;
+        }
+        if lx_peek(l, 1) == 61 { return T::Le; }
+        return T::Lt;
+    }
+    if c == 62 {
+        if lx_peek(l, 1) == 62 {
+            if lx_peek(l, 2) == 61 { return T::ShrEq; }
+            return T::Shr;
+        }
+        if lx_peek(l, 1) == 61 { return T::Ge; }
+        return T::Gt;
+    }
+    if c == 63 { return T::Question; }
+    if c == 35 { return T::Hash; }
+    if c == 64 { return T::At; }
+    return T::Eof;
+}
+
+fn lx_punct_len(kind: T) -> usize {
+    if kind == T::Ellipsis { return 3; }
+    if kind == T::ColonColon { return 2; }
+    if kind == T::DotDot { return 2; }
+    if kind == T::Arrow { return 2; }
+    if kind == T::AmpAmp { return 2; }
+    if kind == T::PipePipe { return 2; }
+    if kind == T::EqEq { return 2; }
+    if kind == T::Ne { return 2; }
+    if kind == T::Le { return 2; }
+    if kind == T::Ge { return 2; }
+    if kind == T::Shl { return 2; }
+    if kind == T::Shr { return 2; }
+    if kind == T::ShlEq { return 3; }
+    if kind == T::ShrEq { return 3; }
+    if kind == T::PlusEq { return 2; }
+    if kind == T::MinusEq { return 2; }
+    if kind == T::StarEq { return 2; }
+    if kind == T::SlashEq { return 2; }
+    if kind == T::PercentEq { return 2; }
+    if kind == T::AmpEq { return 2; }
+    if kind == T::PipeEq { return 2; }
+    if kind == T::CaretEq { return 2; }
+    return 1;
+}
+
+fn lx_run(a: *mut Arena, f: *mut Src, d: *mut Diags) -> TokArr {
+    let l: *mut Lex = lx_new(a, f, d);
+    loop {
+        lx_skip_space(l);
+        let c: u8 = lx_at(l);
+        if c == 0 {
+            break;
+        }
+        if c == 34 {
+            lx_bump(l);
+            lx_lex_string(l, T::Str);
+            continue;
+        }
+        if c == 99 && lx_peek(l, 1) == 34 {
+            lx_bump(l);
+            lx_bump(l);
+            lx_lex_string(l, T::CStr);
+            continue;
+        }
+        if c == 39 {
+            lx_lex_char(l);
+            continue;
+        }
+        if lx_digit(c) {
+            lx_lex_number(l);
+            continue;
+        }
+        if lx_ident_char(c) {
+            lx_lex_ident(l);
+            continue;
+        }
+        let kind: T = lx_punct(l);
+        if kind == T::Eof {
+            lx_error(l, "unexpected character");
+            lx_bump(l);
+            continue;
+        }
+        let t: *mut Tok = lx_push(l, kind);
+        let n: usize = lx_punct_len(kind);
+        unsafe {
+            (*t).len = n;
+        }
+        let mut i: usize = 0;
+        while i < n {
+            lx_bump(l);
+            i = i + 1;
+        }
+    }
+    let eof: *mut Tok = lx_push(l, T::Eof);
+    unsafe {
+        (*eof).start = (*l).pos;
+        (*eof).len = 0;
+        (*eof).text = "";
+    }
+    let mut out: TokArr = TokArr { data: null, len: 0, cap: 0 };
+    unsafe {
+        out.data = (*l).toks;
+        out.len = (*l).ntoks;
+        out.cap = (*l).cap;
+    }
+    return out;
+}

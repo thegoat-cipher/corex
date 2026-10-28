@@ -1,0 +1,22 @@
+fn eq(a: str, b: str) -> bool {
+    if len(a) != len(b) { return false; }
+    let mut i: usize = 0;
+    while i < len(a) {
+        if a[i] != b[i] { return false; }
+        i += 1;
+    }
+    return true;
+}
+
+fn main() -> i32 {
+    let s: str = "hello";
+    print(s);
+    print(len(s));
+    print(s[1]);
+    print(eq(s, "hello"));
+    print(eq(s, "hellp"));
+    print(eq("", ""));
+    let t: str = s;
+    print(t[4]);
+    return 0;
+}

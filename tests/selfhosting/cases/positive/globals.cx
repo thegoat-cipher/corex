@@ -1,0 +1,20 @@
+const N: usize = 4;
+static LIMIT: i32 = 10;
+static mut COUNTER: i32 = 0;
+
+fn bump() {
+    COUNTER += 1;
+}
+
+fn main() -> i32 {
+    let a: [i32; N] = [1, 2, 3, 4];
+    print(len(a));
+    print(LIMIT);
+    bump();
+    bump();
+    print(COUNTER);
+    print(sizeof(u64));
+    print(alignof(u64));
+    print(sizeof([u8; 7]));
+    return 0;
+}

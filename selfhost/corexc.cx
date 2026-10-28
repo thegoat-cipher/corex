@@ -1,0 +1,12 @@
+// CoreX self-hosted compiler (bootstrap subset).
+// The driver entry point lives in driver.cx; this root exists so the compiler
+// can be built from one translation unit with textual imports.
+
+import "runtime.cx";
+import "types.cx";
+import "lexer.cx";
+import "ast.cx";
+import "parser.cx";
+import "semantic.cx";
+import "codegen.cx";
+import "driver.cx";

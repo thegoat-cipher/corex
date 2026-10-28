@@ -101,6 +101,15 @@ jobs:
       - name: Examples at --opt 0,1,2,3
         run: ./scripts/example-matrix.sh
 
+      - name: Self-hosting bootstrap and reproducibility
+        run: |
+          set -euo pipefail
+          (cd compiler && cargo build --release --locked)
+          ./selfhost/bootstrap.sh 2>&1 | tee "$RUNNER_TEMP/bootstrap.log"
+          grep -F "reproducible: stage2 == stage3 == stage4" "$RUNNER_TEMP/bootstrap.log"
+          grep -F "selfhosting tests: 79 passed, 0 failed" "$RUNNER_TEMP/bootstrap.log"
+          grep -F "bootstrap ok" "$RUNNER_TEMP/bootstrap.log"
+
       - name: Install smoke
         run: |
           set -euo pipefail

@@ -1,0 +1,8 @@
+fn main() -> i32 {
+    let arr: [i32; 3] = [10, 20, 30];
+    let s: [i32] = &arr;
+    print(s[0]);
+    let i: usize = 3;
+    print(s[i]);
+    return 0;
+}

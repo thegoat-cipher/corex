@@ -1,0 +1,307 @@
+// CoreX bootstrap AST. No payload enums: every node is a tagged struct with
+// all fields present, indexed by `kind`. This is the C-in-C encoding the
+// self-hosting assessment recommends.
+
+enum E {
+    IntLit, FloatLit, StrLit, CStrLit, CharLit, BoolLit, NullLit,
+    Ident, Path, Call, Index, Field, Unary, Binary, Cast,
+    Sizeof, Alignof, Offsetof, StructLit, ArrayLit, SliceRange
+}
+
+// `SliceRange` reuses the expression operand slots: `lhs` is the base,
+// `rhs` is the optional start bound, and `args` is the optional end bound.
+// A null bound defaults to 0 (start) or len (end) in the code generator.
+
+enum S {
+    Let, Assign, Expr, If, While, Loop, Break, Continue,
+    Return, Unsafe, Block, Switch, Empty
+}
+
+enum D {
+    Func, Struct, Enum, Var, Const, Typedef, Global
+}
+
+enum I {
+    Func, Struct, Enum, Const, Static, Typedef, Import
+}
+
+struct Expr {
+    kind: E,
+    ty: *mut Type,
+    opty: *mut Type,
+    lhs: *mut Expr,
+    rhs: *mut Expr,
+    args: *mut Expr,
+    next: *mut Expr,
+    ival: i64,
+    name: str,
+    field: str,
+    text: str,
+    type_arg: *mut Type,
+    decl: *mut Decl,
+    op: T,
+    is_mut: bool,
+    index: i32,
+    file: i32,
+    line: i32,
+    col: i32,
+}
+
+struct Case {
+    next: *mut Case,
+    expr: *mut Expr,
+    body: *mut Stmt,
+    is_default: bool,
+    lbl: i32,
+}
+
+struct Stmt {
+    kind: S,
+    next: *mut Stmt,
+    expr: *mut Expr,
+    rhs: *mut Expr,
+    body: *mut Stmt,
+    els: *mut Stmt,
+    cases: *mut Case,
+    name: str,
+    ty: *mut Type,
+    decl: *mut Decl,
+    op: T,
+    is_mut: bool,
+    file: i32,
+    line: i32,
+    col: i32,
+}
+
+struct Param {
+    next: *mut Param,
+    name: str,
+    ty: *mut Type,
+    decl: *mut Decl,
+}
+
+struct Field {
+    next: *mut Field,
+    name: str,
+    ty: *mut Type,
+    offset: usize,
+    size: usize,
+    alignment: usize,
+    index: i32,
+}
+
+struct Variant {
+    next: *mut Variant,
+    name: str,
+    value: i64,
+    expr: *mut Expr,
+}
+
+struct Decl {
+    kind: D,
+    name: str,
+    ty: *mut Type,
+    params: *mut Param,
+    nparams: i32,
+    body: *mut Stmt,
+    fields: *mut Field,
+    nfields: i32,
+    variants: *mut Variant,
+    nvariants: i32,
+    init: *mut Expr,
+    size: usize,
+    alignment: usize,
+    cval: i64,
+    cval_kind: i32,
+    cval_s: str,
+    is_mut: bool,
+    is_extern: bool,
+    busy: bool,
+    laid_out: bool,
+    slot: i32,
+    next: *mut Decl,
+    next_local: *mut Decl,
+    file: i32,
+    line: i32,
+    col: i32,
+}
+
+struct Item {
+    kind: I,
+    decl: *mut Decl,
+    init: *mut Expr,
+    next: *mut Item,
+    is_pub: bool,
+    file: i32,
+    line: i32,
+    col: i32,
+}
+
+struct Program {
+    items: *mut Item,
+    items_tail: *mut Item,
+    decls: *mut Decl,
+    decls_tail: *mut Decl,
+}
+
+struct SrcList {
+    head: *mut Src,
+    tail: *mut Src,
+    count: i32,
+}
+
+struct PathList {
+    path: str,
+    next: *mut PathList,
+}
+
+struct Scope {
+    parent: *mut Scope,
+    vars: *mut Decl,
+}
+
+fn expr_new(a: *mut Arena, kind: E, tok: *mut Tok) -> *mut Expr {
+    let e: *mut Expr = rt_alloc(a, sizeof(Expr)) as *mut Expr;
+    unsafe {
+        (*e).kind = kind;
+        (*e).ty = null;
+        (*e).opty = null;
+        (*e).lhs = null;
+        (*e).rhs = null;
+        (*e).args = null;
+        (*e).next = null;
+        (*e).ival = 0;
+        (*e).name = "";
+        (*e).field = "";
+        (*e).text = "";
+        (*e).type_arg = null;
+        (*e).decl = null;
+        (*e).op = T::Eof;
+        (*e).is_mut = false;
+        (*e).index = 0;
+        (*e).file = (*tok).file;
+        (*e).line = (*tok).line;
+        (*e).col = (*tok).col;
+    }
+    return e;
+}
+
+fn stmt_new(a: *mut Arena, kind: S, tok: *mut Tok) -> *mut Stmt {
+    let s: *mut Stmt = rt_alloc(a, sizeof(Stmt)) as *mut Stmt;
+    unsafe {
+        (*s).kind = kind;
+        (*s).next = null;
+        (*s).expr = null;
+        (*s).rhs = null;
+        (*s).body = null;
+        (*s).els = null;
+        (*s).cases = null;
+        (*s).name = "";
+        (*s).ty = null;
+        (*s).decl = null;
+        (*s).op = T::Eof;
+        (*s).is_mut = false;
+        (*s).file = (*tok).file;
+        (*s).line = (*tok).line;
+        (*s).col = (*tok).col;
+    }
+    return s;
+}
+
+fn decl_new(a: *mut Arena, kind: D, name: str, file: i32, line: i32, col: i32) -> *mut Decl {
+    let d: *mut Decl = rt_alloc(a, sizeof(Decl)) as *mut Decl;
+    unsafe {
+        (*d).kind = kind;
+        (*d).name = name;
+        (*d).ty = null;
+        (*d).params = null;
+        (*d).nparams = 0;
+        (*d).body = null;
+        (*d).fields = null;
+        (*d).nfields = 0;
+        (*d).variants = null;
+        (*d).nvariants = 0;
+        (*d).init = null;
+        (*d).size = 0;
+        (*d).alignment = 1;
+        (*d).cval = 0;
+        (*d).cval_kind = 0;
+        (*d).cval_s = "";
+        (*d).is_mut = false;
+        (*d).is_extern = false;
+        (*d).busy = false;
+        (*d).laid_out = false;
+        (*d).slot = -1;
+        (*d).next = null;
+        (*d).next_local = null;
+        (*d).file = file;
+        (*d).line = line;
+        (*d).col = col;
+    }
+    return d;
+}
+
+fn item_new(a: *mut Arena, kind: I, d: *mut Decl, tok: *mut Tok) -> *mut Item {
+    let it: *mut Item = rt_alloc(a, sizeof(Item)) as *mut Item;
+    unsafe {
+        (*it).kind = kind;
+        (*it).decl = d;
+        (*it).init = null;
+        (*it).next = null;
+        (*it).is_pub = false;
+        (*it).file = (*tok).file;
+        (*it).line = (*tok).line;
+        (*it).col = (*tok).col;
+    }
+    return it;
+}
+
+fn prog_init() -> Program {
+    return Program { items: null, items_tail: null, decls: null, decls_tail: null };
+}
+
+fn prog_add(p: *mut Program, it: *mut Item) {
+    unsafe {
+        if (*p).items_tail == null {
+            (*p).items = it;
+        } else {
+            (*(*p).items_tail).next = it;
+        }
+        (*p).items_tail = it;
+    }
+}
+
+fn srcs_new() -> SrcList {
+    return SrcList { head: null, tail: null, count: 0 };
+}
+
+fn srcs_add(sl: *mut SrcList, a: *mut Arena, path: str, data: str) -> *mut Src {
+    let s: *mut Src = rt_alloc(a, sizeof(Src)) as *mut Src;
+    unsafe {
+        (*s).id = (*sl).count;
+        (*s).path = path;
+        (*s).data = data;
+        (*s).next = null;
+        if (*sl).tail == null {
+            (*sl).head = s;
+        } else {
+            (*(*sl).tail).next = s;
+        }
+        (*sl).tail = s;
+        (*sl).count = (*sl).count + 1;
+    }
+    return s;
+}
+
+fn srcs_get(sl: *mut SrcList, id: i32) -> *mut Src {
+    unsafe {
+        let mut s: *mut Src = (*sl).head;
+        while s != null {
+            if (*s).id == id {
+                return s;
+            }
+            s = (*s).next;
+        }
+    }
+    return null;
+}

@@ -1,0 +1,22 @@
+struct Inner { a: i32, b: i64 }
+struct Outer { name: str, inner: Inner, ptr: *mut i32 }
+
+fn make(n: i32) -> Inner {
+    return Inner { a: n, b: n as i64 * 2 };
+}
+
+fn main() -> i32 {
+    let mut v: i32 = 42;
+    let o: Outer = Outer { name: "note", inner: make(3), ptr: &mut v };
+    print(o.name);
+    print(o.inner.a);
+    print(o.inner.b);
+    unsafe {
+        print(*o.ptr);
+        *o.ptr = 7;
+    }
+    print(v);
+    let c: Outer = o;
+    print(c.inner.a);
+    return 0;
+}

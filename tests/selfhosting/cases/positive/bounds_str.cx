@@ -1,0 +1,7 @@
+fn main() -> i32 {
+    let s: str = "hello";
+    print(s[0]);
+    let i: usize = 5;
+    print(s[i]);
+    return 0;
+}

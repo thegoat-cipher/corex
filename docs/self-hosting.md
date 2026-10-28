@@ -1,5 +1,13 @@
 # CoreX Self-Hosting Assessment
 
+> **Implementation status (2026-10-28):** this document is the pre-implementation
+> assessment. A CoreX-written bootstrap compiler now exists under `selfhost/`;
+> Stage 1–4 are built by `selfhost/bootstrap.sh`, and Stage 2 == Stage 3 ==
+> Stage 4 byte-for-byte. See `docs/selfhosting/bootstrap-results.md` and
+> `validation-report.md`. The analysis below remains the rationale and risk
+> record, not the current status.
+
+
 **Question:** Is CoreX stable and complete enough to reimplement the CoreX
 compiler in CoreX today?
 

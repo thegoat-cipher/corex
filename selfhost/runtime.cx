@@ -1,0 +1,573 @@
+// CoreX bootstrap runtime: arena allocation, growable buffers, byte-string
+// helpers, file I/O, environment lookup, and child processes.
+//
+// This file is compiled by both the Rust Stage 0 compiler and the self-hosted
+// compiler. It therefore uses only the bootstrap subset documented in
+// docs/selfhosting/bootstrap-architecture.md: structs, enums, pointers, str,
+// cstr, arrays, while/if/return/unsafe, casts, sizeof, and the syscall/alloc
+// builtins. No modules, generics, closures, floating point, or thread APIs.
+
+struct Arena {
+    base: *mut u8,
+    used: usize,
+    cap: usize,
+}
+
+fn rt_arena(cap: usize) -> Arena {
+    let mut base: *mut u8 = null;
+    unsafe {
+        base = alloc(cap);
+    }
+    return Arena { base: base, used: 0, cap: cap };
+}
+
+fn rt_alloc(a: *mut Arena, size: usize) -> *mut u8 {
+    unsafe {
+        let mut used: usize = (*a).used;
+        used = (used + 15) & (0 - 16);
+        if used + size > (*a).cap {
+            rt_die(c"corex: bootstrap arena exhausted\n");
+        }
+        let p: *mut u8 = (*a).base + used;
+        (*a).used = used + size;
+        return p;
+    }
+}
+
+fn rt_die(msg: cstr) {
+    unsafe {
+        let p: *u8 = msg as *u8;
+        let n: usize = cstr_len(msg);
+        let _ = syscall(1, 2, p as usize, n, 0, 0, 0);
+        let _ = syscall(60, 1, 0, 0, 0, 0, 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Growable byte buffer. A copy of `Buf` shares the arena and the backing block;
+// the compiler never aliases an owning buffer, so no move checking is needed.
+
+struct Buf {
+    arena: *mut Arena,
+    data: *mut u8,
+    len: usize,
+    cap: usize,
+}
+
+fn rt_buf(a: *mut Arena) -> Buf {
+    return rt_buf_cap(a, 256);
+}
+
+fn rt_buf_cap(a: *mut Arena, cap: usize) -> Buf {
+    let mut c: usize = cap;
+    if c < 16 {
+        c = 16;
+    }
+    let p: *mut u8 = rt_alloc(a, c);
+    return Buf { arena: a, data: p, len: 0, cap: c };
+}
+
+fn rt_reserve(b: *mut Buf, need: usize) {
+    unsafe {
+        if (*b).len + need <= (*b).cap {
+            return;
+        }
+        let mut cap: usize = (*b).cap;
+        while cap < (*b).len + need {
+            cap = cap * 2;
+        }
+        let p: *mut u8 = rt_alloc((*b).arena, cap);
+        rt_memcpy(p, (*b).data, (*b).len);
+        (*b).data = p;
+        (*b).cap = cap;
+    }
+}
+
+fn rt_b(b: *mut Buf, c: u8) {
+    rt_reserve(b, 1);
+    unsafe {
+        *((*b).data + (*b).len) = c;
+        (*b).len = (*b).len + 1;
+    }
+}
+
+fn rt_s(b: *mut Buf, s: str) {
+    let n: usize = len(s);
+    rt_reserve(b, n);
+    unsafe {
+        let mut i: usize = 0;
+        while i < n {
+            *((*b).data + (*b).len) = s[i];
+            (*b).len = (*b).len + 1;
+            i = i + 1;
+        }
+    }
+}
+
+fn rt_cstr(b: *mut Buf, s: cstr) {
+    unsafe {
+        let p: *u8 = s as *u8;
+        let n: usize = cstr_len(s);
+        rt_reserve(b, n);
+        let mut i: usize = 0;
+        while i < n {
+            *((*b).data + (*b).len) = *(p + i);
+            (*b).len = (*b).len + 1;
+            i = i + 1;
+        }
+    }
+}
+
+fn rt_u(b: *mut Buf, value: u64) {
+    let mut digits: [u8; 24] = [0; 24];
+    let mut pos: usize = 24;
+    let mut cur: u64 = value;
+    loop {
+        pos = pos - 1;
+        digits[pos] = 48 + (cur % 10) as u8;
+        cur = cur / 10;
+        if cur == 0 {
+            break;
+        }
+    }
+    while pos < 24 {
+        rt_b(b, digits[pos]);
+        pos = pos + 1;
+    }
+}
+
+fn rt_i(b: *mut Buf, value: i64) {
+    if value < 0 {
+        rt_b(b, 45);
+        let v: i64 = 0 - value;
+        rt_u(b, v as u64);
+        return;
+    }
+    rt_u(b, value as u64);
+}
+
+fn rt_hex(b: *mut Buf, value: u64) {
+    let mut digits: [u8; 18] = [0; 18];
+    let hexes: [u8; 16] = [48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 97, 98, 99, 100, 101, 102];
+    let mut pos: usize = 16;
+    let mut cur: u64 = value;
+    loop {
+        pos = pos - 1;
+        let nib: usize = (cur & 15) as usize;
+        digits[pos] = hexes[nib];
+        cur = cur >> 4;
+        if cur == 0 {
+            break;
+        }
+    }
+    while pos < 16 {
+        rt_b(b, digits[pos]);
+        pos = pos + 1;
+    }
+}
+
+fn rt_view(b: *mut Buf) -> str {
+    unsafe {
+        return str_from_raw((*b).data, (*b).len);
+    }
+}
+
+fn rt_clear(b: *mut Buf) {
+    unsafe {
+        (*b).len = 0;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Bytes and strings
+
+fn rt_memcpy(dst: *mut u8, src: *u8, n: usize) {
+    unsafe {
+        let mut i: usize = 0;
+        while i < n {
+            *(dst + i) = *(src + i);
+            i = i + 1;
+        }
+    }
+}
+
+fn rt_memzero(dst: *mut u8, n: usize) {
+    unsafe {
+        let mut i: usize = 0;
+        while i < n {
+            *(dst + i) = 0;
+            i = i + 1;
+        }
+    }
+}
+
+fn rt_eq(a: str, b: str) -> bool {
+    if len(a) != len(b) {
+        return false;
+    }
+    let mut i: usize = 0;
+    while i < len(a) {
+        if a[i] != b[i] {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn rt_starts(a: str, b: str) -> bool {
+    if len(b) > len(a) {
+        return false;
+    }
+    let mut i: usize = 0;
+    while i < len(b) {
+        if a[i] != b[i] {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+fn rt_find(a: str, b: str) -> i64 {
+    if len(b) > len(a) {
+        return -1;
+    }
+    let mut i: usize = 0;
+    while i + len(b) <= len(a) {
+        let mut j: usize = 0;
+        let mut ok: bool = true;
+        while j < len(b) {
+            if a[i + j] != b[j] {
+                ok = false;
+                break;
+            }
+            j = j + 1;
+        }
+        if ok {
+            return i as i64;
+        }
+        i = i + 1;
+    }
+    return -1;
+}
+
+fn rt_cstr_str(p: *u8) -> str {
+    unsafe {
+        let n: usize = cstr_len(p as cstr);
+        return str_from_raw(p, n);
+    }
+}
+
+fn rt_cstr_eq(s: cstr, t: str) -> bool {
+    unsafe {
+        let n: usize = cstr_len(s);
+        if n != len(t) {
+            return false;
+        }
+        let p: *u8 = s as *u8;
+        let mut i: usize = 0;
+        while i < n {
+            if *(p + i) != t[i] {
+                return false;
+            }
+            i = i + 1;
+        }
+    }
+    return true;
+}
+
+fn rt_to_cstr(a: *mut Arena, s: str) -> cstr {
+    let p: *mut u8 = rt_alloc(a, len(s) + 1);
+    unsafe {
+        let mut i: usize = 0;
+        while i < len(s) {
+            *(p + i) = s[i];
+            i = i + 1;
+        }
+        *(p + len(s)) = 0;
+    }
+    return p as cstr;
+}
+
+fn rt_slice(s: str, start: usize, end: usize) -> str {
+    let mut e: usize = end;
+    if e > len(s) {
+        e = len(s);
+    }
+    if e < start {
+        e = start;
+    }
+    unsafe {
+        return str_from_raw(data_ptr(s) + start, e - start);
+    }
+}
+
+fn rt_is_abs(s: str) -> bool {
+    if len(s) == 0 {
+        return false;
+    }
+    return s[0] == 47;
+}
+
+fn rt_dirname(s: str) -> str {
+    let mut i: usize = len(s);
+    while i > 0 {
+        i = i - 1;
+        if s[i] == 47 {
+            return rt_slice(s, 0, i);
+        }
+    }
+    return "";
+}
+
+fn rt_join(a: *mut Arena, dir: str, rel: str) -> str {
+    if rt_is_abs(rel) {
+        return rel;
+    }
+    let d: str = rt_dirname(dir);
+    let total: usize = len(d) + 1 + len(rel);
+    let p: *mut u8 = rt_alloc(a, total);
+    unsafe {
+        let mut i: usize = 0;
+        while i < len(d) {
+            *(p + i) = d[i];
+            i = i + 1;
+        }
+        *(p + i) = 47;
+        i = i + 1;
+        let mut j: usize = 0;
+        while j < len(rel) {
+            *(p + i) = rel[j];
+            i = i + 1;
+            j = j + 1;
+        }
+    }
+    return str_from_raw(p, total);
+}
+
+fn rt_join2(a: *mut Arena, dir: str, name: str) -> str {
+    let total: usize = len(dir) + 1 + len(name);
+    let p: *mut u8 = rt_alloc(a, total);
+    unsafe {
+        let mut i: usize = 0;
+        while i < len(dir) {
+            *(p + i) = dir[i];
+            i = i + 1;
+        }
+        *(p + i) = 47;
+        i = i + 1;
+        let mut j: usize = 0;
+        while j < len(name) {
+            *(p + i) = name[j];
+            i = i + 1;
+            j = j + 1;
+        }
+    }
+    return str_from_raw(p, total);
+}
+
+// ---------------------------------------------------------------------------
+// Files
+
+struct FileData {
+    data: str,
+    ok: bool,
+}
+
+fn rt_exists(path: cstr) -> bool {
+    unsafe {
+        let r: isize = syscall(21, path as usize, 0 as usize, 0, 0, 0, 0) as isize;
+        return r == 0;
+    }
+}
+
+fn rt_read_file(a: *mut Arena, path: cstr) -> FileData {
+    unsafe {
+        let fd: i32 = syscall(2, path as usize, 0 as usize, 0 as usize, 0, 0, 0) as i32;
+        if fd < 0 {
+            return FileData { data: "", ok: false };
+        }
+        let end: i64 = syscall(8, fd as usize, 0 as usize, 2 as usize, 0, 0, 0) as i64;
+        let _ = syscall(8, fd as usize, 0 as usize, 0 as usize, 0, 0, 0);
+        if end < 0 {
+            let _ = syscall(3, fd as usize, 0, 0, 0, 0, 0);
+            return FileData { data: "", ok: false };
+        }
+        let n: usize = end as usize;
+        let buf: *mut u8 = rt_alloc(a, n + 1);
+        let mut off: usize = 0;
+        while off < n {
+            let r: isize = syscall(0, fd as usize, (buf + off) as usize, n - off, 0, 0, 0) as isize;
+            if r <= 0 {
+                break;
+            }
+            off = off + r as usize;
+        }
+        let _ = syscall(3, fd as usize, 0, 0, 0, 0, 0);
+        *(buf + off) = 0;
+        return FileData { data: str_from_raw(buf, off), ok: true };
+    }
+}
+
+fn rt_write_file(path: cstr, data: str) -> i32 {
+    unsafe {
+        let fd: i32 = syscall(2, path as usize, 577 as usize, 420 as usize, 0, 0, 0) as i32;
+        if fd < 0 {
+            return -1;
+        }
+        let mut off: usize = 0;
+        let n: usize = len(data);
+        let p: *u8 = data_ptr(data);
+        while off < n {
+            let w: isize = syscall(1, fd as usize, (p + off) as usize, n - off, 0, 0, 0) as isize;
+            if w <= 0 {
+                let _ = syscall(3, fd as usize, 0, 0, 0, 0, 0);
+                return -1;
+            }
+            off = off + w as usize;
+        }
+        let _ = syscall(3, fd as usize, 0, 0, 0, 0, 0);
+    }
+    return 0;
+}
+
+fn rt_unlink(path: cstr) {
+    unsafe {
+        let _ = syscall(87, path as usize, 0, 0, 0, 0, 0);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Environment and child processes
+
+fn rt_env(envp: **u8, key: str) -> cstr {
+    if envp == null {
+        return c"";
+    }
+    unsafe {
+        let mut i: usize = 0;
+        loop {
+            let entry: *u8 = *(envp + i);
+            if entry == null {
+                break;
+            }
+            let s: str = rt_cstr_str(entry);
+            if len(s) > len(key) && s[len(key)] == 61 && rt_starts(s, key) {
+                return (entry + len(key) + 1) as cstr;
+            }
+            i = i + 1;
+        }
+    }
+    return c"";
+}
+
+fn rt_env_or(envp: **u8, key: str, fallback: cstr) -> cstr {
+    let v: cstr = rt_env(envp, key);
+    if cstr_len(v) == 0 {
+        return fallback;
+    }
+    return v;
+}
+
+fn rt_argv(a: *mut Arena, n: i32) -> *mut *u8 {
+    let p: *mut u8 = rt_alloc(a, (n as usize + 1) * 8);
+    rt_memzero(p, (n as usize + 1) * 8);
+    return p as *mut *u8;
+}
+
+fn rt_arg_set(argv: *mut *u8, i: i32, value: cstr) {
+    unsafe {
+        *(argv + i as usize) = value as *u8;
+    }
+}
+
+fn rt_run(argv: *mut *u8, envp: **u8) -> i32 {
+    unsafe {
+        let pid: i32 = syscall(57, 0, 0, 0, 0, 0, 0) as i32;
+        if pid == 0 {
+            let path: usize = *(argv + 0) as usize;
+            let _ = syscall(59, path, argv as usize, envp as usize, 0, 0, 0);
+            let _ = syscall(60, 127, 0, 0, 0, 0, 0);
+        }
+        if pid < 0 {
+            return -1;
+        }
+        let mut status: i32 = 0;
+        let _ = syscall(61, pid as usize, (&mut status) as usize, 0, 0, 0, 0);
+        return (status >> 8) & 255;
+    }
+}
+
+fn rt_find_tool(a: *mut Arena, envp: **u8, name: str) -> cstr {
+    let bin: cstr = rt_env(envp, "COREX_LLVM_BIN");
+    if cstr_len(bin) > 0 {
+        let dir: str = rt_cstr_str(bin as *u8);
+        let p: str = rt_join2(a, dir, name);
+        let c: cstr = rt_to_cstr(a, p);
+        if rt_exists(c) {
+            return c;
+        }
+    }
+    let path_env: cstr = rt_env(envp, "PATH");
+    if cstr_len(path_env) > 0 {
+        let path: str = rt_cstr_str(path_env as *u8);
+        let mut start: usize = 0;
+        let mut i: usize = 0;
+        loop {
+            let at_end: bool = i == len(path);
+            if at_end || path[i] == 58 {
+                let dir: str = rt_slice(path, start, i);
+                if len(dir) > 0 {
+                    let p: str = rt_join2(a, dir, name);
+                    let c: cstr = rt_to_cstr(a, p);
+                    if rt_exists(c) {
+                        return c;
+                    }
+                }
+                start = i + 1;
+            }
+            if at_end {
+                break;
+            }
+            i = i + 1;
+        }
+    }
+    let p: str = rt_join2(a, "/usr/bin", name);
+    let c: cstr = rt_to_cstr(a, p);
+    if rt_exists(c) {
+        return c;
+    }
+    let p2: str = rt_join2(a, "/bin", name);
+    let c2: cstr = rt_to_cstr(a, p2);
+    if rt_exists(c2) {
+        return c2;
+    }
+    return c"";
+}
+
+fn rt_cc(a: *mut Arena, envp: **u8) -> cstr {
+    let cc: cstr = rt_env(envp, "COREX_CC");
+    if cstr_len(cc) > 0 {
+        return cc;
+    }
+    return rt_find_tool(a, envp, "cc");
+}
+
+fn rt_getpid() -> i32 {
+    unsafe {
+        return syscall(39, 0, 0, 0, 0, 0, 0) as i32;
+    }
+}
+
+fn rt_temp_path(a: *mut Arena, ext: str) -> cstr {
+    let bp: *mut Buf = rt_alloc(a, 32) as *mut Buf;
+    unsafe {
+        (*bp) = rt_buf(a);
+    }
+    rt_s(bp, "/tmp/corexc.");
+    rt_i(bp, rt_getpid() as i64);
+    rt_s(bp, ext);
+    let out: str = rt_view(bp);
+    return rt_to_cstr(a, out);
+}

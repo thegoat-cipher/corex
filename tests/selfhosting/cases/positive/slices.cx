@@ -1,0 +1,151 @@
+// Slice surface: [T] types, &array coercion, params/returns, indexing,
+// ranges (two-sided, one-sided, full), len, data_ptr, str ranges, mutation.
+
+struct View {
+    data: [i32],
+    tag: i32,
+}
+
+fn sum(s: [i32]) -> i32 {
+    let mut total: i32 = 0;
+    let mut i: usize = 0;
+    while i < len(s) {
+        total += s[i];
+        i += 1;
+    }
+    return total;
+}
+
+fn tail(s: [i32]) -> [i32] {
+    return s[1..];
+}
+
+fn first(s: [i32]) -> i32 {
+    return s[0];
+}
+
+fn first_byte(s: [u8]) -> u8 {
+    return s[0];
+}
+
+fn take_bytes(b: [u8]) -> usize {
+    return len(b);
+}
+
+fn main() -> i32 {
+    let mut arr: [i32; 5] = [10, 20, 30, 40, 50];
+    let all: [i32] = &arr;
+    print(len(all));
+    print(all[0]);
+    print(all[4]);
+    print(sum(all));
+    print(first(all));
+
+    let arr_mid: [i32] = arr[1..4];
+    print(len(arr_mid));
+    print(arr_mid[0]);
+    print(arr_mid[2]);
+    let arr_all: [i32] = arr[..];
+    print(len(arr_all));
+
+    let a: usize = 1;
+    let b: usize = 4;
+    print(all[a]);
+    let dyn_head: [i32] = all[..b];
+    print(len(dyn_head));
+    print(dyn_head[0]);
+
+    let t: [i32] = tail(all);
+    print(len(t));
+    print(sum(t));
+
+    let mid: [i32] = all[1..3];
+    print(len(mid));
+    print(mid[0]);
+    print(mid[1]);
+
+    let head: [i32] = all[..2];
+    print(len(head));
+    print(head[1]);
+
+    let from: [i32] = all[3..];
+    print(len(from));
+    print(from[0]);
+
+    let whole: [i32] = all[..];
+    print(len(whole));
+
+    let dyn_slice: [i32] = all[a..b];
+    print(len(dyn_slice));
+    print(dyn_slice[0]);
+    print(dyn_slice[2]);
+
+    let copy: [i32] = all;
+    print(len(copy));
+
+    let views: [[i32]; 2] = [all[0..2], all[2..5]];
+    print(len(views[0]));
+    print(len(views[1]));
+    print(views[1][0]);
+
+    let v: View = View { data: all[1..4], tag: 7 };
+    print(v.tag);
+    print(len(v.data));
+    print(v.data[0]);
+
+    let field_range: [i32] = v.data[1..];
+    print(len(field_range));
+    print(field_range[0]);
+
+    let view_range: [i32] = views[0][..1];
+    print(len(view_range));
+    print(view_range[0]);
+
+    let mut ms: [i32] = &mut arr;
+    ms[0] = 99;
+    print(arr[0]);
+    print(ms[0]);
+    ms[1] += 5;
+    print(arr[1]);
+
+    let mut vv: View = v;
+    vv.data[0] = 77;
+    print(arr[1]);
+
+    let mut bytes: [u8; 5] = [104, 101, 108, 108, 111];
+    let bs: [u8] = &bytes;
+    print(bs);
+    print(len(bs));
+    print(first_byte(bs));
+    let bp: *u8 = data_ptr(bs);
+    unsafe {
+        print(*bp);
+    }
+
+    let text: str = "hello world";
+    let word: str = text[6..];
+    print(word);
+    print(len(word));
+    let greeting: str = text[..5];
+    print(greeting);
+    let all_text: str = text[..];
+    print(all_text);
+    let middle: str = text[1..4];
+    print(middle);
+    print(text[0]);
+
+    let inline_bytes: [u8] = "bins";
+    print(inline_bytes);
+    print(len(inline_bytes));
+    print(take_bytes(inline_bytes));
+    let inline_str: str = inline_bytes;
+    print(inline_str);
+    print(take_bytes("abc"));
+
+    let p: *i32 = data_ptr(all);
+    unsafe {
+        print(*p);
+    }
+
+    return 0;
+}

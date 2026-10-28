@@ -252,6 +252,29 @@ Results and caveats: [`docs/benchmarks.md`](docs/benchmarks.md).
 
 ---
 
+## Self-hosting
+
+A CoreX-written bootstrap compiler lives in `selfhost/`. It compiles its own
+source (7,721 lines across nine files), emits LLVM 20 textual IR through
+external `llvm-as`/`llc`/`cc`, and produces a freestanding static x86-64 ELF.
+Stage 1 is built by the Rust compiler; Stage 2 builds itself and Stage 3
+rebuilds it. **Stage 2, Stage 3, and Stage 4 are byte-identical**
+(`sha256 644c22c5…`) under `--opt 0` with LLVM 20.1.8 and cc 15.2.0.
+
+```sh
+selfhost/bootstrap.sh          # Stage 1-4, hash check, behavioural corpus
+tests/selfhosting/run.sh build/stage2/corexc
+```
+
+The bootstrap implements a documented subset (see
+`docs/selfhosting/bootstrap-architecture.md`); floats, modules, function
+pointers, and other v0.3 features are rejected by that compiler, not silently
+miscompiled. `vec<T>` and slices `[T]` are supported, including `&array`
+coercion, range slicing, runtime index bounds checks, and `str`/`[u8]`
+compatibility. Rust `corex` remains the full-language Stage 0 reference.
+Details: `docs/selfhosting/master.md`, `bootstrap-results.md`,
+`validation-report.md`.
+
 ## Repository layout
 
 ```
@@ -292,6 +315,8 @@ compiler/
     stdlib.rs           allocator, memory/strings, files, formatting, time, math
     concurrency.rs      atomics, volatile, asm, threads, futex, TLS
     tooling.rs          fmt/lint/doc/test, DWARF, sanitizers, LSP
+selfhost/               CoreX-written bootstrap compiler (9 files, 7,721 lines)
+tests/selfhosting/      bootstrap corpus and differential harness
 lib/corex/              freestanding standard library modules
 examples/               hello, factorial, pointers, loop_sum, features, compiler_data,
                         dispatch, playground
@@ -396,7 +421,11 @@ and runtime aborts for dynamic bounds and division by zero. See
 | [`docs/tasks.md`](docs/tasks.md) | Task tracker with validation evidence |
 | [`docs/request-log.md`](docs/request-log.md) | Append-only record of requests and outcomes |
 | [`docs/benchmarks.md`](docs/benchmarks.md) | Measured performance with methodology |
-| [`docs/self-hosting.md`](docs/self-hosting.md) | Self-hosting assessment: verdict, component mapping, blockers, bootstrap plan, effort and risk |
+| [`docs/self-hosting.md`](docs/self-hosting.md) | Self-hosting assessment: verdict, component mapping, blockers, bootstrap plan, effort and risk (pre-implementation baseline) |
+| [`docs/selfhosting/master.md`](docs/selfhosting/master.md) | Self-hosting status: stages, hashes, validation, next priorities |
+| [`docs/selfhosting/bootstrap-architecture.md`](docs/selfhosting/bootstrap-architecture.md) | Stage model, subset, toolchain, determinism, ABI |
+| [`docs/selfhosting/bootstrap-results.md`](docs/selfhosting/bootstrap-results.md) | Measured Stage 1–4 results, hashes, corpus |
+| [`docs/selfhosting/validation-report.md`](docs/selfhosting/validation-report.md) | Layered validation evidence and limits |
 | [`lib/corex`](lib/corex) | Freestanding standard library source (modules listed in spec §12.7) |
 
 ## AI assistance

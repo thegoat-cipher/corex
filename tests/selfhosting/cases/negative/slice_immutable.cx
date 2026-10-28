@@ -1,0 +1,6 @@
+fn main() -> i32 {
+    let mut arr: [i32; 2] = [1, 2];
+    let s: [i32] = &mut arr;
+    s[0] = 5;
+    return arr[0];
+}

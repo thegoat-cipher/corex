@@ -1,0 +1,20 @@
+struct P { x: i32, y: i32 }
+struct Row { v: [i32; 3] }
+
+fn main() -> i32 {
+    let mut a: [i32; 4] = [1, 2, 3, 4];
+    a[2] = a[0] + a[1];
+    print(a[0]);
+    print(a[1]);
+    print(a[2]);
+    print(len(a));
+    let r: Row = Row { v: [9, 8, 7] };
+    print(r.v[0]);
+    print(r.v[2]);
+    let ps: [P; 2] = [P { x: 5, y: 6 }, P { x: 7, y: 8 }];
+    print(ps[0].x + ps[1].y);
+    let mut z: [u8; 3] = [0; 3];
+    z[1] = 65;
+    print(z[1]);
+    return 0;
+}

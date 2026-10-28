@@ -1,0 +1,6 @@
+fn main() -> i32 {
+    let mut v: vec<i32> = vec_new(1);
+    let x: u8 = 7;
+    vec_push(&mut v, x);
+    return 0;
+}

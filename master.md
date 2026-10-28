@@ -137,3 +137,25 @@ Measured (median, CoreX/C): `mix` 1.017, `array` 1.056, `struct` 0.964,
 3. Add compiler-managed `thread_local` on top of the explicit TLS block.
 4. Grow the macro system (statement macros, hygiene) if demand exists.
 5. P2 only: monomorphized generics, cross-compilation targets, package manager.
+
+
+---
+
+## 8. Self-hosting (2026-10-28)
+
+A CoreX-written compiler now lives under `selfhost/` and builds itself:
+
+| Stage | Built by | Hash |
+|---|---|---|
+| Stage 1 | Rust `corex` | `7b2f8837…` |
+| Stage 2 | Stage 1 | `644c22c5…` |
+| Stage 3 | Stage 2 | `644c22c5…` |
+| Stage 4 | Stage 3 | `644c22c5…` |
+
+Stage 2/3/4 are byte-identical at `--opt 0` (LLVM 20.1.8, cc 15.2.0). The
+79-case corpus (64 positive runs at `--opt 0..3` + 15 negative) passes on Stage 1,
+Stage 2, and Stage 3. Stage 1 differs from Stage 2 by design: it is compiled by
+the Rust backend (different ABI), while Stage 2 onward use the self-hosted
+backend. The Rust compiler is unchanged and remains the full-language reference
+(205/205 tests). See `docs/selfhosting/` — start with `master.md`,
+`bootstrap-results.md`, and `validation-report.md`.

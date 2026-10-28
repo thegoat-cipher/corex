@@ -1,0 +1,5 @@
+fn main() -> i32 {
+    let v: vec<i32> = vec_new(1);
+    let s: [i32] = vec_slice(v);
+    return len(s) as i32;
+}

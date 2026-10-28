@@ -1,0 +1,16 @@
+fn fib(n: i64) -> i64 {
+    if n < 2 { return n; }
+    return fib(n - 1) + fib(n - 2);
+}
+
+fn main() -> i32 {
+    print(fib(20));
+    let mut i: i64 = 0;
+    let mut total: i64 = 0;
+    while i < 5 {
+        total += fib(i);
+        i += 1;
+    }
+    print(total);
+    return 0;
+}

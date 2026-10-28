@@ -222,7 +222,7 @@ The following are deliberate exclusions, not missing work:
 - **Borrow checking.** No ownership or lifetime analysis; aliasing is the programmer's responsibility.
 - **Optimization passes beyond LLVM `-O`.** No custom IR passes or profile-guided optimization.
 - **Cross-platform support.** Linux x86-64 only.
-- **Self-hosting.** The compiler stays in Rust; CoreX cannot compile itself.
+- **Self-hosting.** ~~The compiler stays in Rust; CoreX cannot compile itself.~~ **Superseded 2026-10-28:** a CoreX-written bootstrap compiler now compiles itself; see `docs/selfhosting/master.md`. Rust remains Stage 0 and the full-language reference.
 - **Standard library.** No collections, formatting, I/O wrappers, or prelude; programs use syscalls.
 
 ## 8. Risks

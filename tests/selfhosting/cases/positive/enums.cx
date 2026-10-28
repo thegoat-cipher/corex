@@ -1,0 +1,22 @@
+enum Color { Red, Green = 5, Blue }
+enum Op { Add, Sub = -3, Mul }
+
+fn apply(op: Op, a: i32, b: i32) -> i32 {
+    switch op {
+        case Op::Add { return a + b; }
+        case Op::Sub { return a - b; }
+        default { return a * b; }
+    }
+}
+
+fn main() -> i32 {
+    print(Color::Red as i32);
+    print(Color::Green as i32);
+    print(Color::Blue as i32);
+    print(Op::Sub as i32);
+    print(apply(Op::Add, 2, 3));
+    print(apply(Op::Sub, 9, 4));
+    print(apply(Op::Mul, 6, 7));
+    print(Color::Green == Color::Green);
+    return 0;
+}

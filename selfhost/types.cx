@@ -1,0 +1,59 @@
+// CoreX bootstrap type model. Kept separate from the AST so the type checker
+// and code generator share one representation without duplicating layout rules.
+
+enum K {
+    Void, Bool, I8, I16, I32, I64, U8, U16, U32, U64, Usize, Isize,
+    F32, F64, Char, Ptr, Array, Str, CStr, Named, Struct, Enum, Slice, Vec
+}
+
+struct Type {
+    kind: K,
+    elem: *mut Type,
+    len: usize,
+    len_expr: *mut Expr,
+    decl: *mut Decl,
+    mutable: bool,
+    name: str,
+}
+
+fn type_new(a: *mut Arena, kind: K) -> *mut Type {
+    let t: *mut Type = rt_alloc(a, sizeof(Type)) as *mut Type;
+    unsafe {
+        (*t).kind = kind;
+        (*t).elem = null;
+        (*t).len = 0;
+        (*t).len_expr = null;
+        (*t).decl = null;
+        (*t).mutable = false;
+        (*t).name = "";
+    }
+    return t;
+}
+
+fn type_ptr(a: *mut Arena, elem: *mut Type, mutable: bool) -> *mut Type {
+    let t: *mut Type = type_new(a, K::Ptr);
+    unsafe {
+        (*t).elem = elem;
+        (*t).mutable = mutable;
+    }
+    return t;
+}
+
+fn type_array(a: *mut Arena, elem: *mut Type, n: usize, len_expr: *mut Expr) -> *mut Type {
+    let t: *mut Type = type_new(a, K::Array);
+    unsafe {
+        (*t).elem = elem;
+        (*t).len = n;
+        (*t).len_expr = len_expr;
+    }
+    return t;
+}
+
+fn type_vec(a: *mut Arena, elem: *mut Type) -> *mut Type {
+    let t: *mut Type = type_new(a, K::Vec);
+    unsafe {
+        (*t).elem = elem;
+    }
+    return t;
+}
+

@@ -1,0 +1,1509 @@
+// CoreX bootstrap recursive-descent parser for the bootstrap subset.
+
+struct P {
+    a: *mut Arena,
+    d: *mut Diags,
+    srcs: *mut SrcList,
+    loaded: *mut PathList,
+    toks: *mut Tok,
+    ntoks: i32,
+    pos: i32,
+    file: i32,
+    path: str,
+    items: *mut Item,
+    items_tail: *mut Item,
+    depth: i32,
+    vec_depth: i32,
+    pending_gt: i32,
+}
+
+fn pk(p: *mut P) -> *mut Tok {
+    unsafe {
+    unsafe {
+        return (*p).toks + (*p).pos as usize;
+    }
+
+    }
+}
+
+fn pk_n(p: *mut P, n: i32) -> *mut Tok {
+    unsafe {
+    unsafe {
+        let at: usize = (*p).pos as usize + n as usize;
+        if at >= (*p).ntoks as usize {
+            return (*p).toks + ((*p).ntoks - 1) as usize;
+        }
+        return (*p).toks + at;
+    }
+
+    }
+}
+
+fn tkind(p: *mut P) -> T {
+    unsafe {
+    unsafe {
+        return (*pk(p)).kind;
+    }
+
+    }
+}
+
+fn at(p: *mut P, k: T) -> bool {
+    unsafe {
+    return tkind(p) == k;
+
+    }
+}
+
+fn bump(p: *mut P) {
+    unsafe {
+    unsafe {
+        if (*p).pos < (*p).ntoks - 1 {
+            (*p).pos = (*p).pos + 1;
+        }
+    }
+
+    }
+}
+
+fn eat(p: *mut P, k: T) -> bool {
+    unsafe {
+    if at(p, k) {
+        bump(p);
+        return true;
+    }
+    return false;
+
+    }
+}
+
+fn perr(p: *mut P, msg: str) {
+    unsafe {
+    let t: *mut Tok = pk(p);
+    unsafe {
+        diag_add((*p).d, (*p).a, (*t).file, (*t).line, (*t).col, msg);
+    }
+
+    }
+}
+
+fn expect(p: *mut P, k: T) -> *mut Tok {
+    unsafe {
+    let t: *mut Tok = pk(p);
+    if at(p, k) {
+        bump(p);
+        return t;
+    }
+    perr(p, "unexpected token");
+    return t;
+
+    }
+}
+
+fn sync(p: *mut P) {
+    unsafe {
+    loop {
+        if at(p, T::Eof) || at(p, T::RBrace) {
+            return;
+        }
+        if eat(p, T::Semi) {
+            return;
+        }
+        bump(p);
+    }
+
+    }
+}
+
+fn type_prim(a: *mut Arena, k: K) -> *mut Type {
+    unsafe {
+    return type_new(a, k);
+
+    }
+}
+
+fn expect_vec_gt(p: *mut P) {
+    unsafe {
+    if (*p).pending_gt > 0 {
+        (*p).pending_gt = (*p).pending_gt - 1;
+        return;
+    }
+    if at(p, T::Gt) {
+        bump(p);
+        return;
+    }
+    if at(p, T::Shr) && (*p).vec_depth > 1 {
+        bump(p);
+        (*p).pending_gt = 1;
+        return;
+    }
+    perr(p, "expected > after vec type");
+
+    }
+}
+
+fn parse_type(p: *mut P) -> *mut Type {
+    unsafe {
+    let t: *mut Tok = pk(p);
+    let k: T = (*t).kind;
+    if k == T::Star {
+        bump(p);
+        let mut mutable: bool = false;
+        if eat(p, T::KwMut) {
+            mutable = true;
+        }
+        let elem: *mut Type = parse_type(p);
+        return type_ptr((*p).a, elem, mutable);
+    }
+    if k == T::LBracket {
+        bump(p);
+        let elem: *mut Type = parse_type(p);
+        if eat(p, T::Semi) {
+            let len_expr: *mut Expr = parse_expr(p);
+            expect(p, T::RBracket);
+            return type_array((*p).a, elem, 0, len_expr);
+        }
+        expect(p, T::RBracket);
+        let ty: *mut Type = type_new((*p).a, K::Slice);
+        unsafe { (*ty).elem = elem; }
+        return ty;
+    }
+    if k == T::TyStr {
+        bump(p);
+        return type_prim((*p).a, K::Str);
+    }
+    if k == T::TyCStr {
+        bump(p);
+        return type_prim((*p).a, K::CStr);
+    }
+    if k == T::TyBool {
+        bump(p);
+        return type_prim((*p).a, K::Bool);
+    }
+    if k == T::TyChar {
+        bump(p);
+        return type_prim((*p).a, K::Char);
+    }
+    if k == T::TyI8 { bump(p); return type_prim((*p).a, K::I8); }
+    if k == T::TyI16 { bump(p); return type_prim((*p).a, K::I16); }
+    if k == T::TyI32 { bump(p); return type_prim((*p).a, K::I32); }
+    if k == T::TyI64 { bump(p); return type_prim((*p).a, K::I64); }
+    if k == T::TyU8 { bump(p); return type_prim((*p).a, K::U8); }
+    if k == T::TyU16 { bump(p); return type_prim((*p).a, K::U16); }
+    if k == T::TyU32 { bump(p); return type_prim((*p).a, K::U32); }
+    if k == T::TyU64 { bump(p); return type_prim((*p).a, K::U64); }
+    if k == T::TyUsize { bump(p); return type_prim((*p).a, K::Usize); }
+    if k == T::TyIsize { bump(p); return type_prim((*p).a, K::Isize); }
+    if k == T::TyF32 { bump(p); return type_prim((*p).a, K::F32); }
+    if k == T::TyF64 { bump(p); return type_prim((*p).a, K::F64); }
+    if k == T::TyVec {
+        bump(p);
+        expect(p, T::Lt);
+        (*p).vec_depth = (*p).vec_depth + 1;
+        let elem: *mut Type = parse_type(p);
+        expect_vec_gt(p);
+        (*p).vec_depth = (*p).vec_depth - 1;
+        return type_vec((*p).a, elem);
+    }
+    if k == T::KwFn {
+        perr(p, "function types are not supported by the bootstrap compiler");
+        bump(p);
+        return type_prim((*p).a, K::I32);
+    }
+    if k == T::Ident {
+        bump(p);
+        if at(p, T::ColonColon) {
+            perr(p, "qualified type names are not supported");
+            bump(p);
+            if at(p, T::Ident) { bump(p); }
+        }
+        let ty: *mut Type = type_new((*p).a, K::Named);
+        unsafe { (*ty).name = (*t).text; }
+        return ty;
+    }
+    perr(p, "expected a type");
+    bump(p);
+    return type_prim((*p).a, K::I32);
+
+    }
+}
+
+fn append_param(d: *mut Decl, p: *mut Param) {
+    unsafe {
+    unsafe {
+        if (*d).params == null {
+            (*d).params = p;
+        } else {
+            let mut q: *mut Param = (*d).params;
+            while (*q).next != null {
+                q = (*q).next;
+            }
+            (*q).next = p;
+        }
+        (*d).nparams = (*d).nparams + 1;
+    }
+
+    }
+}
+
+fn append_field(d: *mut Decl, f: *mut Field) {
+    unsafe {
+    unsafe {
+        if (*d).fields == null {
+            (*d).fields = f;
+        } else {
+            let mut q: *mut Field = (*d).fields;
+            while (*q).next != null {
+                q = (*q).next;
+            }
+            (*q).next = f;
+        }
+        (*f).index = (*d).nfields;
+        (*d).nfields = (*d).nfields + 1;
+    }
+
+    }
+}
+
+fn append_variant(d: *mut Decl, v: *mut Variant) {
+    unsafe {
+    unsafe {
+        if (*d).variants == null {
+            (*d).variants = v;
+        } else {
+            let mut q: *mut Variant = (*d).variants;
+            while (*q).next != null {
+                q = (*q).next;
+            }
+            (*q).next = v;
+        }
+        (*d).nvariants = (*d).nvariants + 1;
+    }
+
+    }
+}
+
+fn add_item(p: *mut P, it: *mut Item) {
+    unsafe {
+    unsafe {
+        if (*p).items_tail == null {
+            (*p).items = it;
+        } else {
+            (*(*p).items_tail).next = it;
+        }
+        (*p).items_tail = it;
+    }
+
+    }
+}
+
+fn parse_fn(p: *mut P, is_pub: bool, is_extern: bool) {
+    unsafe {
+    let kw: *mut Tok = pk(p);
+    bump(p);
+    let name_tok: *mut Tok = pk(p);
+    if !at(p, T::Ident) {
+        perr(p, "expected function name");
+        sync(p);
+        return;
+    }
+    bump(p);
+    let d: *mut Decl = decl_new((*p).a, D::Func, (*name_tok).text, (*name_tok).file, (*name_tok).line, (*name_tok).col);
+    unsafe { (*d).is_extern = is_extern; }
+    expect(p, T::LParen);
+    while !at(p, T::RParen) && !at(p, T::Eof) {
+        let pt: *mut Tok = pk(p);
+        if !at(p, T::Ident) {
+            perr(p, "expected parameter name");
+            sync(p);
+            return;
+        }
+        bump(p);
+        expect(p, T::Colon);
+        let ty: *mut Type = parse_type(p);
+        let par: *mut Param = rt_alloc((*p).a, sizeof(Param)) as *mut Param;
+        unsafe {
+            (*par).next = null;
+            (*par).name = (*pt).text;
+            (*par).ty = ty;
+            (*par).decl = null;
+        }
+        append_param(d, par);
+        if !eat(p, T::Comma) {
+            break;
+        }
+    }
+    expect(p, T::RParen);
+    if eat(p, T::Arrow) {
+        unsafe { (*d).ty = parse_type(p); }
+    } else {
+        unsafe { (*d).ty = type_prim((*p).a, K::Void); }
+    }
+    if at(p, T::LBrace) {
+        unsafe { (*d).body = parse_block(p); }
+    } else {
+        expect(p, T::Semi);
+    }
+    let it: *mut Item = item_new((*p).a, I::Func, d, name_tok);
+    unsafe { (*it).is_pub = is_pub; }
+    add_item(p, it);
+    let _ = kw;
+
+    }
+}
+
+fn parse_struct(p: *mut P, is_pub: bool) {
+    unsafe {
+    bump(p);
+    let name_tok: *mut Tok = pk(p);
+    if !at(p, T::Ident) {
+        perr(p, "expected struct name");
+        sync(p);
+        return;
+    }
+    bump(p);
+    let d: *mut Decl = decl_new((*p).a, D::Struct, (*name_tok).text, (*name_tok).file, (*name_tok).line, (*name_tok).col);
+    expect(p, T::LBrace);
+    while !at(p, T::RBrace) && !at(p, T::Eof) {
+        let ft: *mut Tok = pk(p);
+        if !at(p, T::Ident) {
+            perr(p, "expected field name");
+            sync(p);
+            return;
+        }
+        bump(p);
+        expect(p, T::Colon);
+        let ty: *mut Type = parse_type(p);
+        let f: *mut Field = rt_alloc((*p).a, sizeof(Field)) as *mut Field;
+        unsafe {
+            (*f).next = null;
+            (*f).name = (*ft).text;
+            (*f).ty = ty;
+            (*f).offset = 0;
+            (*f).size = 0;
+            (*f).alignment = 1;
+            (*f).index = 0;
+        }
+        append_field(d, f);
+        if !eat(p, T::Comma) {
+            break;
+        }
+    }
+    expect(p, T::RBrace);
+    let it: *mut Item = item_new((*p).a, I::Struct, d, name_tok);
+    unsafe { (*it).is_pub = is_pub; }
+    add_item(p, it);
+
+    }
+}
+
+fn parse_enum(p: *mut P, is_pub: bool) {
+    unsafe {
+    bump(p);
+    let name_tok: *mut Tok = pk(p);
+    if !at(p, T::Ident) {
+        perr(p, "expected enum name");
+        sync(p);
+        return;
+    }
+    bump(p);
+    let d: *mut Decl = decl_new((*p).a, D::Enum, (*name_tok).text, (*name_tok).file, (*name_tok).line, (*name_tok).col);
+    expect(p, T::LBrace);
+    while !at(p, T::RBrace) && !at(p, T::Eof) {
+        let vt: *mut Tok = pk(p);
+        if !at(p, T::Ident) {
+            perr(p, "expected enum variant");
+            sync(p);
+            return;
+        }
+        bump(p);
+        let v: *mut Variant = rt_alloc((*p).a, sizeof(Variant)) as *mut Variant;
+        unsafe {
+            (*v).next = null;
+            (*v).name = (*vt).text;
+            (*v).value = 0;
+        }
+        if eat(p, T::Eq) {
+            unsafe { (*v).expr = parse_expr(p); }
+        }
+        append_variant(d, v);
+        if !eat(p, T::Comma) {
+            break;
+        }
+    }
+    expect(p, T::RBrace);
+    let it: *mut Item = item_new((*p).a, I::Enum, d, name_tok);
+    unsafe { (*it).is_pub = is_pub; }
+    add_item(p, it);
+
+    }
+}
+
+fn parse_const(p: *mut P, is_pub: bool) {
+    unsafe {
+    bump(p);
+    let name_tok: *mut Tok = pk(p);
+    if !at(p, T::Ident) {
+        perr(p, "expected constant name");
+        sync(p);
+        return;
+    }
+    bump(p);
+    let d: *mut Decl = decl_new((*p).a, D::Const, (*name_tok).text, (*name_tok).file, (*name_tok).line, (*name_tok).col);
+    expect(p, T::Colon);
+    unsafe { (*d).ty = parse_type(p); }
+    expect(p, T::Eq);
+    unsafe { (*d).init = parse_expr(p); }
+    expect(p, T::Semi);
+    let it: *mut Item = item_new((*p).a, I::Const, d, name_tok);
+    unsafe { (*it).is_pub = is_pub; }
+    add_item(p, it);
+
+    }
+}
+
+fn parse_static(p: *mut P, is_pub: bool) {
+    unsafe {
+    bump(p);
+    let mut mutable: bool = false;
+    if eat(p, T::KwMut) {
+        mutable = true;
+    }
+    let name_tok: *mut Tok = pk(p);
+    if !at(p, T::Ident) {
+        perr(p, "expected global name");
+        sync(p);
+        return;
+    }
+    bump(p);
+    let d: *mut Decl = decl_new((*p).a, D::Global, (*name_tok).text, (*name_tok).file, (*name_tok).line, (*name_tok).col);
+    unsafe { (*d).is_mut = mutable; }
+    expect(p, T::Colon);
+    unsafe { (*d).ty = parse_type(p); }
+    expect(p, T::Eq);
+    unsafe { (*d).init = parse_expr(p); }
+    expect(p, T::Semi);
+    let it: *mut Item = item_new((*p).a, I::Static, d, name_tok);
+    unsafe { (*it).is_pub = is_pub; }
+    add_item(p, it);
+
+    }
+}
+
+fn parse_typedef(p: *mut P, is_pub: bool) {
+    unsafe {
+    bump(p);
+    let name_tok: *mut Tok = pk(p);
+    if !at(p, T::Ident) {
+        perr(p, "expected typedef name");
+        sync(p);
+        return;
+    }
+    bump(p);
+    let d: *mut Decl = decl_new((*p).a, D::Typedef, (*name_tok).text, (*name_tok).file, (*name_tok).line, (*name_tok).col);
+    expect(p, T::Eq);
+    unsafe { (*d).ty = parse_type(p); }
+    expect(p, T::Semi);
+    let it: *mut Item = item_new((*p).a, I::Typedef, d, name_tok);
+    unsafe { (*it).is_pub = is_pub; }
+    add_item(p, it);
+
+    }
+}
+
+fn is_assign_op(k: T) -> bool {
+    unsafe {
+    return k == T::Eq || k == T::PlusEq || k == T::MinusEq || k == T::StarEq
+        || k == T::SlashEq || k == T::PercentEq || k == T::AmpEq || k == T::PipeEq
+        || k == T::CaretEq || k == T::ShlEq || k == T::ShrEq;
+
+    }
+}
+
+fn stmt_append(head: *mut Stmt, tail: *mut Stmt, s: *mut Stmt) -> *mut Stmt {
+    unsafe {
+    if tail == null {
+        return s;
+    }
+    unsafe { (*tail).next = s; }
+    return tail;
+
+    }
+}
+
+fn parse_block(p: *mut P) -> *mut Stmt {
+    unsafe {
+    expect(p, T::LBrace);
+    let mut head: *mut Stmt = null;
+    let mut tail: *mut Stmt = null;
+    while !at(p, T::RBrace) && !at(p, T::Eof) {
+        let mut before: i32 = 0;
+        unsafe { before = (*p).pos; }
+        let s: *mut Stmt = parse_stmt(p);
+        if s != null {
+            if tail == null {
+                head = s;
+            } else {
+                unsafe { (*tail).next = s; }
+            }
+            tail = s;
+        }
+        let mut same: bool = false;
+        unsafe { same = (*p).pos == before; }
+        if same {
+            bump(p);
+        }
+    }
+    expect(p, T::RBrace);
+    return head;
+
+    }
+}
+
+fn parse_switch(p: *mut P) -> *mut Stmt {
+    unsafe {
+    bump(p);
+    let e: *mut Expr = parse_expr(p);
+    let s: *mut Stmt = stmt_new((*p).a, S::Switch, pk(p));
+    unsafe { (*s).expr = e; }
+    expect(p, T::LBrace);
+    let mut head: *mut Case = null;
+    let mut tail: *mut Case = null;
+    while !at(p, T::RBrace) && !at(p, T::Eof) {
+        let c: *mut Case = rt_alloc((*p).a, sizeof(Case)) as *mut Case;
+        unsafe {
+            (*c).next = null;
+            (*c).expr = null;
+            (*c).body = null;
+            (*c).is_default = false;
+        }
+        if eat(p, T::KwDefault) {
+            unsafe { (*c).is_default = true; }
+        } else if eat(p, T::KwCase) {
+            unsafe { (*c).expr = parse_expr(p); }
+        } else {
+            perr(p, "expected case or default");
+            sync(p);
+            continue;
+        }
+        eat(p, T::Colon);
+        unsafe { (*c).body = parse_block(p); }
+        if tail == null {
+            head = c;
+        } else {
+            unsafe { (*tail).next = c; }
+        }
+        tail = c;
+    }
+    expect(p, T::RBrace);
+    unsafe { (*s).cases = head; }
+    return s;
+
+    }
+}
+
+fn parse_stmt(p: *mut P) -> *mut Stmt {
+    unsafe {
+    let t: *mut Tok = pk(p);
+    let k: T = (*t).kind;
+    if k == T::Semi {
+        bump(p);
+        return stmt_new((*p).a, S::Empty, t);
+    }
+    if k == T::KwLet {
+        bump(p);
+        let mut mutable: bool = false;
+        if eat(p, T::KwMut) {
+            mutable = true;
+        }
+        let name_tok: *mut Tok = pk(p);
+        if !at(p, T::Ident) {
+            perr(p, "expected binding name");
+            sync(p);
+            return null;
+        }
+        bump(p);
+        let s: *mut Stmt = stmt_new((*p).a, S::Let, t);
+        unsafe {
+            (*s).name = (*name_tok).text;
+            (*s).is_mut = mutable;
+            (*s).file = (*name_tok).file;
+            (*s).line = (*name_tok).line;
+            (*s).col = (*name_tok).col;
+        }
+        if eat(p, T::Colon) {
+            unsafe { (*s).ty = parse_type(p); }
+        }
+        expect(p, T::Eq);
+        unsafe { (*s).expr = parse_expr(p); }
+        expect(p, T::Semi);
+        return s;
+    }
+    if k == T::KwIf {
+        bump(p);
+        let s: *mut Stmt = stmt_new((*p).a, S::If, t);
+        unsafe { (*s).expr = parse_expr(p); }
+        unsafe { (*s).body = parse_block(p); }
+        if eat(p, T::KwElse) {
+            if at(p, T::KwIf) {
+                unsafe { (*s).els = parse_stmt(p); }
+            } else {
+                let bt: *mut Tok = pk(p);
+                let bs: *mut Stmt = stmt_new((*p).a, S::Block, bt);
+                unsafe { (*bs).body = parse_block(p); }
+                unsafe { (*s).els = bs; }
+            }
+        }
+        return s;
+    }
+    if k == T::KwWhile {
+        bump(p);
+        let s: *mut Stmt = stmt_new((*p).a, S::While, t);
+        unsafe { (*s).expr = parse_expr(p); }
+        unsafe { (*s).body = parse_block(p); }
+        return s;
+    }
+    if k == T::KwLoop {
+        bump(p);
+        let s: *mut Stmt = stmt_new((*p).a, S::Loop, t);
+        unsafe { (*s).body = parse_block(p); }
+        return s;
+    }
+    if k == T::KwBreak {
+        bump(p);
+        expect(p, T::Semi);
+        return stmt_new((*p).a, S::Break, t);
+    }
+    if k == T::KwContinue {
+        bump(p);
+        expect(p, T::Semi);
+        return stmt_new((*p).a, S::Continue, t);
+    }
+    if k == T::KwReturn {
+        bump(p);
+        let s: *mut Stmt = stmt_new((*p).a, S::Return, t);
+        if !at(p, T::Semi) {
+            unsafe { (*s).expr = parse_expr(p); }
+        }
+        expect(p, T::Semi);
+        return s;
+    }
+    if k == T::KwUnsafe {
+        bump(p);
+        let s: *mut Stmt = stmt_new((*p).a, S::Unsafe, t);
+        unsafe { (*s).body = parse_block(p); }
+        return s;
+    }
+    if k == T::LBrace {
+        let s: *mut Stmt = stmt_new((*p).a, S::Block, t);
+        unsafe { (*s).body = parse_block(p); }
+        return s;
+    }
+    if k == T::KwSwitch {
+        return parse_switch(p);
+    }
+    if k == T::KwFor || k == T::KwDo || k == T::KwGoto {
+        perr(p, "for/do/goto are not supported by the bootstrap compiler");
+        sync(p);
+        return null;
+    }
+    let e: *mut Expr = parse_expr(p);
+    let op: T = tkind(p);
+    if is_assign_op(op) {
+        bump(p);
+        let s: *mut Stmt = stmt_new((*p).a, S::Assign, t);
+        unsafe {
+            (*s).expr = e;
+            (*s).op = op;
+            (*s).rhs = parse_expr(p);
+        }
+        expect(p, T::Semi);
+        return s;
+    }
+    let s: *mut Stmt = stmt_new((*p).a, S::Expr, t);
+    unsafe { (*s).expr = e; }
+    expect(p, T::Semi);
+    return s;
+
+    }
+}
+
+fn expr_append(head: *mut Expr, tail: *mut Expr, e: *mut Expr) -> *mut Expr {
+    unsafe {
+    if tail != null {
+        unsafe { (*tail).next = e; }
+    }
+    return e;
+
+    }
+}
+
+fn parse_args(p: *mut P) -> *mut Expr {
+    unsafe {
+    let mut head: *mut Expr = null;
+    let mut tail: *mut Expr = null;
+    expect(p, T::LParen);
+    while !at(p, T::RParen) && !at(p, T::Eof) {
+        let e: *mut Expr = parse_expr(p);
+        if head == null {
+            head = e;
+        } else {
+            unsafe { (*tail).next = e; }
+        }
+        tail = e;
+        if !eat(p, T::Comma) {
+            break;
+        }
+    }
+    expect(p, T::RParen);
+    return head;
+
+    }
+}
+
+fn struct_lit_ahead(p: *mut P) -> bool {
+    unsafe {
+    if !at(p, T::LBrace) {
+        return false;
+    }
+    unsafe {
+        if (*pk_n(p, 1)).kind != T::Ident {
+            return false;
+        }
+        return (*pk_n(p, 2)).kind == T::Colon;
+    }
+
+    }
+}
+
+fn parse_struct_lit(p: *mut P, name: str, tok: *mut Tok) -> *mut Expr {
+    unsafe {
+    let e: *mut Expr = expr_new((*p).a, E::StructLit, tok);
+    unsafe { (*e).name = name; }
+    expect(p, T::LBrace);
+    let mut head: *mut Expr = null;
+    let mut tail: *mut Expr = null;
+    while !at(p, T::RBrace) && !at(p, T::Eof) {
+        let ft: *mut Tok = pk(p);
+        if !at(p, T::Ident) {
+            perr(p, "expected field name");
+            sync(p);
+            break;
+        }
+        bump(p);
+        expect(p, T::Colon);
+        let val: *mut Expr = parse_expr(p);
+        unsafe { (*val).field = (*ft).text; }
+        if head == null {
+            head = val;
+        } else {
+            unsafe { (*tail).next = val; }
+        }
+        tail = val;
+        if !eat(p, T::Comma) {
+            break;
+        }
+    }
+    expect(p, T::RBrace);
+    unsafe { (*e).args = head; }
+    return e;
+
+    }
+}
+
+fn parse_primary(p: *mut P) -> *mut Expr {
+    unsafe {
+    let t: *mut Tok = pk(p);
+    let k: T = (*t).kind;
+    if k == T::Int {
+        bump(p);
+        let e: *mut Expr = expr_new((*p).a, E::IntLit, t);
+        unsafe {
+            (*e).ival = (*t).ival;
+            (*e).text = (*t).text;
+        }
+        return e;
+    }
+    if k == T::Float {
+        bump(p);
+        let e: *mut Expr = expr_new((*p).a, E::FloatLit, t);
+        unsafe { (*e).text = (*t).text; }
+        return e;
+    }
+    if k == T::Str {
+        bump(p);
+        let e: *mut Expr = expr_new((*p).a, E::StrLit, t);
+        unsafe { (*e).text = (*t).text; }
+        return e;
+    }
+    if k == T::CStr {
+        bump(p);
+        let e: *mut Expr = expr_new((*p).a, E::CStrLit, t);
+        unsafe { (*e).text = (*t).text; }
+        return e;
+    }
+    if k == T::Char {
+        bump(p);
+        let e: *mut Expr = expr_new((*p).a, E::CharLit, t);
+        unsafe { (*e).ival = (*t).ival; }
+        return e;
+    }
+    if k == T::KwTrue || k == T::KwFalse {
+        bump(p);
+        let e: *mut Expr = expr_new((*p).a, E::BoolLit, t);
+        unsafe {
+            if k == T::KwTrue { (*e).ival = 1; } else { (*e).ival = 0; }
+        }
+        return e;
+    }
+    if k == T::KwNull {
+        bump(p);
+        return expr_new((*p).a, E::NullLit, t);
+    }
+    if k == T::KwSizeof || k == T::KwAlignof {
+        bump(p);
+        let e: *mut Expr = expr_new((*p).a, E::Sizeof, t);
+        if k == T::KwAlignof {
+            unsafe { (*e).kind = E::Alignof; }
+        }
+        expect(p, T::LParen);
+        unsafe { (*e).type_arg = parse_type(p); }
+        expect(p, T::RParen);
+        return e;
+    }
+    if k == T::KwOffsetof {
+        bump(p);
+        let e: *mut Expr = expr_new((*p).a, E::Offsetof, t);
+        expect(p, T::LParen);
+        unsafe { (*e).type_arg = parse_type(p); }
+        expect(p, T::Comma);
+        let ft: *mut Tok = pk(p);
+        if at(p, T::Ident) {
+            bump(p);
+            unsafe { (*e).field = (*ft).text; }
+        } else {
+            perr(p, "expected field name");
+        }
+        expect(p, T::RParen);
+        return e;
+    }
+    if k == T::LParen {
+        bump(p);
+        let e: *mut Expr = parse_expr(p);
+        expect(p, T::RParen);
+        return e;
+    }
+    if k == T::LBracket {
+        bump(p);
+        let e: *mut Expr = expr_new((*p).a, E::ArrayLit, t);
+        if at(p, T::RBracket) {
+            perr(p, "empty array literals are not supported");
+            bump(p);
+            return e;
+        }
+        let first: *mut Expr = parse_expr(p);
+        if eat(p, T::Semi) {
+            unsafe {
+                (*e).args = first;
+                (*e).rhs = parse_expr(p);
+                (*e).index = 1;
+            }
+            expect(p, T::RBracket);
+            return e;
+        }
+        let mut head: *mut Expr = first;
+        let mut tail: *mut Expr = first;
+        while eat(p, T::Comma) {
+            if at(p, T::RBracket) {
+                break;
+            }
+            let item: *mut Expr = parse_expr(p);
+            unsafe { (*tail).next = item; }
+            tail = item;
+        }
+        expect(p, T::RBracket);
+        unsafe { (*e).args = head; }
+        return e;
+    }
+    if k == T::Ident {
+        bump(p);
+        let name: str = (*t).text;
+        if eat(p, T::ColonColon) {
+            let vt: *mut Tok = pk(p);
+            if at(p, T::Ident) {
+                bump(p);
+                let e: *mut Expr = expr_new((*p).a, E::Path, t);
+                unsafe {
+                    (*e).name = name;
+                    (*e).field = (*vt).text;
+                }
+                return e;
+            }
+            perr(p, "expected enum variant");
+            return null;
+        }
+        if struct_lit_ahead(p) {
+            return parse_struct_lit(p, name, t);
+        }
+        let e: *mut Expr = expr_new((*p).a, E::Ident, t);
+        unsafe { (*e).name = name; }
+        return e;
+    }
+    perr(p, "expected expression");
+    bump(p);
+    return null;
+
+    }
+}
+
+fn parse_postfix(p: *mut P) -> *mut Expr {
+    unsafe {
+    let mut e: *mut Expr = parse_primary(p);
+    if e == null {
+        return null;
+    }
+    loop {
+        let t: *mut Tok = pk(p);
+        let k: T = (*t).kind;
+        if k == T::LParen {
+            let call: *mut Expr = expr_new((*p).a, E::Call, t);
+            unsafe {
+                (*call).lhs = e;
+                (*call).args = parse_args(p);
+            }
+            e = call;
+            continue;
+        }
+        if k == T::LBracket {
+            bump(p);
+            let mut start: *mut Expr = null;
+            if !at(p, T::DotDot) {
+                start = parse_expr(p);
+            }
+            if at(p, T::DotDot) {
+                bump(p);
+                let mut end: *mut Expr = null;
+                if !at(p, T::RBracket) {
+                    end = parse_expr(p);
+                }
+                expect(p, T::RBracket);
+                let rx: *mut Expr = expr_new((*p).a, E::SliceRange, t);
+                unsafe {
+                    (*rx).lhs = e;
+                    (*rx).rhs = start;
+                    (*rx).args = end;
+                }
+                e = rx;
+                continue;
+            }
+            if start == null {
+                perr(p, "expected index expression");
+            }
+            expect(p, T::RBracket);
+            let ix: *mut Expr = expr_new((*p).a, E::Index, t);
+            unsafe {
+                (*ix).lhs = e;
+                (*ix).rhs = start;
+            }
+            e = ix;
+            continue;
+        }
+        if k == T::Dot {
+            bump(p);
+            let ft: *mut Tok = pk(p);
+            if !at(p, T::Ident) {
+                perr(p, "expected field name");
+                return e;
+            }
+            bump(p);
+            let fe: *mut Expr = expr_new((*p).a, E::Field, t);
+            unsafe {
+                (*fe).lhs = e;
+                (*fe).field = (*ft).text;
+            }
+            e = fe;
+            continue;
+        }
+        if k == T::Arrow {
+            bump(p);
+            let ft: *mut Tok = pk(p);
+            if !at(p, T::Ident) {
+                perr(p, "expected field name");
+                return e;
+            }
+            bump(p);
+            let deref: *mut Expr = expr_new((*p).a, E::Unary, t);
+            unsafe {
+                (*deref).op = T::Star;
+                (*deref).lhs = e;
+            }
+            let fe: *mut Expr = expr_new((*p).a, E::Field, t);
+            unsafe {
+                (*fe).lhs = deref;
+                (*fe).field = (*ft).text;
+            }
+            e = fe;
+            continue;
+        }
+        return e;
+    }
+
+    }
+}
+
+fn parse_unary(p: *mut P) -> *mut Expr {
+    unsafe {
+    let t: *mut Tok = pk(p);
+    let k: T = (*t).kind;
+    if k == T::Minus || k == T::Bang || k == T::Star {
+        bump(p);
+        let e: *mut Expr = expr_new((*p).a, E::Unary, t);
+        unsafe {
+            (*e).op = k;
+            (*e).lhs = parse_unary(p);
+        }
+        return e;
+    }
+    if k == T::Amp {
+        bump(p);
+        let e: *mut Expr = expr_new((*p).a, E::Unary, t);
+        unsafe {
+            (*e).op = T::Amp;
+            if eat(p, T::KwMut) {
+                (*e).is_mut = true;
+            }
+            (*e).lhs = parse_unary(p);
+        }
+        return e;
+    }
+    return parse_postfix(p);
+
+    }
+}
+
+fn parse_cast(p: *mut P) -> *mut Expr {
+    unsafe {
+    let mut e: *mut Expr = parse_unary(p);
+    while eat(p, T::KwAs) {
+        let t: *mut Tok = pk(p);
+        let ty: *mut Type = parse_type(p);
+        let c: *mut Expr = expr_new((*p).a, E::Cast, t);
+        unsafe {
+            (*c).lhs = e;
+            (*c).type_arg = ty;
+        }
+        e = c;
+    }
+    return e;
+
+    }
+}
+
+fn parse_mul(p: *mut P) -> *mut Expr {
+    unsafe {
+    let mut e: *mut Expr = parse_cast(p);
+    loop {
+        let t: *mut Tok = pk(p);
+        let k: T = (*t).kind;
+        if k != T::Star && k != T::Slash && k != T::Percent {
+            return e;
+        }
+        bump(p);
+        let r: *mut Expr = parse_cast(p);
+        let b: *mut Expr = expr_new((*p).a, E::Binary, t);
+        unsafe {
+            (*b).op = k;
+            (*b).lhs = e;
+            (*b).rhs = r;
+        }
+        e = b;
+    }
+
+    }
+}
+
+fn parse_add(p: *mut P) -> *mut Expr {
+    unsafe {
+    let mut e: *mut Expr = parse_mul(p);
+    loop {
+        let t: *mut Tok = pk(p);
+        let k: T = (*t).kind;
+        if k != T::Plus && k != T::Minus {
+            return e;
+        }
+        bump(p);
+        let r: *mut Expr = parse_mul(p);
+        let b: *mut Expr = expr_new((*p).a, E::Binary, t);
+        unsafe {
+            (*b).op = k;
+            (*b).lhs = e;
+            (*b).rhs = r;
+        }
+        e = b;
+    }
+
+    }
+}
+
+fn parse_shift(p: *mut P) -> *mut Expr {
+    unsafe {
+    let mut e: *mut Expr = parse_add(p);
+    loop {
+        let t: *mut Tok = pk(p);
+        let k: T = (*t).kind;
+        if k != T::Shl && k != T::Shr {
+            return e;
+        }
+        bump(p);
+        let r: *mut Expr = parse_add(p);
+        let b: *mut Expr = expr_new((*p).a, E::Binary, t);
+        unsafe {
+            (*b).op = k;
+            (*b).lhs = e;
+            (*b).rhs = r;
+        }
+        e = b;
+    }
+
+    }
+}
+
+fn parse_rel(p: *mut P) -> *mut Expr {
+    unsafe {
+    let mut e: *mut Expr = parse_shift(p);
+    loop {
+        let t: *mut Tok = pk(p);
+        let k: T = (*t).kind;
+        if k != T::Lt && k != T::Le && k != T::Gt && k != T::Ge {
+            return e;
+        }
+        bump(p);
+        let r: *mut Expr = parse_shift(p);
+        let b: *mut Expr = expr_new((*p).a, E::Binary, t);
+        unsafe {
+            (*b).op = k;
+            (*b).lhs = e;
+            (*b).rhs = r;
+        }
+        e = b;
+    }
+
+    }
+}
+
+fn parse_eq(p: *mut P) -> *mut Expr {
+    unsafe {
+    let mut e: *mut Expr = parse_rel(p);
+    loop {
+        let t: *mut Tok = pk(p);
+        let k: T = (*t).kind;
+        if k != T::EqEq && k != T::Ne {
+            return e;
+        }
+        bump(p);
+        let r: *mut Expr = parse_rel(p);
+        let b: *mut Expr = expr_new((*p).a, E::Binary, t);
+        unsafe {
+            (*b).op = k;
+            (*b).lhs = e;
+            (*b).rhs = r;
+        }
+        e = b;
+    }
+
+    }
+}
+
+fn parse_bitand(p: *mut P) -> *mut Expr {
+    unsafe {
+    let mut e: *mut Expr = parse_eq(p);
+    while at(p, T::Amp) {
+        let t: *mut Tok = pk(p);
+        bump(p);
+        let r: *mut Expr = parse_eq(p);
+        let b: *mut Expr = expr_new((*p).a, E::Binary, t);
+        unsafe {
+            (*b).op = T::Amp;
+            (*b).lhs = e;
+            (*b).rhs = r;
+        }
+        e = b;
+    }
+    return e;
+
+    }
+}
+
+fn parse_bitxor(p: *mut P) -> *mut Expr {
+    unsafe {
+    let mut e: *mut Expr = parse_bitand(p);
+    while at(p, T::Caret) {
+        let t: *mut Tok = pk(p);
+        bump(p);
+        let r: *mut Expr = parse_bitand(p);
+        let b: *mut Expr = expr_new((*p).a, E::Binary, t);
+        unsafe {
+            (*b).op = T::Caret;
+            (*b).lhs = e;
+            (*b).rhs = r;
+        }
+        e = b;
+    }
+    return e;
+
+    }
+}
+
+fn parse_bitor(p: *mut P) -> *mut Expr {
+    unsafe {
+    let mut e: *mut Expr = parse_bitxor(p);
+    while at(p, T::Pipe) {
+        let t: *mut Tok = pk(p);
+        bump(p);
+        let r: *mut Expr = parse_bitxor(p);
+        let b: *mut Expr = expr_new((*p).a, E::Binary, t);
+        unsafe {
+            (*b).op = T::Pipe;
+            (*b).lhs = e;
+            (*b).rhs = r;
+        }
+        e = b;
+    }
+    return e;
+
+    }
+}
+
+fn parse_land(p: *mut P) -> *mut Expr {
+    unsafe {
+    let mut e: *mut Expr = parse_bitor(p);
+    while at(p, T::AmpAmp) {
+        let t: *mut Tok = pk(p);
+        bump(p);
+        let r: *mut Expr = parse_bitor(p);
+        let b: *mut Expr = expr_new((*p).a, E::Binary, t);
+        unsafe {
+            (*b).op = T::AmpAmp;
+            (*b).lhs = e;
+            (*b).rhs = r;
+        }
+        e = b;
+    }
+    return e;
+
+    }
+}
+
+fn parse_lor(p: *mut P) -> *mut Expr {
+    unsafe {
+    let mut e: *mut Expr = parse_land(p);
+    while at(p, T::PipePipe) {
+        let t: *mut Tok = pk(p);
+        bump(p);
+        let r: *mut Expr = parse_land(p);
+        let b: *mut Expr = expr_new((*p).a, E::Binary, t);
+        unsafe {
+            (*b).op = T::PipePipe;
+            (*b).lhs = e;
+            (*b).rhs = r;
+        }
+        e = b;
+    }
+    return e;
+
+    }
+}
+
+fn parse_expr(p: *mut P) -> *mut Expr {
+    unsafe {
+    unsafe {
+        (*p).depth = (*p).depth + 1;
+        if (*p).depth > 200 {
+            perr(p, "expression nesting too deep");
+            (*p).depth = (*p).depth - 1;
+            return null;
+        }
+    }
+    let e: *mut Expr = parse_lor(p);
+    unsafe { (*p).depth = (*p).depth - 1; }
+    return e;
+
+    }
+}
+
+fn path_loaded(p: *mut P, path: str) -> bool {
+    unsafe {
+    unsafe {
+        let mut q: *mut PathList = (*p).loaded;
+        while q != null {
+            if rt_eq((*q).path, path) {
+                return true;
+            }
+            q = (*q).next;
+        }
+    }
+    return false;
+
+    }
+}
+
+fn parse_file(p: *mut P, path: str) {
+    unsafe {
+    if path_loaded(p, path) {
+        return;
+    }
+    let c: cstr = rt_to_cstr((*p).a, path);
+    let fd: FileData = rt_read_file((*p).a, c);
+    if !fd.ok {
+        diag_add((*p).d, (*p).a, 0, 0, 0, "cannot open source file");
+        return;
+    }
+    let pl: *mut PathList = rt_alloc((*p).a, sizeof(PathList)) as *mut PathList;
+    unsafe {
+        (*pl).path = path;
+        (*pl).next = (*p).loaded;
+        (*p).loaded = pl;
+    }
+    let src: *mut Src = srcs_add((*p).srcs, (*p).a, path, fd.data);
+    let arr: TokArr = lx_run((*p).a, src, (*p).d);
+    let save_toks: *mut Tok = (*p).toks;
+    let save_n: i32 = (*p).ntoks;
+    let save_pos: i32 = (*p).pos;
+    let save_file: i32 = (*p).file;
+    let save_path: str = (*p).path;
+    unsafe {
+        (*p).toks = arr.data;
+        (*p).ntoks = arr.len as i32;
+        (*p).pos = 0;
+        (*p).file = (*src).id;
+        (*p).path = path;
+    }
+    while !at(p, T::Eof) {
+        let mut before: i32 = 0;
+        unsafe { before = (*p).pos; }
+        parse_item(p);
+        let mut same: bool = false;
+        unsafe { same = (*p).pos == before; }
+        if same {
+            bump(p);
+        }
+    }
+    unsafe {
+        (*p).toks = save_toks;
+        (*p).ntoks = save_n;
+        (*p).pos = save_pos;
+        (*p).file = save_file;
+        (*p).path = save_path;
+    }
+
+    }
+}
+
+fn parse_item(p: *mut P) {
+    unsafe {
+    let mut is_pub: bool = false;
+    if eat(p, T::KwPub) {
+        is_pub = true;
+    }
+    let k: T = tkind(p);
+    if k == T::KwImport {
+        let it: *mut Tok = pk(p);
+        bump(p);
+        let pt: *mut Tok = pk(p);
+        if !at(p, T::Str) {
+            perr(p, "expected import path");
+            sync(p);
+            return;
+        }
+        bump(p);
+        expect(p, T::Semi);
+        let resolved: str = rt_join((*p).a, (*p).path, (*pt).text);
+        let _ = it;
+        parse_file(p, resolved);
+        return;
+    }
+    if k == T::KwFn {
+        parse_fn(p, is_pub, false);
+        return;
+    }
+    if k == T::KwStruct {
+        parse_struct(p, is_pub);
+        return;
+    }
+    if k == T::KwEnum {
+        parse_enum(p, is_pub);
+        return;
+    }
+    if k == T::KwConst {
+        parse_const(p, is_pub);
+        return;
+    }
+    if k == T::KwStatic {
+        parse_static(p, is_pub);
+        return;
+    }
+    if k == T::KwTypedef {
+        parse_typedef(p, is_pub);
+        return;
+    }
+    if k == T::KwExtern {
+        bump(p);
+        let mut c_name: str = "";
+        if at(p, T::Str) {
+            c_name = (*pk(p)).text;
+            bump(p);
+        }
+        if at(p, T::KwFn) {
+            parse_fn(p, is_pub, true);
+        } else {
+            perr(p, "unsupported extern declaration");
+            sync(p);
+        }
+        let _ = c_name;
+        return;
+    }
+    if k == T::KwModule || k == T::KwMod {
+        perr(p, "module declarations are not supported by the bootstrap compiler");
+        sync(p);
+        return;
+    }
+    if k == T::Hash {
+        perr(p, "attributes are not supported by the bootstrap compiler");
+        sync(p);
+        return;
+    }
+    perr(p, "expected a top-level item");
+    sync(p);
+
+    }
+}
+
+fn parse_program(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, root: str) -> Program {
+    unsafe {
+    let p: *mut P = rt_alloc(a, sizeof(P)) as *mut P;
+    unsafe {
+        (*p).a = a;
+        (*p).d = d;
+        (*p).srcs = srcs;
+        (*p).loaded = null;
+        (*p).toks = null;
+        (*p).ntoks = 0;
+        (*p).pos = 0;
+        (*p).file = 0;
+        (*p).path = "";
+        (*p).items = null;
+        (*p).items_tail = null;
+        (*p).depth = 0;
+        (*p).vec_depth = 0;
+        (*p).pending_gt = 0;
+    }
+    parse_file(p, root);
+    let mut prog: Program = prog_init();
+    unsafe {
+        prog.items = (*p).items;
+        prog.items_tail = (*p).items_tail;
+    }
+    return prog;
+
+    }
+}

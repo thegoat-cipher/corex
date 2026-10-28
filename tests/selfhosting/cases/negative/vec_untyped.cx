@@ -1,0 +1,4 @@
+fn main() -> i32 {
+    let v = vec_new(2);
+    return len(v) as i32;
+}

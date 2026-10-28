@@ -1,0 +1,29 @@
+fn main() -> i32 {
+    let mut nested: vec<vec<i32>> = vec_new(1);
+    let mut inner: vec<i32> = vec_new(1);
+    vec_push(&mut inner, 7);
+    vec_push(&mut nested, inner);
+    print(len(nested));
+    print(len(nested[0]));
+    print(nested[0][0]);
+
+    let mut names: vec<str> = vec_new(1);
+    vec_push(&mut names, "alpha");
+    vec_push(&mut names, "beta");
+    print(len(names));
+    print(names[1]);
+
+    let mut rows: vec<[i32]> = vec_new(1);
+    let arr: [i32; 2] = [3, 4];
+    let s: [i32] = &arr;
+    vec_push(&mut rows, s);
+    print(len(rows));
+    print(rows[0][1]);
+
+    let mut bytes: vec<u8> = vec_new(1);
+    vec_push(&mut bytes, 104);
+    vec_push(&mut bytes, 105);
+    let bs: [u8] = vec_slice(&bytes);
+    print(bs);
+    return 0;
+}

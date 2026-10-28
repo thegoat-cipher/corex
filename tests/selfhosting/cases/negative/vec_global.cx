@@ -1,0 +1,5 @@
+static mut G: vec<i32> = vec_new(0);
+
+fn main() -> i32 {
+    return len(G) as i32;
+}
