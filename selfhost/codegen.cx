@@ -49,6 +49,7 @@ struct Fn {
     lbl: i32,
     terminated: bool,
     loops: *mut LoopCtx,
+    labels: *mut Lbl,
 }
 
 fn v_ssa(ty: *mut Type, reg: str) -> Val {
@@ -1784,6 +1785,71 @@ fn assign_base(op: T) -> T {
     return op;
 }
 
+fn gen_for(f: *mut Fn, st: *mut Stmt) {
+    unsafe {
+    if (*st).init != null {
+        gen_stmt(f, (*st).init);
+    }
+    let lc: i32 = fnewlbl(f);
+    let lb: i32 = fnewlbl(f);
+    let ls: i32 = fnewlbl(f);
+    let lend: i32 = fnewlbl(f);
+    fbrlbl(f, lc);
+    flabel(f, lc);
+    if (*st).expr != null {
+        let cv: Val = gen_expr(f, (*st).expr);
+        fs(f, "  br i1 "); fs(f, operand(f, cv, (*(*st).expr).ty));
+        fs(f, ", label %L"); fi(f, lb as i64);
+        fs(f, ", label %L"); fi(f, lend as i64); fnewline(f);
+    } else {
+        fbrlbl(f, lb);
+    }
+    flabel(f, lb);
+    (*f).terminated = false;
+    let ctx: *mut LoopCtx = rt_alloc((*(*f).cg).a, sizeof(LoopCtx)) as *mut LoopCtx;
+    (*ctx).next = (*f).loops; (*ctx).break_lbl = lend; (*ctx).cont_lbl = ls;
+    (*f).loops = ctx;
+    let _ = gen_block(f, (*st).body);
+    if !(*f).terminated { fbrlbl(f, ls); }
+    flabel(f, ls);
+    (*f).terminated = false;
+    if (*st).step != null {
+        gen_stmt(f, (*st).step);
+    }
+    fbrlbl(f, lc);
+    flabel(f, lend);
+    (*f).loops = (*ctx).next;
+    (*f).terminated = false;
+
+    }
+}
+
+fn gen_do_while(f: *mut Fn, st: *mut Stmt) {
+    unsafe {
+    let lb: i32 = fnewlbl(f);
+    let lc: i32 = fnewlbl(f);
+    let lend: i32 = fnewlbl(f);
+    fbrlbl(f, lb);
+    flabel(f, lb);
+    (*f).terminated = false;
+    let ctx: *mut LoopCtx = rt_alloc((*(*f).cg).a, sizeof(LoopCtx)) as *mut LoopCtx;
+    (*ctx).next = (*f).loops; (*ctx).break_lbl = lend; (*ctx).cont_lbl = lc;
+    (*f).loops = ctx;
+    let _ = gen_block(f, (*st).body);
+    if !(*f).terminated { fbrlbl(f, lc); }
+    flabel(f, lc);
+    (*f).terminated = false;
+    let cv: Val = gen_expr(f, (*st).expr);
+    fs(f, "  br i1 "); fs(f, operand(f, cv, (*(*st).expr).ty));
+    fs(f, ", label %L"); fi(f, lb as i64);
+    fs(f, ", label %L"); fi(f, lend as i64); fnewline(f);
+    flabel(f, lend);
+    (*f).loops = (*ctx).next;
+    (*f).terminated = false;
+
+    }
+}
+
 fn gen_stmt(f: *mut Fn, st: *mut Stmt) {
     unsafe {
     unsafe {
@@ -1917,6 +1983,31 @@ fn gen_stmt(f: *mut Fn, st: *mut Stmt) {
         let _ = gen_block(f, (*st).body);
         return;
     }
+    if k == S::For {
+        gen_for(f, st);
+        return;
+    }
+    if k == S::DoWhile {
+        gen_do_while(f, st);
+        return;
+    }
+    if k == S::Label {
+        let id: i32 = lbl_id(f, (*st).name);
+        if !(*f).terminated { fbrlbl(f, id); }
+        flabel(f, id);
+        (*f).terminated = false;
+        let mut q: *mut Stmt = (*st).body;
+        while q != null {
+            gen_stmt(f, q);
+            q = (*q).next;
+        }
+        return;
+    }
+    if k == S::Goto {
+        fbrlbl(f, lbl_id(f, (*st).name));
+        (*f).terminated = true;
+        return;
+    }
     if k == S::Switch {
         gen_switch(f, st);
         return;
@@ -1991,8 +2082,10 @@ fn gen_block(f: *mut Fn, head: *mut Stmt) -> bool {
     unsafe {
     unsafe {
     let mut s: *mut Stmt = head;
-    while s != null && !(*f).terminated {
-        gen_stmt(f, s);
+    while s != null {
+        if !(*f).terminated || (*s).kind == S::Label {
+            gen_stmt(f, s);
+        }
         s = (*s).next;
     }
     return (*f).terminated;
@@ -2095,14 +2188,88 @@ fn gen_globals(cg: *mut Cg) {
     }
 }
 
+fn lbl_id(f: *mut Fn, name: str) -> i32 {
+    unsafe {
+    let mut l: *mut Lbl = (*f).labels;
+    while l != null {
+        if rt_eq((*l).name, name) {
+            return (*l).id;
+        }
+        l = (*l).next;
+    }
+    return 0;
+
+    }
+}
+
+fn cg_collect_labels(f: *mut Fn, head: *mut Stmt) {
+    unsafe {
+    let mut p: *mut Stmt = head;
+    while p != null {
+        cg_collect_label_stmt(f, p);
+        p = (*p).next;
+    }
+
+    }
+}
+
+// Assign one LLVM label per distinct `name:` in the function. Semantic
+// analysis has already rejected duplicates, so first wins.
+fn cg_collect_label_stmt(f: *mut Fn, st: *mut Stmt) {
+    unsafe {
+    let k: S = (*st).kind;
+    if k == S::Label {
+        let mut l: *mut Lbl = (*f).labels;
+        let mut found: bool = false;
+        while l != null {
+            if rt_eq((*l).name, (*st).name) {
+                found = true;
+            }
+            l = (*l).next;
+        }
+        if !found {
+            let nl: *mut Lbl = rt_alloc((*(*f).cg).a, sizeof(Lbl)) as *mut Lbl;
+            (*nl).next = (*f).labels;
+            (*nl).name = (*st).name;
+            (*nl).id = fnewlbl(f);
+            (*f).labels = nl;
+        }
+        cg_collect_label_stmt(f, (*st).body);
+        return;
+    }
+    if k == S::If {
+        cg_collect_labels(f, (*st).body);
+        if (*st).els != null {
+            cg_collect_label_stmt(f, (*st).els);
+        }
+        return;
+    }
+    if k == S::While || k == S::Loop || k == S::For || k == S::DoWhile
+        || k == S::Unsafe || k == S::Block {
+        cg_collect_labels(f, (*st).body);
+        return;
+    }
+    if k == S::Switch {
+        let mut c: *mut Case = (*st).cases;
+        while c != null {
+            cg_collect_labels(f, (*c).body);
+            c = (*c).next;
+        }
+        return;
+    }
+
+    }
+}
+
 fn gen_fn(cg: *mut Cg, d: *mut Decl) {
     unsafe {
     unsafe {
     let ret: *mut Type = (*d).ty;
-    let mut f: Fn = Fn { cg: cg, d: d, entry: null, body: null, tmp: 0, lbl: 1, terminated: false, loops: null };
+    let mut f: Fn = Fn { cg: cg, d: d, entry: null, body: null, tmp: 0, lbl: 1, terminated: false, loops: null, labels: null };
     let fp: *mut Fn = &mut f;
     (*fp).entry = cg_buf(cg);
     (*fp).body = cg_buf(cg);
+    cg_collect_labels(fp, (*d).body);
     // Header.
     let mut hb: Buf = rt_buf((*cg).a);
     let hp: *mut Buf = &mut hb;

@@ -1,0 +1,9 @@
+fn f() -> i32 {
+here:
+    return 1;
+}
+
+fn main() -> i32 {
+    goto here;
+    return 0;
+}

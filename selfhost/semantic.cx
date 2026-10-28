@@ -17,6 +17,7 @@ struct Sem {
     switch_depth: i32,
     slot: i32,
     errors: i32,
+    labels: *mut Lbl,
 }
 
 fn sdiag(s: *mut Sem, file: i32, line: i32, col: i32, msg: str) {
@@ -201,6 +202,86 @@ fn scope_add(s: *mut Sem, d: *mut Decl) {
     }
     (*d).next_local = (*(*s).scope).vars;
     (*(*s).scope).vars = d;
+
+    }
+}
+
+fn label_find(s: *mut Sem, name: str) -> *mut Lbl {
+    unsafe {
+    let mut l: *mut Lbl = (*s).labels;
+    while l != null {
+        if rt_eq((*l).name, name) {
+            return l;
+        }
+        l = (*l).next;
+    }
+    return null;
+
+    }
+}
+
+// Diagnostic with a quoted name: "<msg> `name`<suffix>".
+fn sdiag_name(s: *mut Sem, file: i32, line: i32, col: i32, msg: str, name: str, suffix: str) {
+    unsafe {
+    let mut b: Buf = rt_buf((*s).a);
+    let bp: *mut Buf = &mut b;
+    rt_s(bp, msg);
+    rt_s(bp, " `");
+    rt_s(bp, name);
+    rt_s(bp, "`");
+    rt_s(bp, suffix);
+    sdiag(s, file, line, col, rt_view(bp));
+
+    }
+}
+
+fn collect_labels(s: *mut Sem, head: *mut Stmt) {
+    unsafe {
+    let mut p: *mut Stmt = head;
+    while p != null {
+        collect_label_stmt(s, p);
+        p = (*p).next;
+    }
+
+    }
+}
+
+fn collect_label_stmt(s: *mut Sem, st: *mut Stmt) {
+    unsafe {
+    let k: S = (*st).kind;
+    if k == S::Label {
+        if label_find(s, (*st).name) != null {
+            sdiag_name(s, (*st).file, (*st).line, (*st).col, "duplicate label", (*st).name, "");
+        } else {
+            let l: *mut Lbl = rt_alloc((*s).a, sizeof(Lbl)) as *mut Lbl;
+            (*l).next = (*s).labels;
+            (*l).name = (*st).name;
+            (*l).id = -1;
+            (*s).labels = l;
+        }
+        collect_label_stmt(s, (*st).body);
+        return;
+    }
+    if k == S::If {
+        collect_labels(s, (*st).body);
+        if (*st).els != null {
+            collect_label_stmt(s, (*st).els);
+        }
+        return;
+    }
+    if k == S::While || k == S::Loop || k == S::For || k == S::DoWhile
+        || k == S::Unsafe || k == S::Block {
+        collect_labels(s, (*st).body);
+        return;
+    }
+    if k == S::Switch {
+        let mut c: *mut Case = (*st).cases;
+        while c != null {
+            collect_labels(s, (*c).body);
+            c = (*c).next;
+        }
+        return;
+    }
 
     }
 }
@@ -1612,6 +1693,53 @@ fn check_stmt(s: *mut Sem, st: *mut Stmt) {
         check_block(s, (*st).body);
         return;
     }
+    if k == S::For {
+        scope_push(s);
+        if (*st).init != null {
+            check_stmt(s, (*st).init);
+        }
+        if (*st).expr != null {
+            let bt: *mut Type = type_new((*s).a, K::Bool);
+            let ct: *mut Type = resolve_type(s, check_expr(s, (*st).expr, bt));
+            if (*ct).kind != K::Bool {
+                sdiag(s, (*st).file, (*st).line, (*st).col, "for condition must be bool");
+            }
+        }
+        if (*st).step != null {
+            check_stmt(s, (*st).step);
+        }
+        (*s).loop_depth = (*s).loop_depth + 1;
+        check_block(s, (*st).body);
+        (*s).loop_depth = (*s).loop_depth - 1;
+        scope_pop(s);
+        return;
+    }
+    if k == S::DoWhile {
+        (*s).loop_depth = (*s).loop_depth + 1;
+        check_block(s, (*st).body);
+        (*s).loop_depth = (*s).loop_depth - 1;
+        let bt: *mut Type = type_new((*s).a, K::Bool);
+        let ct: *mut Type = resolve_type(s, check_expr(s, (*st).expr, bt));
+        if (*ct).kind != K::Bool {
+            sdiag(s, (*st).file, (*st).line, (*st).col, "do while condition must be bool");
+        }
+        return;
+    }
+    if k == S::Label {
+        let mut q: *mut Stmt = (*st).body;
+        while q != null {
+            check_stmt(s, q);
+            q = (*q).next;
+        }
+        return;
+    }
+    if k == S::Goto {
+        if label_find(s, (*st).name) == null {
+            sdiag_name(s, (*st).file, (*st).line, (*st).col, "undefined label", (*st).name,
+                " (labels are function-local)");
+        }
+        return;
+    }
     if k == S::Switch {
         let ct: *mut Type = resolve_type(s, check_expr(s, (*st).expr, null));
         let kk: K = (*ct).kind;
@@ -1648,7 +1776,7 @@ fn has_break(st: *mut Stmt) -> bool {
                 return true;
             }
         }
-        if k == S::Unsafe || k == S::Block {
+        if k == S::Unsafe || k == S::Block || k == S::Label {
             if has_break((*p).body) {
                 return true;
             }
@@ -1720,6 +1848,9 @@ fn diverges(st: *mut Stmt) -> bool {
     if k == S::Unsafe || k == S::Block {
         return diverges(last_stmt((*st).body));
     }
+    if k == S::Label {
+        return diverges(last_stmt((*st).body));
+    }
     if k == S::Switch {
         let mut has_default: bool = false;
         let mut ok: bool = true;
@@ -1756,6 +1887,8 @@ fn check_fn(s: *mut Sem, d: *mut Decl) {
     (*s).unsafe_depth = 0;
     (*s).loop_depth = 0;
     (*s).switch_depth = 0;
+    (*s).labels = null;
+    collect_labels(s, (*d).body);
     scope_push(s);
     let mut p: *mut Param = (*d).params;
     while p != null {
@@ -1837,6 +1970,7 @@ fn sem_run(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program)
     (*s).switch_depth = 0;
     (*s).slot = 0;
     (*s).errors = 0;
+    (*s).labels = null;
     let mut it: *mut Item = (*prog).items;
     while it != null {
         if (*it).decl != null {

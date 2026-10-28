@@ -602,10 +602,118 @@ fn parse_switch(p: *mut P) -> *mut Stmt {
     }
 }
 
+// A `for` initializer or step: an expression, assignment, or compound
+// assignment. The trailing `;`/`)` is left to the caller.
+fn parse_for_clause(p: *mut P) -> *mut Stmt {
+    unsafe {
+    let t: *mut Tok = pk(p);
+    let e: *mut Expr = parse_expr(p);
+    let op: T = tkind(p);
+    if is_assign_op(op) {
+        bump(p);
+        let s: *mut Stmt = stmt_new((*p).a, S::Assign, t);
+        unsafe {
+            (*s).expr = e;
+            (*s).op = op;
+            (*s).rhs = parse_expr(p);
+        }
+        return s;
+    }
+    let s: *mut Stmt = stmt_new((*p).a, S::Expr, t);
+    unsafe { (*s).expr = e; }
+    return s;
+
+    }
+}
+
+fn parse_for(p: *mut P) -> *mut Stmt {
+    unsafe {
+    let t: *mut Tok = pk(p);
+    bump(p);
+    let s: *mut Stmt = stmt_new((*p).a, S::For, t);
+    expect(p, T::LParen);
+    if at(p, T::Semi) {
+        bump(p);
+    } else if at(p, T::KwLet) {
+        unsafe { (*s).init = parse_stmt(p); }
+    } else {
+        // The oracle accepts only `let` or an expression here; assignments
+        // belong in the step clause.
+        let it: *mut Tok = pk(p);
+        let e: *mut Expr = parse_expr(p);
+        let is: *mut Stmt = stmt_new((*p).a, S::Expr, it);
+        unsafe {
+            (*is).expr = e;
+            (*s).init = is;
+        }
+        expect(p, T::Semi);
+    }
+    if !at(p, T::Semi) {
+        unsafe { (*s).expr = parse_expr(p); }
+    }
+    expect(p, T::Semi);
+    if !at(p, T::RParen) {
+        unsafe { (*s).step = parse_for_clause(p); }
+    }
+    expect(p, T::RParen);
+    unsafe { (*s).body = parse_block(p); }
+    return s;
+
+    }
+}
+
+fn parse_do(p: *mut P) -> *mut Stmt {
+    unsafe {
+    let t: *mut Tok = pk(p);
+    bump(p);
+    let s: *mut Stmt = stmt_new((*p).a, S::DoWhile, t);
+    unsafe { (*s).body = parse_block(p); }
+    expect(p, T::KwWhile);
+    unsafe { (*s).expr = parse_expr(p); }
+    expect(p, T::Semi);
+    return s;
+
+    }
+}
+
+fn parse_goto(p: *mut P) -> *mut Stmt {
+    unsafe {
+    let t: *mut Tok = pk(p);
+    bump(p);
+    if !at(p, T::Ident) {
+        perr(p, "expected `goto` target");
+        sync(p);
+        return null;
+    }
+    let s: *mut Stmt = stmt_new((*p).a, S::Goto, t);
+    unsafe { (*s).name = (*pk(p)).text; }
+    bump(p);
+    expect(p, T::Semi);
+    return s;
+
+    }
+}
+
+fn parse_label(p: *mut P) -> *mut Stmt {
+    unsafe {
+    let t: *mut Tok = pk(p);
+    let s: *mut Stmt = stmt_new((*p).a, S::Label, t);
+    unsafe { (*s).name = (*t).text; }
+    bump(p);
+    bump(p);
+    unsafe { (*s).body = parse_stmt(p); }
+    return s;
+
+    }
+}
+
 fn parse_stmt(p: *mut P) -> *mut Stmt {
     unsafe {
     let t: *mut Tok = pk(p);
     let k: T = (*t).kind;
+    if k == T::Ident && (*pk_n(p, 1)).kind == T::Colon {
+        return parse_label(p);
+    }
     if k == T::Semi {
         bump(p);
         return stmt_new((*p).a, S::Empty, t);
@@ -702,10 +810,14 @@ fn parse_stmt(p: *mut P) -> *mut Stmt {
     if k == T::KwSwitch {
         return parse_switch(p);
     }
-    if k == T::KwFor || k == T::KwDo || k == T::KwGoto {
-        perr(p, "for/do/goto are not supported by the bootstrap compiler");
-        sync(p);
-        return null;
+    if k == T::KwFor {
+        return parse_for(p);
+    }
+    if k == T::KwDo {
+        return parse_do(p);
+    }
+    if k == T::KwGoto {
+        return parse_goto(p);
     }
     let e: *mut Expr = parse_expr(p);
     let op: T = tkind(p);

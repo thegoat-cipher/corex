@@ -14,7 +14,8 @@ enum E {
 
 enum S {
     Let, Assign, Expr, If, While, Loop, Break, Continue,
-    Return, Unsafe, Block, Switch, Empty
+    Return, Unsafe, Block, Switch, Empty,
+    For, DoWhile, Label, Goto
 }
 
 enum D {
@@ -63,6 +64,8 @@ struct Stmt {
     body: *mut Stmt,
     els: *mut Stmt,
     cases: *mut Case,
+    init: *mut Stmt,
+    step: *mut Stmt,
     name: str,
     ty: *mut Type,
     decl: *mut Decl,
@@ -71,6 +74,14 @@ struct Stmt {
     file: i32,
     line: i32,
     col: i32,
+}
+
+// A function-local label for `name: stmt` / `goto name`. `id` is assigned by
+// the code generator; the semantic pass only needs the name list.
+struct Lbl {
+    next: *mut Lbl,
+    name: str,
+    id: i32,
 }
 
 struct Param {
@@ -196,6 +207,8 @@ fn stmt_new(a: *mut Arena, kind: S, tok: *mut Tok) -> *mut Stmt {
         (*s).body = null;
         (*s).els = null;
         (*s).cases = null;
+        (*s).init = null;
+        (*s).step = null;
         (*s).name = "";
         (*s).ty = null;
         (*s).decl = null;

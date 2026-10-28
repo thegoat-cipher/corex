@@ -1,0 +1,38 @@
+// Function-local labels and `goto`, including labels in switch arms and
+// control flow that leaves unreachable statements behind.
+fn main() -> i32 {
+    let mut k: i32 = 0;
+top:
+    k += 1;
+    if k < 3 { goto top; }
+    print(k);
+
+    // Statements between `goto` and its label are unreachable but must not
+    // break label resolution.
+    goto done;
+    print(999);
+done:
+    print(7);
+
+    // A label may also sit inside a switch arm.
+    let mut sw: i32 = 2;
+    switch sw {
+        case 1 { print(100); }
+        case 2 { goto after; }
+        default { print(300); }
+    }
+    print(999);
+after:
+    print(42);
+
+    // Jumping backwards out of a `while` restarts the labelled statement.
+    let mut n: i32 = 0;
+again:
+    n += 1;
+    while n < 5 {
+        n += 1;
+        if n == 4 { goto again; }
+    }
+    print(n);
+    return 0;
+}
