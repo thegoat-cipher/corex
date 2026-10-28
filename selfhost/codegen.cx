@@ -841,6 +841,52 @@ fn null_val() -> Val {
     }
 }
 
+// Division and remainder abort with exit 101 on a zero divisor and on the
+// signed `MIN / -1` overflow, exactly like the Rust oracle.
+fn gen_guard_div(f: *mut Fn, a: str, b: str, ty: *mut Type) {
+    unsafe {
+    unsafe {
+    let bits: i32 = int_bits(ty);
+    let zid: i32 = fnewtmp(f);
+    fs(f, "  %t"); fi(f, zid as i64);
+    fs(f, " = icmp eq "); fs(f, llty((*f).cg, ty)); fs(f, " "); fs(f, b); fs(f, ", 0\n");
+    let mut bad: str = reg_of(f, zid);
+    if type_is_signed(ty) {
+        let nid: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, nid as i64);
+        fs(f, " = icmp eq "); fs(f, llty((*f).cg, ty)); fs(f, " "); fs(f, b); fs(f, ", -1\n");
+        let unit: i64 = 1;
+        let mut minv: i64 = 0;
+        if bits >= 64 {
+            minv = unit << 63;
+        } else {
+            minv = 0 - (unit << ((bits - 1) as i64));
+        }
+        let mid: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, mid as i64);
+        fs(f, " = icmp eq "); fs(f, llty((*f).cg, ty)); fs(f, " "); fs(f, a); fs(f, ", ");
+        let mut mb: Buf = rt_buf((*(*f).cg).a);
+        let mbp: *mut Buf = &mut mb;
+        rt_i(mbp, minv);
+        fs(f, rt_view(mbp)); fs(f, "\n");
+        let oid: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, oid as i64);
+        fs(f, " = and i1 %t"); fi(f, mid as i64); fs(f, ", %t"); fi(f, nid as i64); fs(f, "\n");
+        let bid: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, bid as i64);
+        fs(f, " = or i1 %t"); fi(f, zid as i64); fs(f, ", %t"); fi(f, oid as i64); fs(f, "\n");
+        bad = reg_of(f, bid);
+    }
+    let gid: i32 = fnewtmp(f);
+    fs(f, "  %t"); fi(f, gid as i64);
+    fs(f, " = xor i1 "); fs(f, bad); fs(f, ", true\n");
+    gen_abort_if(f, reg_of(f, gid), "corex: division by zero or signed overflow\n");
+
+    }
+
+    }
+}
+
 fn gen_simple_bin(f: *mut Fn, op: T, a: str, b: str, ty: *mut Type) -> str {
     unsafe {
     unsafe {
@@ -853,19 +899,24 @@ fn gen_simple_bin(f: *mut Fn, op: T, a: str, b: str, ty: *mut Type) -> str {
         fs(f, b); fs(f, ", "); fi(f, (bits - 1) as i64); fnewline(f);
         rhs = reg_of(f, mid);
     }
-    let id: i32 = fnewtmp(f);
-    fs(f, "  %t"); fi(f, id as i64);
     let k: K = (*ty).kind;
     if k == K::F32 || k == K::F64 {
+        let fid: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, fid as i64);
         if op == T::Plus { fs(f, " = fadd "); }
         else if op == T::Minus { fs(f, " = fsub "); }
         else if op == T::Star { fs(f, " = fmul "); }
         else if op == T::Slash { fs(f, " = fdiv "); }
         else { fs(f, " = frem "); }
         fs(f, llty((*f).cg, ty)); fs(f, " "); fs(f, a); fs(f, ", "); fs(f, b); fnewline(f);
-        return reg_of(f, id);
+        return reg_of(f, fid);
     }
     let signed: bool = type_is_signed(ty);
+    if op == T::Slash || op == T::Percent {
+        gen_guard_div(f, a, b, ty);
+    }
+    let id: i32 = fnewtmp(f);
+    fs(f, "  %t"); fi(f, id as i64);
     if op == T::Plus { fs(f, " = add "); }
     else if op == T::Minus { fs(f, " = sub "); }
     else if op == T::Star { fs(f, " = mul "); }
