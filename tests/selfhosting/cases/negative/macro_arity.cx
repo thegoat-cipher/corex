@@ -1,0 +1,2 @@
+macro m(a, b) = a + b;
+fn main() -> i32 { return m(1); }

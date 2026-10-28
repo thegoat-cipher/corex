@@ -76,6 +76,15 @@ struct Stmt {
     col: i32,
 }
 
+// A declarative expression macro: `macro name(a, b) = <expr>;`. Expansion
+// happens in the parser; the body is never seen by semantic analysis.
+struct Macro {
+    next: *mut Macro,
+    name: str,
+    params: *mut PathList,
+    body: *mut Expr,
+}
+
 // A function-local label for `name: stmt` / `goto name`. `id` is assigned by
 // the code generator; the semantic pass only needs the name list.
 struct Lbl {
@@ -129,6 +138,7 @@ struct Decl {
     cval_s: str,
     is_mut: bool,
     is_extern: bool,
+    variadic: bool,
     is_pub: bool,
     unit: str,
     is_union: bool,
@@ -251,6 +261,7 @@ fn decl_new(a: *mut Arena, kind: D, name: str, file: i32, line: i32, col: i32) -
         (*d).cval_s = "";
         (*d).is_mut = false;
         (*d).is_extern = false;
+        (*d).variadic = false;
         (*d).is_pub = false;
         (*d).unit = "";
         (*d).is_union = false;

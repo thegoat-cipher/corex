@@ -1,0 +1,20 @@
+struct Pair { a: i64, b: i64 }
+
+extern "C" fn c_add(a: i64, b: i64) -> i64;
+extern "C" fn c_sum(count: i32, ...) -> i64;
+extern "C" fn c_make_pair(a: i64, b: i64) -> Pair;
+extern "C" fn c_pair_sum(p: Pair) -> i64;
+extern "C" fn c_call_corex(x: i64) -> i64;
+
+extern "C" fn cx_export(x: i64) -> i64 { return x * 2; }
+
+fn main() -> i32 {
+    print(c_add(20, 22));
+    print(c_sum(3, 10 as i64, 20 as i64, 30 as i64));
+    let p: Pair = c_make_pair(7, 8);
+    print(p.a);
+    print(p.b);
+    print(c_pair_sum(p));
+    print(c_call_corex(5));
+    return 0;
+}

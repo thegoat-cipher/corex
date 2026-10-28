@@ -446,7 +446,7 @@ fn decl_fn_type(s: *mut Sem, d: *mut Decl) -> *mut Type {
         tail = pt;
         p = (*p).next;
     }
-    return type_fn((*s).a, head, resolve_type(s, (*d).ty), false);
+    return type_fn((*s).a, head, resolve_type(s, (*d).ty), (*d).variadic);
 
     }
 }
@@ -1702,7 +1702,15 @@ fn check_call(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
                 par = (*par).next;
                 n = n + 1;
             }
-            if arg != null {
+            if (*d).variadic {
+                while arg != null {
+                    let xt: *mut Type = resolve_type(s, check_expr(s, arg, null));
+                    if (*xt).kind == K::Void || type_is_aggregate(xt) {
+                        sdiag(s, (*arg).file, (*arg).line, (*arg).col, "variadic argument must be a scalar or pointer");
+                    }
+                    arg = (*arg).next;
+                }
+            } else if arg != null {
                 sdiag(s, (*e).file, (*e).line, (*e).col, "too many function arguments");
             }
             let rt: *mut Type = resolve_type(s, (*d).ty);
@@ -2402,7 +2410,8 @@ fn layout_all(s: *mut Sem) {
     }
 }
 
-fn sem_run(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program) -> *mut Sem {
+fn sem_run(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program,
+    require_entry: bool) -> *mut Sem {
     unsafe {
     let s: *mut Sem = rt_alloc(a, sizeof(Sem)) as *mut Sem;
     (*s).a = a;
@@ -2468,7 +2477,7 @@ fn sem_run(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program)
     layout_all(s);
     let mentry: *mut Decl = sem_find(s, "main");
     let sentry: *mut Decl = sem_find(s, "_start");
-    if mentry == null && sentry == null {
+    if require_entry && mentry == null && sentry == null {
         sdiag(s, 0, 0, 0, "no entry point: define main or _start");
     }
     if mentry != null && (*mentry).kind == D::Func {

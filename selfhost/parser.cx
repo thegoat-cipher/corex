@@ -20,6 +20,8 @@ struct P {
     cfg: *mut PathList,
     discard: bool,
     is_root: bool,
+    macros: *mut Macro,
+    macro_depth: i32,
 }
 
 fn pk(p: *mut P) -> *mut Tok {
@@ -342,6 +344,9 @@ fn add_item(p: *mut P, it: *mut Item) {
             && (rt_eq((*d).name, "main") || rt_eq((*d).name, "_start")) {
             keep = true;
         }
+        if (*d).is_extern {
+            keep = true;
+        }
         if !keep && !rt_eq((*p).module_name, "") && !rt_eq((*d).name, "") && !has_dollar((*d).name) {
             let mut b: Buf = rt_buf((*p).a);
             let bp: *mut Buf = &mut b;
@@ -391,6 +396,12 @@ fn parse_fn(p: *mut P, is_pub: bool, is_extern: bool) {
     expect(p, T::LParen);
     while !at(p, T::RParen) && !at(p, T::Eof) {
         let pt: *mut Tok = pk(p);
+        if at(p, T::Ellipsis) {
+            bump(p);
+            (*d).variadic = true;
+            eat(p, T::Comma);
+            break;
+        }
         if !at(p, T::Ident) {
             perr(p, "expected parameter name");
             sync(p);
@@ -1262,6 +1273,14 @@ fn parse_postfix(p: *mut P) -> *mut Expr {
         let t: *mut Tok = pk(p);
         let k: T = (*t).kind;
         if k == T::LParen {
+            if (*e).kind == E::Ident {
+                let m: *mut Macro = macro_find(p, (*e).name);
+                if m != null {
+                    let args: *mut Expr = parse_args(p);
+                    e = expand_macro(p, m, args, t);
+                    continue;
+                }
+            }
             let call: *mut Expr = expr_new((*p).a, E::Call, t);
             unsafe {
                 (*call).lhs = e;
@@ -1695,6 +1714,142 @@ fn parse_file(p: *mut P, path: str) {
     }
 }
 
+fn macro_find(p: *mut P, name: str) -> *mut Macro {
+    unsafe {
+    let mut m: *mut Macro = (*p).macros;
+    while m != null {
+        if rt_eq((*m).name, name) {
+            return m;
+        }
+        m = (*m).next;
+    }
+    return null;
+
+    }
+}
+
+fn macro_add(p: *mut P, m: *mut Macro) {
+    unsafe {
+    (*m).next = (*p).macros;
+    (*p).macros = m;
+
+    }
+}
+
+fn expr_clone(p: *mut P, src: *mut Expr) -> *mut Expr {
+    unsafe {
+    if src == null {
+        return null;
+    }
+    let e: *mut Expr = rt_alloc((*p).a, sizeof(Expr)) as *mut Expr;
+    (*e) = (*src);
+    (*e).lhs = expr_clone(p, (*src).lhs);
+    (*e).rhs = expr_clone(p, (*src).rhs);
+    (*e).args = expr_clone(p, (*src).args);
+    (*e).next = expr_clone(p, (*src).next);
+    (*e).decl = null;
+    return e;
+
+    }
+}
+
+fn param_index(params: *mut PathList, name: str) -> i32 {
+    unsafe {
+    let mut i: i32 = 0;
+    let mut q: *mut PathList = params;
+    while q != null {
+        if rt_eq((*q).path, name) {
+            return i;
+        }
+        i = i + 1;
+        q = (*q).next;
+    }
+    return -1;
+
+    }
+}
+
+fn arg_at(args: *mut Expr, index: i32) -> *mut Expr {
+    unsafe {
+    let mut i: i32 = 0;
+    let mut q: *mut Expr = args;
+    while q != null {
+        if i == index {
+            return q;
+        }
+        i = i + 1;
+        q = (*q).next;
+    }
+    return null;
+
+    }
+}
+
+// Clone `src`, replacing identifiers that name macro parameters with a fresh
+// copy of the corresponding argument expression.
+fn subst_expr(p: *mut P, src: *mut Expr, params: *mut PathList, args: *mut Expr) -> *mut Expr {
+    unsafe {
+    if src == null {
+        return null;
+    }
+    if (*src).kind == E::Ident {
+        let idx: i32 = param_index(params, (*src).name);
+        if idx >= 0 {
+            let a: *mut Expr = arg_at(args, idx);
+            if a != null {
+                let c: *mut Expr = expr_clone(p, a);
+                (*c).next = null;
+                return c;
+            }
+        }
+    }
+    let e: *mut Expr = rt_alloc((*p).a, sizeof(Expr)) as *mut Expr;
+    (*e) = (*src);
+    (*e).lhs = subst_expr(p, (*src).lhs, params, args);
+    (*e).rhs = subst_expr(p, (*src).rhs, params, args);
+    (*e).args = subst_expr(p, (*src).args, params, args);
+    (*e).next = subst_expr(p, (*src).next, params, args);
+    (*e).decl = null;
+    return e;
+
+    }
+}
+
+fn expand_macro(p: *mut P, m: *mut Macro, args: *mut Expr, tok: *mut Tok) -> *mut Expr {
+    unsafe {
+    let mut np: i32 = 0;
+    let mut q: *mut PathList = (*m).params;
+    while q != null {
+        np = np + 1;
+        q = (*q).next;
+    }
+    let mut na: i32 = 0;
+    let mut a: *mut Expr = args;
+    while a != null {
+        na = na + 1;
+        a = (*a).next;
+    }
+    if np != na {
+        perr(p, "macro argument count mismatch");
+    }
+    if (*p).macro_depth >= 64 {
+        perr(p, "macro expansion depth exceeds 64");
+        return expr_new((*p).a, E::IntLit, tok);
+    }
+    (*p).macro_depth = (*p).macro_depth + 1;
+    let out: *mut Expr = subst_expr(p, (*m).body, (*m).params, args);
+    (*p).macro_depth = (*p).macro_depth - 1;
+    if out == null {
+        return expr_new((*p).a, E::IntLit, tok);
+    }
+    (*out).file = (*tok).file;
+    (*out).line = (*tok).line;
+    (*out).col = (*tok).col;
+    return out;
+
+    }
+}
+
 fn cfg_has(p: *mut P, key: str) -> bool {
     unsafe {
     let mut q: *mut PathList = (*p).cfg;
@@ -1873,6 +2028,52 @@ fn parse_item_inner(p: *mut P) {
         let _ = c_name;
         return;
     }
+    if k == T::KwMacro {
+        if is_pub {
+            perr(p, "`pub` does not apply to `macro`");
+        }
+        bump(p);
+        if !at(p, T::Ident) {
+            perr(p, "expected macro name");
+            sync(p);
+            return;
+        }
+        let name: str = (*pk(p)).text;
+        bump(p);
+        expect(p, T::LParen);
+        let mut params: *mut PathList = null;
+        let mut ptail: *mut PathList = null;
+        while !at(p, T::RParen) && !at(p, T::Eof) {
+            if !at(p, T::Ident) {
+                perr(p, "expected macro parameter");
+                break;
+            }
+            let pl: *mut PathList = rt_alloc((*p).a, sizeof(PathList)) as *mut PathList;
+            (*pl).path = (*pk(p)).text;
+            (*pl).next = null;
+            if ptail == null {
+                params = pl;
+            } else {
+                (*ptail).next = pl;
+            }
+            ptail = pl;
+            bump(p);
+            if !eat(p, T::Comma) {
+                break;
+            }
+        }
+        expect(p, T::RParen);
+        expect(p, T::Eq);
+        let body: *mut Expr = parse_expr(p);
+        expect(p, T::Semi);
+        let m: *mut Macro = rt_alloc((*p).a, sizeof(Macro)) as *mut Macro;
+        (*m).next = null;
+        (*m).name = name;
+        (*m).params = params;
+        (*m).body = body;
+        macro_add(p, m);
+        return;
+    }
     if k == T::KwModule {
         bump(p);
         if !at(p, T::Ident) {
@@ -1944,6 +2145,8 @@ fn parse_program_cfg(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, root: str
         (*p).cfg = cfg;
         (*p).discard = false;
         (*p).is_root = is_root;
+        (*p).macros = null;
+        (*p).macro_depth = 0;
     }
     parse_file(p, root);
     let mut prog: Program = prog_init();
