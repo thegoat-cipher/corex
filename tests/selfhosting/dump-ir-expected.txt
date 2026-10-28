@@ -1,0 +1,47 @@
+## slices
+@@ -1,11 +1,11 @@
+-define i32 @first(ptr %)
++define i32 @first({ ptr, i64 } %)
+ define i32 @main()
+-define i32 @sum(ptr %)
+-define i64 @take_bytes(ptr %)
+-define i8 @first_byte(ptr %)
++define i32 @sum({ ptr, i64 } %)
++define i64 @take_bytes({ ptr, i64 } %)
++define i8 @first_byte({ ptr, i64 } %)
+ define void @_start()
+-define void @tail(ptr %, ptr %)
+ define weak i32 @memcmp(ptr %, ptr %, i64 %)
+ define weak ptr @memcpy(ptr %, ptr %, i64 %)
+ define weak ptr @memmove(ptr %, ptr %, i64 %)
+ define weak void @memset(ptr %, i8 %, i64 %)
++define { ptr, i64 } @tail({ ptr, i64 } %)
+## strings
+@@ -1,5 +1,5 @@
++define i1 @eq({ ptr, i64 } %, { ptr, i64 } %)
+ define i32 @main()
+-define i8 @eq(ptr %, ptr %)
+ define void @_start()
+ define weak i32 @memcmp(ptr %, ptr %, i64 %)
+ define weak ptr @memcpy(ptr %, ptr %, i64 %)
+## structs
+@@ -1,6 +1,6 @@
++define % @make(i32 %)
+ define i32 @main()
+ define void @_start()
+-define void @make(ptr %, i32 %)
+ define weak i32 @memcmp(ptr %, ptr %, i64 %)
+ define weak ptr @memcpy(ptr %, ptr %, i64 %)
+ define weak ptr @memmove(ptr %, ptr %, i64 %)
+## vec
+@@ -1,8 +1,8 @@
+ define i32 @main()
+-define i32 @total(ptr %)
++define i32 @total({ ptr, i64, i64 } %)
+ define void @_start()
+-define void @build(ptr %, i32 %)
+ define weak i32 @memcmp(ptr %, ptr %, i64 %)
+ define weak ptr @memcpy(ptr %, ptr %, i64 %)
+ define weak ptr @memmove(ptr %, ptr %, i64 %)
+ define weak void @memset(ptr %, i8 %, i64 %)
++define { ptr, i64, i64 } @build(i32 %)

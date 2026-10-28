@@ -394,8 +394,10 @@ fn lx_lex_string(l: *mut Lex, kind: T) {
     unsafe {
         if kind == T::Str {
             (*t).start = (*t).start - 1;
+            (*t).col = (*t).col - 1;
         } else {
             (*t).start = (*t).start - 2;
+            (*t).col = (*t).col - 2;
         }
     }
     let text: str = lx_decode(bp, l, 34);

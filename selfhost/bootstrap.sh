@@ -90,4 +90,8 @@ tests/selfhosting/cli.sh "$STAGE1"
 tests/selfhosting/cli.sh "$STAGE2"
 
 echo
+echo "== Differential dumps =="
+tests/selfhosting/dump.sh "$STAGE2"
+
+echo
 echo "bootstrap ok"

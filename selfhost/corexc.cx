@@ -12,5 +12,6 @@ import "codegen.cx";
 import "fmt.cx";
 import "lint.cx";
 import "doc.cx";
+import "dump.cx";
 import "repl.cx";
 import "driver.cx";

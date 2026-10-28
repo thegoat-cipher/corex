@@ -42,6 +42,8 @@ Usage:
   corexc lint    <file.cx | -> [--deny-warnings]
   corexc doc     <file.cx | -> [-o <out.md>]
   corexc test    <file.cx | -> [--opt <0-3>]
+  corexc dump-tokens <file.cx | ->
+  corexc dump-ast    <file.cx | ->
 
 Commands:
   build    Compile to a freestanding Linux x86-64 ELF executable.
@@ -54,6 +56,8 @@ Commands:
   lint     Report unused variables/items, unreachable code, constant conditions.
   doc      Generate Markdown documentation from `///` comments.
   test     Build and run `fn test_name() -> bool` functions.
+  dump-tokens  Print normalized tokens (kind, position, lexeme).
+  dump-ast     Print the normalized AST shape used for differential testing.
 
 Reading source:
   A file argument of `-` reads the source from stdin, e.g.
@@ -1143,6 +1147,34 @@ fn dr_cmd_doc(a: *mut Arena, argv: **u8, argc: i32, o: *mut Opts) -> i32 {
     }
 }
 
+fn dr_cmd_dump_tokens(a: *mut Arena, o: *mut Opts) -> i32 {
+    unsafe {
+        let mut name: str = "";
+        let mut text: str = "";
+        let rc: i32 = dr_read_text(a, (*o).file, &mut name, &mut text);
+        if rc != 0 {
+            return rc;
+        }
+        dr_s(1, dump_tokens(a, name, text));
+        return 0;
+    }
+}
+
+fn dr_cmd_dump_ast(a: *mut Arena, o: *mut Opts) -> i32 {
+    unsafe {
+        let mut d: Diags = diags_new();
+        let mut srcs: SrcList = srcs_new();
+        let mut prog: Program = dr_load(a, (*o).file, &mut d, &mut srcs, o);
+        if d.count > 0 {
+            dr_diags(a, &mut d, &mut srcs);
+            dr_report_count(a, &mut d);
+            return 1;
+        }
+        dr_s(1, dump_ast(a, &mut prog));
+        return 0;
+    }
+}
+
 fn main(argc: i32, argv: **u8, envp: **u8) -> i32 {
     unsafe {
         let mut arena: Arena = rt_arena(536870912);
@@ -1268,6 +1300,32 @@ fn main(argc: i32, argv: **u8, envp: **u8) -> i32 {
                 return rc;
             }
             return dr_cmd_doc(a, argv, argc, &mut o);
+        } else if rt_cstr_eq(cmd, "dump-tokens") {
+            rc = dr_parse(a, argv, argc, 2, false, false, false, false, false, false, false, &mut o);
+            if rc == 0 && !o.has_file {
+                dr_errln("error: no input file");
+                rc = 2;
+            }
+            if rc != 0 {
+                return rc;
+            }
+            if dr_missing(a, o.file) {
+                return 2;
+            }
+            return dr_cmd_dump_tokens(a, &mut o);
+        } else if rt_cstr_eq(cmd, "dump-ast") {
+            rc = dr_parse(a, argv, argc, 2, false, false, false, false, false, false, true, &mut o);
+            if rc == 0 && !o.has_file {
+                dr_errln("error: no input file");
+                rc = 2;
+            }
+            if rc != 0 {
+                return rc;
+            }
+            if dr_missing(a, o.file) {
+                return 2;
+            }
+            return dr_cmd_dump_ast(a, &mut o);
         } else if rt_cstr_eq(cmd, "repl") {
             rc = dr_parse(a, argv, argc, 2, false, true, false, false, false, false, true, &mut o);
             if rc != 0 {
