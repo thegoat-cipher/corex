@@ -110,6 +110,9 @@ jobs:
           grep -F "selfhosting tests: 79 passed, 0 failed" "$RUNNER_TEMP/bootstrap.log"
           grep -F "bootstrap ok" "$RUNNER_TEMP/bootstrap.log"
 
+      - name: Optimized self-build reproducibility (--opt 1..3)
+        run: ./selfhost/repro-opt.sh --corpus 2>&1 | tee "$RUNNER_TEMP/repro-opt.log"
+
       - name: Install smoke
         run: |
           set -euo pipefail
