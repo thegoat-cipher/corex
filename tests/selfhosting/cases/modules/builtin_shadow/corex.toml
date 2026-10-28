@@ -1,0 +1,5 @@
+[package]
+name = "builtin_shadow"
+
+[build]
+sources = ["main.cx"]

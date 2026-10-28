@@ -429,7 +429,10 @@ fn parse_fn(p: *mut P, is_pub: bool, is_extern: bool) {
         unsafe { (*d).ty = type_prim((*p).a, K::Void); }
     }
     if at(p, T::LBrace) {
-        unsafe { (*d).body = parse_block(p); }
+        unsafe {
+            (*d).has_body = true;
+            (*d).body = parse_block(p);
+        }
     } else {
         expect(p, T::Semi);
     }
@@ -1075,7 +1078,7 @@ fn parse_struct_lit(p: *mut P, name: str, tok: *mut Tok) -> *mut Expr {
         bump(p);
         expect(p, T::Colon);
         let val: *mut Expr = parse_expr(p);
-        unsafe { (*val).field = (*ft).text; }
+        unsafe { (*val).sfield = (*ft).text; }
         if head == null {
             head = val;
         } else {

@@ -37,6 +37,7 @@ struct Expr {
     ival: i64,
     name: str,
     field: str,
+    sfield: str,
     text: str,
     type_arg: *mut Type,
     decl: *mut Decl,
@@ -138,6 +139,7 @@ struct Decl {
     cval_s: str,
     is_mut: bool,
     is_extern: bool,
+    has_body: bool,
     variadic: bool,
     is_pub: bool,
     unit: str,
@@ -203,6 +205,7 @@ fn expr_new(a: *mut Arena, kind: E, tok: *mut Tok) -> *mut Expr {
         (*e).ival = 0;
         (*e).name = "";
         (*e).field = "";
+        (*e).sfield = "";
         (*e).text = "";
         (*e).type_arg = null;
         (*e).decl = null;
@@ -261,6 +264,7 @@ fn decl_new(a: *mut Arena, kind: D, name: str, file: i32, line: i32, col: i32) -
         (*d).cval_s = "";
         (*d).is_mut = false;
         (*d).is_extern = false;
+        (*d).has_body = false;
         (*d).variadic = false;
         (*d).is_pub = false;
         (*d).unit = "";

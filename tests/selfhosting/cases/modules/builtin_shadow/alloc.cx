@@ -1,0 +1,13 @@
+module alloc;
+
+// A module item may reuse a builtin name; it is mangled to `alloc$free`.
+pub fn free(p: *mut u8) -> i32 {
+    if p == null { return 1; }
+    return 2;
+}
+
+pub fn allocate(n: usize) -> *mut u8 {
+    unsafe {
+        return alloc(n);
+    }
+}

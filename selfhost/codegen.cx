@@ -1484,7 +1484,7 @@ fn gen_expr(f: *mut Fn, e: *mut Expr) -> Val {
         }
         let mut arg: *mut Expr = (*e).args;
         while arg != null {
-            let fld: *mut Field = find_field(d, (*arg).field);
+            let fld: *mut Field = find_field(d, (*arg).sfield);
             if fld != null {
                 let id: i32 = fnewtmp(f);
                 fs(f, "  %t"); fi(f, id as i64);
@@ -2631,7 +2631,7 @@ fn gen_fn(cg: *mut Cg, d: *mut Decl) {
     // Header.
     let mut hb: Buf = rt_buf((*cg).a);
     let hp: *mut Buf = &mut hb;
-    if (*d).body == null {
+    if !(*d).has_body {
         rt_s(hp, "declare ");
         rt_s(hp, llty(cg, ret));
         rt_s(hp, " @");

@@ -196,6 +196,12 @@ fn sem_find(s: *mut Sem, name: str) -> *mut Decl {
 
 fn sem_add_global(s: *mut Sem, d: *mut Decl) {
     unsafe {
+    // A builtin name cannot be declared as a root-level function: it would
+    // never be reachable. Mangled module items are unaffected.
+    if (*d).kind == D::Func && !has_dollar((*d).name) && builtin_id((*d).name) != 0 {
+        sdiag(s, (*d).file, (*d).line, (*d).col, "reserved builtin name");
+        return;
+    }
     let old: *mut Decl = sem_find(s, (*d).name);
     if old != null {
         sdiag(s, (*d).file, (*d).line, (*d).col, "duplicate declaration");
@@ -1378,7 +1384,7 @@ fn check_expr(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
         let mut nargs: i32 = 0;
         let mut arg: *mut Expr = (*e).args;
         while arg != null {
-            let f: *mut Field = find_field(d, (*arg).field);
+            let f: *mut Field = find_field(d, (*arg).sfield);
             if f == null {
                 sdiag(s, (*arg).file, (*arg).line, (*arg).col, "unknown field");
             } else {
@@ -1400,7 +1406,7 @@ fn check_expr(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
                 let mut found: bool = false;
                 let mut arg2: *mut Expr = (*e).args;
                 while arg2 != null {
-                    if rt_eq((*arg2).field, (*f).name) {
+                    if rt_eq((*arg2).sfield, (*f).name) {
                         found = true;
                     }
                     arg2 = (*arg2).next;
@@ -1675,7 +1681,13 @@ fn check_call(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
     } else {
         return check_indirect_call(s, e, expected);
     }
-    let bid: i32 = builtin_id(name);
+    // A declared function shadows a builtin of the same name (the standard
+    // library defines `free`, for example).
+    let pre: *mut Decl = lookup(s, name);
+    let mut bid: i32 = 0;
+    if pre == null || (*pre).kind != D::Func {
+        bid = builtin_id(name);
+    }
     if bid != 0 {
         (*e).index = bid;
     } else {
@@ -2331,7 +2343,7 @@ fn diverges(st: *mut Stmt) -> bool {
 
 fn check_fn(s: *mut Sem, d: *mut Decl) {
     unsafe {
-    if (*d).body == null {
+    if !(*d).has_body {
         return;
     }
     (*s).cur_fn = d;

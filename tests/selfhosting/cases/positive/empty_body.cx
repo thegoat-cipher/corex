@@ -1,0 +1,13 @@
+// A function whose body block is empty is a definition, not a declaration.
+fn nothing() {
+    // nothing to do
+}
+
+fn zero() -> i32 { return 0; }
+
+fn main() -> i32 {
+    nothing();
+    print(zero());
+    print(7);
+    return 0;
+}
