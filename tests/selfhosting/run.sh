@@ -72,6 +72,28 @@ for src in "$CASES"/negative/*.cx; do
     report_fail "negative/$name: accepted invalid input"
   elif [ ! -s "$TMP/neg.err" ]; then
     report_fail "negative/$name: rejected without a diagnostic"
+  elif [ -f "$CASES/negative/$name.code" ] && ! grep -qF "error[$(cat "$CASES/negative/$name.code")]" "$TMP/neg.err"; then
+    report_fail "negative/$name: expected diagnostic code $(cat "$CASES/negative/$name.code")"
+  else
+    pass=$((pass + 1))
+  fi
+done
+
+# Malformed inputs must be rejected with a diagnostic and a clean exit 1. A
+# timeout or a signal (segfault/abort) is a failure, not a rejection.
+for src in "$CASES"/malformed/*.cx; do
+  [ -e "$src" ] || break
+  name="$(basename "$src" .cx)"
+  set +e
+  timeout 20 "$COMPILER" check "$src" >"$TMP/mal.out" 2>"$TMP/mal.err"
+  rc=$?
+  set -e
+  if [ "$rc" -eq 124 ]; then
+    report_fail "malformed/$name: timed out"
+  elif [ "$rc" -ne 1 ]; then
+    report_fail "malformed/$name: exit $rc (expected a clean diagnostic, exit 1)"
+  elif [ ! -s "$TMP/mal.err" ]; then
+    report_fail "malformed/$name: rejected without a diagnostic"
   else
     pass=$((pass + 1))
   fi

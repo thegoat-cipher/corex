@@ -1,0 +1,4 @@
+fn main() -> i32 {
+    let v: vec<u8> = read_file(5);
+    return len(v) as i32;
+}

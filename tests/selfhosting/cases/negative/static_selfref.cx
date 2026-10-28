@@ -1,0 +1,2 @@
+static A: [i32; 2] = A;
+fn main() -> i32 { print(A[0]); return 0; }

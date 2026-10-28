@@ -1,0 +1,33 @@
+// Pins the exact binary64/binary32 encoding of decimal literals by
+// reinterpreting their storage as integer bits (hex is printed as decimal).
+fn bits(x: f64) -> u64 {
+    unsafe {
+        let p: *u64 = &x as *u64;
+        return *p;
+    }
+}
+fn bits32(x: f32) -> u32 {
+    unsafe {
+        let p: *u32 = &x as *u32;
+        return *p;
+    }
+}
+fn main() -> i32 {
+    print(bits(0.1));
+    print(bits(0.5));
+    print(bits(1.5));
+    print(bits(3.141592653589793));
+    print(bits(1.0e300));
+    print(bits(1.0e-300));
+    print(bits(5e-324));
+    print(bits(1.7976931348623157e308));
+    print(bits(9007199254740993.0));
+    print(bits(123456789.123456));
+    print(bits(-0.0));
+    print(bits32(0.1));
+    print(bits32(1.5));
+    print(bits32(1.0e38));
+    print(bits32(1.0e-40));
+    print(bits32(3.4028234663852886e38));
+    return 0;
+}

@@ -34,6 +34,8 @@ struct Cg {
     used_print_bool: bool,
     used_print_char: bool,
     used_print_str: bool,
+    used_print_f64: bool,
+    used_file_io: bool,
     used_fatal: bool,
     used_cstr_len: bool,
     used_cstr_str: bool,
@@ -552,6 +554,24 @@ fn gen_abort_if(f: *mut Fn, cond: str, msg: str) {
     }
 }
 
+// LLVM hexadecimal FP constants are always written as a 64-bit binary64 bit
+// pattern, even for `float` values (LLVM rounds the constant to the target
+// type). An `f32` value is rounded to binary32 and widened back so the emitted
+// double is exactly representable in the float operand, matching the oracle.
+fn float_ll(a: *mut Arena, ty: *mut Type, bits: i64) -> str {
+    let mut out: i64 = bits;
+    unsafe {
+        if ty != null && (*ty).kind == K::F32 {
+            out = rt_f32_as_f64(rt_f64_as_f32(bits));
+        }
+    }
+    let mut b: Buf = rt_buf(a);
+    let bp: *mut Buf = &mut b;
+    rt_s(bp, "0x");
+    rt_hex16(bp, out as u64);
+    return rt_view(bp);
+}
+
 fn operand(f: *mut Fn, v: Val, ty: *mut Type) -> str {
     unsafe {
     unsafe {
@@ -564,6 +584,9 @@ fn operand(f: *mut Fn, v: Val, ty: *mut Type) -> str {
                 return "1";
             }
             return "0";
+        }
+        if ty != null && ((*ty).kind == K::F32 || (*ty).kind == K::F64) {
+            return float_ll((*(*f).cg).a, ty, v.ival);
         }
         let mut b: Buf = rt_buf((*(*f).cg).a);
         let bp: *mut Buf = &mut b;
@@ -932,6 +955,52 @@ fn gen_checked_arith(f: *mut Fn, op: T, a: str, b: str, ty: *mut Type) -> str {
     }
 }
 
+// Division and remainder abort with exit 101 on a zero divisor and on the
+// signed `MIN / -1` overflow, exactly like the Rust oracle.
+fn gen_guard_div(f: *mut Fn, a: str, b: str, ty: *mut Type) {
+    unsafe {
+    unsafe {
+    let bits: i32 = int_bits(ty);
+    let zid: i32 = fnewtmp(f);
+    fs(f, "  %t"); fi(f, zid as i64);
+    fs(f, " = icmp eq "); fs(f, llty((*f).cg, ty)); fs(f, " "); fs(f, b); fs(f, ", 0\n");
+    let mut bad: str = reg_of(f, zid);
+    if type_is_signed(ty) {
+        let nid: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, nid as i64);
+        fs(f, " = icmp eq "); fs(f, llty((*f).cg, ty)); fs(f, " "); fs(f, b); fs(f, ", -1\n");
+        let unit: i64 = 1;
+        let mut minv: i64 = 0;
+        if bits >= 64 {
+            minv = unit << 63;
+        } else {
+            minv = 0 - (unit << ((bits - 1) as i64));
+        }
+        let mid: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, mid as i64);
+        fs(f, " = icmp eq "); fs(f, llty((*f).cg, ty)); fs(f, " "); fs(f, a); fs(f, ", ");
+        let mut mb: Buf = rt_buf((*(*f).cg).a);
+        let mbp: *mut Buf = &mut mb;
+        rt_i(mbp, minv);
+        fs(f, rt_view(mbp)); fs(f, "\n");
+        let oid: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, oid as i64);
+        fs(f, " = and i1 %t"); fi(f, mid as i64); fs(f, ", %t"); fi(f, nid as i64); fs(f, "\n");
+        let bid: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, bid as i64);
+        fs(f, " = or i1 %t"); fi(f, zid as i64); fs(f, ", %t"); fi(f, oid as i64); fs(f, "\n");
+        bad = reg_of(f, bid);
+    }
+    let gid: i32 = fnewtmp(f);
+    fs(f, "  %t"); fi(f, gid as i64);
+    fs(f, " = xor i1 "); fs(f, bad); fs(f, ", true\n");
+    gen_abort_if(f, reg_of(f, gid), "corex: division by zero or signed overflow\n");
+
+    }
+
+    }
+}
+
 fn gen_simple_bin(f: *mut Fn, op: T, a: str, b: str, ty: *mut Type) -> str {
     unsafe {
     unsafe {
@@ -947,10 +1016,24 @@ fn gen_simple_bin(f: *mut Fn, op: T, a: str, b: str, ty: *mut Type) -> str {
         fs(f, b); fs(f, ", "); fi(f, (bits - 1) as i64); fnewline(f);
         rhs = reg_of(f, mid);
     }
+    let k: K = (*ty).kind;
+    if k == K::F32 || k == K::F64 {
+        let fid: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, fid as i64);
+        if op == T::Plus { fs(f, " = fadd "); }
+        else if op == T::Minus { fs(f, " = fsub "); }
+        else if op == T::Star { fs(f, " = fmul "); }
+        else if op == T::Slash { fs(f, " = fdiv "); }
+        else { fs(f, " = frem "); }
+        fs(f, llty((*f).cg, ty)); fs(f, " "); fs(f, a); fs(f, ", "); fs(f, b); fnewline(f);
+        return reg_of(f, fid);
+    }
+    let signed: bool = type_is_signed(ty);
+    if op == T::Slash || op == T::Percent {
+        gen_guard_div(f, a, b, ty);
+    }
     let id: i32 = fnewtmp(f);
     fs(f, "  %t"); fi(f, id as i64);
-    let k: K = (*ty).kind;
-    let signed: bool = type_is_signed(ty);
     if op == T::Plus { fs(f, " = add "); }
     else if op == T::Minus { fs(f, " = sub "); }
     else if op == T::Star { fs(f, " = mul "); }
@@ -978,8 +1061,19 @@ fn gen_cmp(f: *mut Fn, op: T, a: str, b: str, ty: *mut Type) -> str {
     unsafe {
     let id: i32 = fnewtmp(f);
     fs(f, "  %t"); fi(f, id as i64);
-    fs(f, " = icmp ");
     let k: K = (*ty).kind;
+    if k == K::F32 || k == K::F64 {
+        fs(f, " = fcmp ");
+        if op == T::EqEq { fs(f, "oeq "); }
+        else if op == T::Ne { fs(f, "une "); }
+        else if op == T::Lt { fs(f, "olt "); }
+        else if op == T::Le { fs(f, "ole "); }
+        else if op == T::Gt { fs(f, "ogt "); }
+        else { fs(f, "oge "); }
+        fs(f, llty((*f).cg, ty)); fs(f, " "); fs(f, a); fs(f, ", "); fs(f, b); fnewline(f);
+        return reg_of(f, id);
+    }
+    fs(f, " = icmp ");
     if k == K::Ptr || k == K::CStr || k == K::Fn {
         if op == T::Ne { fs(f, "ne "); } else { fs(f, "eq "); }
     } else if op == T::EqEq {
@@ -1013,6 +1107,33 @@ fn gen_cast(f: *mut Fn, e: *mut Expr) -> Val {
     let v: Val = gen_expr(f, (*e).lhs);
     let fk: K = (*from).kind;
     let tk: K = (*to).kind;
+    if fk == K::F32 || fk == K::F64 {
+        if tk == K::F32 || tk == K::F64 {
+            if fk == tk {
+                return v_ssa(to, operand(f, v, from));
+            }
+            let idf: i32 = fnewtmp(f);
+            fs(f, "  %t"); fi(f, idf as i64);
+            if tk == K::F64 { fs(f, " = fpext "); } else { fs(f, " = fptrunc "); }
+            fs(f, llty((*f).cg, from)); fs(f, " "); fs(f, operand(f, v, from));
+            fs(f, " to "); fs(f, llty((*f).cg, to)); fnewline(f);
+            return v_ssa(to, reg_of(f, idf));
+        }
+        let idi: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, idi as i64);
+        if type_is_signed(to) { fs(f, " = fptosi "); } else { fs(f, " = fptoui "); }
+        fs(f, llty((*f).cg, from)); fs(f, " "); fs(f, operand(f, v, from));
+        fs(f, " to "); fs(f, llty((*f).cg, to)); fnewline(f);
+        return v_ssa(to, reg_of(f, idi));
+    }
+    if tk == K::F32 || tk == K::F64 {
+        let idt: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, idt as i64);
+        if type_is_signed(from) { fs(f, " = sitofp "); } else { fs(f, " = uitofp "); }
+        fs(f, llty((*f).cg, from)); fs(f, " "); fs(f, operand(f, v, from));
+        fs(f, " to "); fs(f, llty((*f).cg, to)); fnewline(f);
+        return v_ssa(to, reg_of(f, idt));
+    }
     if tk == K::Ptr || tk == K::CStr || tk == K::Fn {
         if fk == K::Ptr || fk == K::CStr || fk == K::Fn {
             return v_ssa(to, operand(f, v, from));
@@ -1353,6 +1474,9 @@ fn gen_expr(f: *mut Fn, e: *mut Expr) -> Val {
     if k == E::IntLit || k == E::CharLit || k == E::BoolLit {
         return v_const((*e).ty, (*e).ival);
     }
+    if k == E::FloatLit {
+        return v_const((*e).ty, (*e).ival);
+    }
     if k == E::NullLit {
         return v_const((*e).ty, 0);
     }
@@ -1512,7 +1636,11 @@ fn gen_expr(f: *mut Fn, e: *mut Expr) -> Val {
         let id: i32 = fnewtmp(f);
         fs(f, "  %t"); fi(f, id as i64);
         if op == T::Minus {
-            fs(f, " = sub "); fs(f, llty((*f).cg, ty)); fs(f, " 0, "); fs(f, operand(f, v, ty)); fnewline(f);
+            if (*ty).kind == K::F32 || (*ty).kind == K::F64 {
+                fs(f, " = fneg "); fs(f, llty((*f).cg, ty)); fs(f, " "); fs(f, operand(f, v, ty)); fnewline(f);
+            } else {
+                fs(f, " = sub "); fs(f, llty((*f).cg, ty)); fs(f, " 0, "); fs(f, operand(f, v, ty)); fnewline(f);
+            }
         } else if (*ty).kind == K::Bool {
             fs(f, " = xor i1 "); fs(f, operand(f, v, ty)); fs(f, ", 1"); fnewline(f);
         } else {
@@ -1802,6 +1930,41 @@ fn gen_call(f: *mut Fn, e: *mut Expr) -> Val {
         fs(f, ", ptr "); fs(f, slot); fnewline(f);
         return v_addr((*e).ty, slot);
     }
+    if bid == 12 {
+        let buf_e: *mut Expr = (*e).args;
+        let cap_e: *mut Expr = (*buf_e).next;
+        let str_e: *mut Expr = (*cap_e).next;
+        let bv: Val = gen_expr(f, buf_e);
+        let cv: Val = gen_expr(f, cap_e);
+        let sv: Val = gen_expr(f, str_e);
+        let cap: str = cast_operand_to_i64(f, cv, (*cap_e).ty);
+        let buf: str = operand(f, bv, (*buf_e).ty);
+        let st: str = materialize(f, sv, (*str_e).ty);
+        let dp: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, dp as i64);
+        fs(f, " = extractvalue { ptr, i64 } "); fs(f, st); fs(f, ", 0\n");
+        let ln: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, ln as i64);
+        fs(f, " = extractvalue { ptr, i64 } "); fs(f, st); fs(f, ", 1\n");
+        let need: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, need as i64);
+        fs(f, " = add i64 %t"); fi(f, ln as i64); fs(f, ", 1\n");
+        let okc: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, okc as i64);
+        fs(f, " = icmp ule i64 %t"); fi(f, need as i64); fs(f, ", "); fs(f, cap); fnewline(f);
+        gen_abort_if(f, reg_of(f, okc), "corex: cstr buffer too small\n");
+        let mr: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, mr as i64);
+        fs(f, " = call ptr @memcpy(ptr "); fs(f, buf); fs(f, ", ptr %t"); fi(f, dp as i64);
+        fs(f, ", i64 %t"); fi(f, ln as i64); fs(f, ")\n");
+        let endp: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, endp as i64);
+        fs(f, " = getelementptr inbounds i8, ptr "); fs(f, buf);
+        fs(f, ", i64 %t"); fi(f, ln as i64); fs(f, "\n");
+        fs(f, "  store i8 0, ptr %t"); fi(f, endp as i64); fs(f, ", align 1\n");
+        (*(*f).cg).used_fatal = true;
+        return v_ssa((*e).ty, buf);
+    }
     if bid == 13 {
         let arg: *mut Expr = (*e).args;
         let v: Val = gen_expr(f, arg);
@@ -1985,6 +2148,59 @@ fn gen_call(f: *mut Fn, e: *mut Expr) -> Val {
         fs(f, ", ptr "); fs(f, slot); fnewline(f);
         return v_addr((*e).ty, slot);
     }
+    if bid == 17 {
+        let pe: *mut Expr = (*e).args;
+        let pv: Val = gen_expr(f, pe);
+        let ps: str = materialize(f, pv, (*pe).ty);
+        let dp2: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, dp2 as i64);
+        fs(f, " = extractvalue { ptr, i64 } "); fs(f, ps); fs(f, ", 0\n");
+        let ln2: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, ln2 as i64);
+        fs(f, " = extractvalue { ptr, i64 } "); fs(f, ps); fs(f, ", 1\n");
+        let res: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, res as i64);
+        fs(f, " = call { ptr, i64, i64 } @_cx_read_file(ptr %t"); fi(f, dp2 as i64);
+        fs(f, ", i64 %t"); fi(f, ln2 as i64); fs(f, ")\n");
+        let ty: *mut Type = (*e).ty;
+        let slot2: str = ftemp(f, ty);
+        fs(f, "  store { ptr, i64, i64 } %t"); fi(f, res as i64);
+        fs(f, ", ptr "); fs(f, slot2); fnewline(f);
+        (*(*f).cg).used_file_io = true;
+        (*(*f).cg).used_alloc = true;
+        (*(*f).cg).used_free = true;
+        return v_addr(ty, slot2);
+    }
+    if bid == 18 {
+        let pe2: *mut Expr = (*e).args;
+        let de2: *mut Expr = (*pe2).next;
+        let pv2: Val = gen_expr(f, pe2);
+        let dv2: Val = gen_expr(f, de2);
+        let ps2: str = materialize(f, pv2, (*pe2).ty);
+        let ds2: str = materialize(f, dv2, (*de2).ty);
+        let pd: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, pd as i64);
+        fs(f, " = extractvalue { ptr, i64 } "); fs(f, ps2); fs(f, ", 0\n");
+        let pl: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, pl as i64);
+        fs(f, " = extractvalue { ptr, i64 } "); fs(f, ps2); fs(f, ", 1\n");
+        let dd: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, dd as i64);
+        fs(f, " = extractvalue { ptr, i64 } "); fs(f, ds2); fs(f, ", 0\n");
+        let dl: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, dl as i64);
+        fs(f, " = extractvalue { ptr, i64 } "); fs(f, ds2); fs(f, ", 1\n");
+        let wr: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, wr as i64);
+        fs(f, " = call i32 @_cx_write_file(ptr %t"); fi(f, pd as i64);
+        fs(f, ", i64 %t"); fi(f, pl as i64);
+        fs(f, ", ptr %t"); fi(f, dd as i64);
+        fs(f, ", i64 %t"); fi(f, dl as i64); fs(f, ")\n");
+        (*(*f).cg).used_file_io = true;
+        (*(*f).cg).used_alloc = true;
+        (*(*f).cg).used_free = true;
+        return v_ssa((*e).ty, reg_of(f, wr));
+    }
     return v_void();
 
     }
@@ -2092,6 +2308,18 @@ fn gen_print(f: *mut Fn, e: *mut Expr) {
         fs(f, "  call void @_cx_print_str(ptr %t"); fi(f, s1 as i64);
         fs(f, ", i64 %t"); fi(f, s2 as i64); fs(f, ")\n");
         (*(*f).cg).used_print_str = true;
+        return;
+    }
+    if k == K::F32 || k == K::F64 {
+        let mut wide: str = operand(f, v, ty);
+        if k == K::F32 {
+            let idw: i32 = fnewtmp(f);
+            fs(f, "  %t"); fi(f, idw as i64);
+            fs(f, " = fpext float "); fs(f, wide); fs(f, " to double\n");
+            wide = reg_of(f, idw);
+        }
+        fs(f, "  call void @_cx_print_f64(double "); fs(f, wide); fs(f, ")\n");
+        (*(*f).cg).used_print_f64 = true;
         return;
     }
     if k == K::Bool {
@@ -2545,34 +2773,175 @@ fn gen_types(cg: *mut Cg) {
     }
 }
 
-fn const_init(cg: *mut Cg, d: *mut Decl) -> str {
+// Escape a byte string as an LLVM `c"..."` constant.
+fn cstr_literal(b: *mut Buf, s: str) {
     unsafe {
-    unsafe {
-    let t: *mut Type = (*d).ty;
-    let e: *mut Expr = (*d).init;
-    if (*t).kind == K::Str {
-        if e != null && (*e).kind == E::StrLit {
-            let id: i32 = add_string(cg, (*e).text);
-            let mut b: Buf = rt_buf((*cg).a);
-            let bp: *mut Buf = &mut b;
-            rt_s(bp, "{ ptr @.str");
-            rt_i(bp, id as i64);
-            rt_s(bp, ", i64 ");
-            rt_i(bp, len((*e).text) as i64);
-            rt_s(bp, " }");
-            return rt_view(bp);
+    rt_b(b, 99);
+    rt_b(b, 34);
+    let mut i: usize = 0;
+    while i < len(s) {
+        let c: u8 = s[i];
+        if c == 34 {
+            rt_s(b, "\\22");
+        } else if c == 92 {
+            rt_s(b, "\\5C");
+        } else if c >= 32 && c <= 126 {
+            rt_b(b, c);
+        } else {
+            add_hex_byte(b, c);
         }
+        i = i + 1;
+    }
+    rt_b(b, 34);
+
+    }
+}
+
+// Render a static initializer as a structural LLVM constant. `e == null`
+// yields the zero value of `ty` so missing struct fields stay well-typed.
+// Aggregates are emitted as `[elem-typed...]` and `{ field-typed... }`;
+// scalars are bare values, matching the oracle's `llvm_const` layout.
+fn const_value(cg: *mut Cg, ty: *mut Type, e: *mut Expr, depth: i32) -> str {
+    unsafe {
+    if ty == null || depth > 16 {
         return "zeroinitializer";
     }
+    let k: K = (*ty).kind;
+    // A global initialized from an earlier global copies its constant value.
+    if e != null && (*e).kind == E::Ident && (*e).decl != null
+        && (*(*e).decl).kind == D::Global && depth < 16 {
+        let gd: *mut Decl = (*e).decl;
+        return const_value(cg, ty, (*gd).init, depth + 1);
+    }
+    if k == K::Array {
+        let elem: *mut Type = (*ty).elem;
+        let n: usize = (*ty).len;
+        if e != null && (*e).kind == E::StrLit && elem != null && (*elem).kind == K::U8
+            && len((*e).text) == n {
+            let mut sb: Buf = rt_buf((*cg).a);
+            let sbp: *mut Buf = &mut sb;
+            cstr_literal(sbp, (*e).text);
+            return rt_view(sbp);
+        }
+        let mut ab: Buf = rt_buf((*cg).a);
+        let abp: *mut Buf = &mut ab;
+        rt_b(abp, 91);
+        let mut rep: *mut Expr = null;
+        let mut arg: *mut Expr = null;
+        if e != null && (*e).kind == E::ArrayLit {
+            if (*e).index == 1 {
+                rep = (*e).args;
+            } else {
+                arg = (*e).args;
+            }
+        }
+        let mut i: usize = 0;
+        while i < n {
+            if i > 0 {
+                rt_s(abp, ", ");
+            }
+            rt_s(abp, llty(cg, elem));
+            rt_s(abp, " ");
+            if rep != null {
+                rt_s(abp, const_value(cg, elem, rep, depth + 1));
+            } else {
+                let mut ae: *mut Expr = null;
+                if arg != null {
+                    ae = arg;
+                    arg = (*arg).next;
+                }
+                rt_s(abp, const_value(cg, elem, ae, depth + 1));
+            }
+            i = i + 1;
+        }
+        rt_b(abp, 93);
+        return rt_view(abp);
+    }
+    if k == K::Struct {
+        let d: *mut Decl = (*ty).decl;
+        let mut ob: Buf = rt_buf((*cg).a);
+        let obp: *mut Buf = &mut ob;
+        rt_s(obp, "{ ");
+        let mut fld: *mut Field = null;
+        if d != null {
+            fld = (*d).fields;
+        }
+        let mut first: bool = true;
+        while fld != null {
+            if !first {
+                rt_s(obp, ", ");
+            }
+            first = false;
+            rt_s(obp, llty(cg, (*fld).ty));
+            rt_s(obp, " ");
+            let mut found: *mut Expr = null;
+            if e != null && (*e).kind == E::StructLit {
+                let mut a: *mut Expr = (*e).args;
+                while a != null {
+                    if rt_eq((*a).sfield, (*fld).name) {
+                        found = a;
+                    }
+                    a = (*a).next;
+                }
+            }
+            rt_s(obp, const_value(cg, (*fld).ty, found, depth + 1));
+            fld = (*fld).next;
+        }
+        rt_s(obp, " }");
+        return rt_view(obp);
+    }
+    if k == K::Str {
+        let mut text: str = "";
+        if e != null {
+            text = eval_str((*cg).sem, e);
+        }
+        let id: i32 = add_string(cg, text);
+        let mut sb2: Buf = rt_buf((*cg).a);
+        let sb2p: *mut Buf = &mut sb2;
+        rt_s(sb2p, "{ ptr @.str");
+        rt_i(sb2p, id as i64);
+        rt_s(sb2p, ", i64 ");
+        rt_i(sb2p, len(text) as i64);
+        rt_s(sb2p, " }");
+        return rt_view(sb2p);
+    }
+    if k == K::F32 || k == K::F64 {
+        let mut bits: i64 = 0;
+        if e != null {
+            bits = eval_float_bits((*cg).sem, e);
+        }
+        return float_ll((*cg).a, ty, bits);
+    }
+    if k == K::Ptr || k == K::CStr {
+        if e != null && (*e).kind == E::NullLit {
+            return "null";
+        }
+        if e != null && (*e).kind == E::Unary && (*e).op == T::Amp
+            && (*e).lhs != null && (*(*e).lhs).kind == E::Ident
+            && (*(*e).lhs).decl != null && (*(*(*e).lhs).decl).kind == D::Global {
+            let mut pb: Buf = rt_buf((*cg).a);
+            let pbp: *mut Buf = &mut pb;
+            rt_b(pbp, 64);
+            rt_s(pbp, (*(*(*e).lhs).decl).name);
+            return rt_view(pbp);
+        }
+        return "null";
+    }
     if e == null {
-        return "zeroinitializer";
+        return "0";
     }
     let v: i64 = eval_int((*cg).sem, e);
     let mut b: Buf = rt_buf((*cg).a);
     let bp: *mut Buf = &mut b;
     rt_i(bp, v);
     return rt_view(bp);
+
     }
+}
+
+fn const_init(cg: *mut Cg, d: *mut Decl) -> str {
+    unsafe {
+    return const_value(cg, (*d).ty, (*d).init, 0);
 
     }
 }
@@ -2593,6 +2962,8 @@ fn gen_globals(cg: *mut Cg) {
             rt_s((*cg).globals, llty(cg, (*d).ty));
             rt_s((*cg).globals, " ");
             rt_s((*cg).globals, const_init(cg, d));
+            rt_s((*cg).globals, ", align ");
+            rt_i((*cg).globals, type_align((*cg).sem, (*d).ty) as i64);
             rt_s((*cg).globals, "\n");
         }
         d = (*d).next;
@@ -2776,7 +3147,7 @@ fn gen_helpers(cg: *mut Cg) {
     let mut h: Buf = rt_buf((*cg).a);
     let hp: *mut Buf = &mut h;
     rt_s(hp, "define internal i64 @_cx_syscall(i64 %nr, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5, i64 %a6) {\nentry:\n  %r = call i64 asm sideeffect \"syscall\", \"={rax},{rax},{rdi},{rsi},{rdx},{r10},{r8},{r9},~{rcx},~{r11},~{memory}\"(i64 %nr, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5, i64 %a6)\n  ret i64 %r\n}\n\n");
-    if (*cg).used_fatal || (*cg).used_alloc {
+    if (*cg).used_fatal || (*cg).used_alloc || (*cg).used_print_f64 {
         rt_s(hp, "define internal void @_cx_fatal(ptr %msg, i64 %len) {\nentry:\n  %mp = ptrtoint ptr %msg to i64\n  %w = call i64 @_cx_syscall(i64 1, i64 2, i64 %mp, i64 %len, i64 0, i64 0, i64 0)\n  %x = call i64 @_cx_syscall(i64 60, i64 101, i64 0, i64 0, i64 0, i64 0, i64 0)\n  unreachable\n}\n\n");
     }
     if (*cg).used_free {
@@ -2791,14 +3162,19 @@ fn gen_helpers(cg: *mut Cg) {
         rt_i(hp, len(msg) as i64);
         rt_s(hp, ")\n  unreachable\nok:\n  %p = inttoptr i64 %r to ptr\n  ret ptr %p\n}\n\n");
     }
-    let mut need_nl: bool = (*cg).used_print_i64 || (*cg).used_print_u64 || (*cg).used_print_bool || (*cg).used_print_char || (*cg).used_print_str;
+    if (*cg).used_file_io {
+        rt_s(hp, "define internal ptr @_cx_cstr(ptr %data, i64 %len) {\nentry:\n  %n = add i64 %len, 1\n  %p = call ptr @_cx_alloc(i64 %n)\n  %r = call ptr @memcpy(ptr %p, ptr %data, i64 %len)\n  %end = getelementptr inbounds i8, ptr %p, i64 %len\n  store i8 0, ptr %end, align 1\n  ret ptr %p\n}\n\ndefine internal i32 @_cx_write_all(i64 %fd, ptr %data, i64 %len) {\nentry:\n  br label %loop\nloop:\n  %off = phi i64 [ 0, %entry ], [ %next, %more ]\n  %left = sub i64 %len, %off\n  %done = icmp eq i64 %left, 0\n  br i1 %done, label %finish, label %body\nbody:\n  %p = getelementptr inbounds i8, ptr %data, i64 %off\n  %pi = ptrtoint ptr %p to i64\n  %w = call i64 @_cx_syscall(i64 1, i64 %fd, i64 %pi, i64 %left, i64 0, i64 0, i64 0)\n  %bad = icmp sle i64 %w, 0\n  br i1 %bad, label %fail, label %more\nmore:\n  %next = add i64 %off, %w\n  br label %loop\nfinish:\n  ret i32 0\nfail:\n  ret i32 -1\n}\n\n");
+        rt_s(hp, "define internal { ptr, i64, i64 } @_cx_read_file(ptr %path, i64 %plen) {\nentry:\n  %c = call ptr @_cx_cstr(ptr %path, i64 %plen)\n  %ci = ptrtoint ptr %c to i64\n  %fd = call i64 @_cx_syscall(i64 2, i64 %ci, i64 0, i64 0, i64 0, i64 0, i64 0)\n  %bad = icmp slt i64 %fd, 0\n  br i1 %bad, label %fail, label %ok\nfail:\n  %clen0 = add i64 %plen, 1\n  call void @_cx_free(ptr %c, i64 %clen0)\n  ret { ptr, i64, i64 } zeroinitializer\nok:\n  %size = call i64 @_cx_syscall(i64 8, i64 %fd, i64 0, i64 2, i64 0, i64 0, i64 0)\n  %back = call i64 @_cx_syscall(i64 8, i64 %fd, i64 0, i64 0, i64 0, i64 0, i64 0)\n  %empty = icmp sle i64 %size, 0\n  br i1 %empty, label %none, label %alloc\nnone:\n  %cl0 = call i64 @_cx_syscall(i64 3, i64 %fd, i64 0, i64 0, i64 0, i64 0, i64 0)\n  %clen1 = add i64 %plen, 1\n  call void @_cx_free(ptr %c, i64 %clen1)\n  ret { ptr, i64, i64 } zeroinitializer\nalloc:\n  %data = call ptr @_cx_alloc(i64 %size)\n  %datapi = ptrtoint ptr %data to i64\n  %r = call i64 @_cx_syscall(i64 0, i64 %fd, i64 %datapi, i64 %size, i64 0, i64 0, i64 0)\n  %cl = call i64 @_cx_syscall(i64 3, i64 %fd, i64 0, i64 0, i64 0, i64 0, i64 0)\n  %clen2 = add i64 %plen, 1\n  call void @_cx_free(ptr %c, i64 %clen2)\n  %neg = icmp slt i64 %r, 0\n  %len = select i1 %neg, i64 0, i64 %r\n  %v0 = insertvalue { ptr, i64, i64 } zeroinitializer, ptr %data, 0\n  %v1 = insertvalue { ptr, i64, i64 } %v0, i64 %len, 1\n  %v2 = insertvalue { ptr, i64, i64 } %v1, i64 %size, 2\n  ret { ptr, i64, i64 } %v2\n}\n\n");
+        rt_s(hp, "define internal i32 @_cx_write_file(ptr %path, i64 %plen, ptr %data, i64 %dlen) {\nentry:\n  %c = call ptr @_cx_cstr(ptr %path, i64 %plen)\n  %ci = ptrtoint ptr %c to i64\n  %fd = call i64 @_cx_syscall(i64 2, i64 %ci, i64 577, i64 420, i64 0, i64 0, i64 0)\n  %bad = icmp slt i64 %fd, 0\n  br i1 %bad, label %fail, label %ok\nfail:\n  %clen0 = add i64 %plen, 1\n  call void @_cx_free(ptr %c, i64 %clen0)\n  ret i32 -1\nok:\n  %wr = call i32 @_cx_write_all(i64 %fd, ptr %data, i64 %dlen)\n  %cl = call i64 @_cx_syscall(i64 3, i64 %fd, i64 0, i64 0, i64 0, i64 0, i64 0)\n  %clen1 = add i64 %plen, 1\n  call void @_cx_free(ptr %c, i64 %clen1)\n  ret i32 %wr\n}\n\n");
+    }
+    let mut need_nl: bool = (*cg).used_print_i64 || (*cg).used_print_u64 || (*cg).used_print_bool || (*cg).used_print_char || (*cg).used_print_str || (*cg).used_print_f64;
     if need_nl {
         let nl: i32 = add_string(cg, "\n");
         rt_s(hp, "define internal void @_cx_newline() {\nentry:\n  %np = ptrtoint ptr @.str");
         rt_i(hp, nl as i64);
         rt_s(hp, " to i64\n  %w = call i64 @_cx_syscall(i64 1, i64 1, i64 %np, i64 1, i64 0, i64 0, i64 0)\n  ret void\n}\n\n");
     }
-    if (*cg).used_print_u64 || (*cg).used_print_i64 {
+    if (*cg).used_print_u64 || (*cg).used_print_i64 || (*cg).used_print_f64 {
         rt_s(hp, "define internal void @_cx_put_u64(i64 %value) {\nentry:\n  %buf = alloca [20 x i8], align 1\n  %pos = alloca i64, align 8\n  %cur = alloca i64, align 8\n  store i64 20, ptr %pos, align 8\n  store i64 %value, ptr %cur, align 8\n  br label %loop\nloop:\n  %p0 = load i64, ptr %pos, align 8\n  %p1 = sub i64 %p0, 1\n  store i64 %p1, ptr %pos, align 8\n  %c0 = load i64, ptr %cur, align 8\n  %rem = urem i64 %c0, 10\n  %d0 = add i64 %rem, 48\n  %d1 = trunc i64 %d0 to i8\n  %slot = getelementptr inbounds [20 x i8], ptr %buf, i64 0, i64 %p1\n  store i8 %d1, ptr %slot, align 1\n  %next = udiv i64 %c0, 10\n  store i64 %next, ptr %cur, align 8\n  %done = icmp eq i64 %next, 0\n  br i1 %done, label %emit, label %loop\nemit:\n  %p2 = load i64, ptr %pos, align 8\n  %sp = getelementptr inbounds [20 x i8], ptr %buf, i64 0, i64 %p2\n  %bp = ptrtoint ptr %sp to i64\n  %n = sub i64 20, %p2\n  %w = call i64 @_cx_syscall(i64 1, i64 1, i64 %bp, i64 %n, i64 0, i64 0, i64 0)\n  ret void\n}\n\n");
         rt_s(hp, "define internal void @_cx_print_u64(i64 %value) {\nentry:\n  call void @_cx_put_u64(i64 %value)\n  call void @_cx_newline()\n  ret void\n}\n\n");
     }
@@ -2822,6 +3198,29 @@ fn gen_helpers(cg: *mut Cg) {
     }
     if (*cg).used_print_str {
         rt_s(hp, "define internal void @_cx_print_str(ptr %p, i64 %n) {\nentry:\n  %pi = ptrtoint ptr %p to i64\n  %w = call i64 @_cx_syscall(i64 1, i64 1, i64 %pi, i64 %n, i64 0, i64 0, i64 0)\n  call void @_cx_newline()\n  ret void\n}\n\n");
+    }
+    if (*cg).used_print_f64 {
+        let nan: i32 = add_string(cg, "nan\n");
+        let inf: i32 = add_string(cg, "inf\n");
+        let ninf: i32 = add_string(cg, "-inf\n");
+        let minus: i32 = add_string(cg, "-");
+        let dot: i32 = add_string(cg, ".");
+        let huge: i32 = add_string(cg, "corex: float too large to print\n");
+        rt_s(hp, "define internal void @_cx_put_pad6(i64 %value) {\nentry:\n  %buf = alloca [6 x i8], align 1\n  %r1 = udiv i64 %value, 10\n  %r2 = udiv i64 %r1, 10\n  %r3 = udiv i64 %r2, 10\n  %r4 = udiv i64 %r3, 10\n  %r5 = udiv i64 %r4, 10\n  %d0 = urem i64 %value, 10\n  %d1 = urem i64 %r1, 10\n  %d2 = urem i64 %r2, 10\n  %d3 = urem i64 %r3, 10\n  %d4 = urem i64 %r4, 10\n  %d5 = urem i64 %r5, 10\n  %c0 = add i64 %d0, 48\n  %c1 = add i64 %d1, 48\n  %c2 = add i64 %d2, 48\n  %c3 = add i64 %d3, 48\n  %c4 = add i64 %d4, 48\n  %c5 = add i64 %d5, 48\n  %b0 = trunc i64 %c0 to i8\n  %b1 = trunc i64 %c1 to i8\n  %b2 = trunc i64 %c2 to i8\n  %b3 = trunc i64 %c3 to i8\n  %b4 = trunc i64 %c4 to i8\n  %b5 = trunc i64 %c5 to i8\n  %p0 = getelementptr inbounds [6 x i8], ptr %buf, i64 0, i64 0\n  %p1 = getelementptr inbounds [6 x i8], ptr %buf, i64 0, i64 1\n  %p2 = getelementptr inbounds [6 x i8], ptr %buf, i64 0, i64 2\n  %p3 = getelementptr inbounds [6 x i8], ptr %buf, i64 0, i64 3\n  %p4 = getelementptr inbounds [6 x i8], ptr %buf, i64 0, i64 4\n  %p5 = getelementptr inbounds [6 x i8], ptr %buf, i64 0, i64 5\n  store i8 %b5, ptr %p0, align 1\n  store i8 %b4, ptr %p1, align 1\n  store i8 %b3, ptr %p2, align 1\n  store i8 %b2, ptr %p3, align 1\n  store i8 %b1, ptr %p4, align 1\n  store i8 %b0, ptr %p5, align 1\n  %bp = ptrtoint ptr %buf to i64\n  %w = call i64 @_cx_syscall(i64 1, i64 1, i64 %bp, i64 6, i64 0, i64 0, i64 0)\n  ret void\n}\n\ndefine internal void @_cx_print_f64(double %value) {\nentry:\n  %isnan = fcmp uno double %value, %value\n  br i1 %isnan, label %nan, label %checkinf\nnan:\n  %np = ptrtoint ptr @.str");
+        rt_i(hp, nan as i64);
+        rt_s(hp, " to i64\n  %nw = call i64 @_cx_syscall(i64 1, i64 1, i64 %np, i64 4, i64 0, i64 0, i64 0)\n  ret void\ncheckinf:\n  %bits = bitcast double %value to i64\n  %absbits = and i64 %bits, 9223372036854775807\n  %isinf = icmp eq i64 %absbits, 9218868437227405312\n  br i1 %isinf, label %inf, label %finite\ninf:\n  %neginf = icmp slt i64 %bits, 0\n  %ip = select i1 %neginf, ptr @.str");
+        rt_i(hp, ninf as i64);
+        rt_s(hp, ", ptr @.str");
+        rt_i(hp, inf as i64);
+        rt_s(hp, "\n  %in = select i1 %neginf, i64 5, i64 4\n  %ipn = ptrtoint ptr %ip to i64\n  %iw = call i64 @_cx_syscall(i64 1, i64 1, i64 %ipn, i64 %in, i64 0, i64 0, i64 0)\n  ret void\nfinite:\n  %neg = icmp slt i64 %bits, 0\n  br i1 %neg, label %negative, label %positive\nnegative:\n  %mp = ptrtoint ptr @.str");
+        rt_i(hp, minus as i64);
+        rt_s(hp, " to i64\n  %mw = call i64 @_cx_syscall(i64 1, i64 1, i64 %mp, i64 1, i64 0, i64 0, i64 0)\n  %magn = fneg double %value\n  br label %emit\npositive:\n  br label %emit\nemit:\n  %x = phi double [ %magn, %negative ], [ %value, %positive ]\n  %toolarge = fcmp oge double %x, 1.0e18\n  br i1 %toolarge, label %fail, label %ok\nfail:\n  call void @_cx_fatal(ptr @.str");
+        rt_i(hp, huge as i64);
+        rt_s(hp, ", i64 ");
+        rt_i(hp, len("corex: float too large to print\n") as i64);
+        rt_s(hp, ")\n  unreachable\nok:\n  %i = fptoui double %x to i64\n  %fi = uitofp i64 %i to double\n  %frac = fsub double %x, %fi\n  %scaled = fmul double %frac, 1000000.0\n  %f6 = fptoui double %scaled to i64\n  call void @_cx_put_u64(i64 %i)\n  %dp = ptrtoint ptr @.str");
+        rt_i(hp, dot as i64);
+        rt_s(hp, " to i64\n  %dw = call i64 @_cx_syscall(i64 1, i64 1, i64 %dp, i64 1, i64 0, i64 0, i64 0)\n  call void @_cx_put_pad6(i64 %f6)\n  call void @_cx_newline()\n  ret void\n}\n\n");
     }
     if (*cg).used_cstr_len || (*cg).used_cstr_str {
         rt_s(hp, "define internal i64 @_cx_cstr_len(ptr %s) {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [ 0, %entry ], [ %next, %body ]\n  %p = getelementptr inbounds i8, ptr %s, i64 %i\n  %c = load i8, ptr %p, align 1\n  %stop = icmp eq i8 %c, 0\n  br i1 %stop, label %done, label %body\nbody:\n  %next = add i64 %i, 1\n  br label %loop\ndone:\n  ret i64 %i\n}\n\n");
@@ -2930,6 +3329,8 @@ fn cg_init(a: *mut Arena, sem: *mut Sem, sanitize: bool, hosted: bool,
         (*cg).used_print_bool = false;
         (*cg).used_print_char = false;
         (*cg).used_print_str = false;
+        (*cg).used_print_f64 = false;
+        (*cg).used_file_io = false;
         (*cg).used_fatal = false;
         (*cg).used_cstr_len = false;
         (*cg).used_cstr_str = false;

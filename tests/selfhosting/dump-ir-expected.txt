@@ -1,3 +1,11 @@
+## floats
+@@ -1,5 +1,5 @@
+ define double @negate(double %)
+-define double @pick(double %, double %, i8 %)
++define double @pick(double %, double %, i1 %)
+ define double @scale(double %, float %)
+ define i32 @main()
+ define void @_start()
 ## slices
 @@ -1,11 +1,11 @@
 -define i32 @first(ptr %)

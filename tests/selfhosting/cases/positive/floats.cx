@@ -1,0 +1,78 @@
+// Floating point: literals, arithmetic, comparisons, casts, ABI, and print.
+struct V { x: f64, y: f32 }
+const PI: f64 = 3.5;
+
+fn scale(x: f64, k: f32) -> f64 { return x * (k as f64); }
+fn negate(x: f64) -> f64 { return -x; }
+fn pick(a: f64, b: f64, first: bool) -> f64 {
+    if first { return a; }
+    return b;
+}
+
+fn main() -> i32 {
+    let a: f64 = 1.5;
+    let b: f64 = 0.1;
+    let c: f64 = 3.141592653589793;
+    print(a);
+    print(b);
+    print(c);
+    print(a + b);
+    print(a - b);
+    print(a * b);
+    print(a / b);
+    print(7.5 % 2.0);
+    print(1.0e10);
+    print(1.0e-6);
+    print(1.0e17);
+    print(PI);
+    print(negate(2.25));
+    print(scale(2.0, 1.5));
+    print(pick(9.5, 8.5, true));
+    print(pick(9.5, 8.5, false));
+    print(a < b);
+    print(a <= a);
+    print(a > b);
+    print(a >= b);
+    print(a == 1.5);
+    print(a != 1.5);
+    let i: i32 = -7;
+    print(i as f64);
+    let u: u8 = 255;
+    print(u as f64);
+    let big: i64 = 9007199254740993;
+    print(big as f64);
+    let t: i32 = 3.99 as f64 as i32;
+    print(t);
+    let nt: i32 = -3.99 as f64 as i32;
+    print(nt);
+    let fu: u64 = 12.75 as f64 as u64;
+    print(fu);
+    let f32v: f32 = 1.25;
+    let wide: f64 = f32v as f64;
+    print(wide);
+    let narrow: f32 = c as f32;
+    print(narrow as f64);
+    let f32sum: f32 = f32v + 0.5;
+    print(f32sum);
+    print(f32v * f32v);
+    print(0.0 / 0.0);
+    print(1.0 / 0.0);
+    print(-1.0 / 0.0);
+    let z: f64 = 0.0;
+    let nz: f64 = -0.0;
+    print(z);
+    print(nz);
+    print(0.0000004);
+    print(999999.9999999);
+    print(sizeof(f32));
+    print(sizeof(f64));
+    print(alignof(f32));
+    print(alignof(f64));
+    print(sizeof(V));
+    let v: V = V { x: 2.5, y: 1.5 };
+    print(v.x + (v.y as f64));
+    let mut arr: [f64; 3] = [1.5, 2.5, 3.5];
+    arr[1] = arr[0] + arr[2];
+    print(arr[1]);
+    return 0;
+}

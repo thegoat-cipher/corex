@@ -1,0 +1,31 @@
+fn main() -> i32 {
+    let data: [u8] = "hello world";
+    let r: i32 = write_file("/tmp/corex_io_a.bin", data);
+    print(r);
+    let v: vec<u8> = read_file("/tmp/corex_io_a.bin");
+    print(len(v));
+    print(v[0]);
+    print(v[10]);
+    let mut arr: [u8; 4] = [65, 66, 67, 68];
+    let w2: i32 = write_file("/tmp/corex_io_b.bin", &arr);
+    print(w2);
+    let v2: vec<u8> = read_file("/tmp/corex_io_b.bin");
+    print(len(v2));
+    print(v2[3]);
+    let bad: i32 = write_file("/nonexistent-dir/corex.bin", data);
+    print(bad);
+    let missing: vec<u8> = read_file("/nonexistent-corex-file.bin");
+    print(len(missing));
+    let mut cbuf: [u8; 8] = [0; 8];
+    let mut cp: *mut u8 = &mut cbuf[0];
+    unsafe {
+        let c: cstr = str_to_cstr(cp, 8, "abc");
+        print(cstr_len(c));
+        print(cstr_to_str(c));
+        let sl: [u8] = "xy";
+        let c2: cstr = str_to_cstr(cp, 8, sl);
+        print(cstr_len(c2));
+        print(cstr_to_str(c2));
+    }
+    return 0;
+}

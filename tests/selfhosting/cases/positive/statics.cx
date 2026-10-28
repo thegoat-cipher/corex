@@ -1,0 +1,57 @@
+// Static aggregate initializers: arrays, nested arrays, structs, str, byte
+// strings, repeat literals, copies of earlier globals, and &global addresses.
+struct Pair { a: i32, b: i32 }
+struct Mixed { name: str, xs: [i32; 2], p: Pair, tag: char, flag: bool, ratio: f64 }
+enum Mode { Off, On = 3 }
+
+const LIMIT: i32 = 5;
+const GREETING: str = "hey";
+
+static mut COUNTER: i32 = 41;
+static A: [i32; 3] = [7, 8, 9];
+static NESTED: [[i32; 2]; 2] = [[1, 2], [3, 4]];
+static TABLE: [u8; 4] = "abcd";
+static ZEROS: [i32; 4] = [0; 4];
+static P0: Pair = Pair { a: 11, b: 22 };
+static M: Mixed = Mixed { name: "x", xs: [5, 6], p: Pair { a: 7, b: 8 }, tag: 'z', flag: true, ratio: 2.5 };
+static NAME: str = "hello";
+static ALIAS: str = GREETING;
+static COPY: [i32; 3] = A;
+static COPY2: Pair = P0;
+static ADDR: *i32 = &COUNTER;
+static B: bool = true;
+static CH: char = 'a';
+static MODE: Mode = Mode::On;
+static NEG: i32 = -5;
+static PI: f64 = 1.5;
+static EQS: [i32; 3] = [LIMIT, LIMIT + 1, 0 - LIMIT];
+
+fn main() -> i32 {
+    print(A[0]);
+    print(A[2]);
+    print(NESTED[1][0]);
+    print(NESTED[1][1]);
+    print(TABLE[1]);
+    print(TABLE[3]);
+    print(ZEROS[3]);
+    print(P0.a + P0.b);
+    print(M.xs[1] + M.p.b);
+    print(M.tag as i32);
+    print(M.flag);
+    print(M.ratio);
+    print(M.name);
+    print(NAME);
+    print(ALIAS);
+    print(COPY[2]);
+    print(COPY2.b);
+    print(B);
+    print(CH as i32);
+    print(MODE as i32);
+    print(NEG);
+    print(PI);
+    print(EQS[0]);
+    print(EQS[1]);
+    print(EQS[2]);
+    unsafe { print(*ADDR); }
+    return 0;
+}

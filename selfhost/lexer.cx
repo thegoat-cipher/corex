@@ -12,10 +12,10 @@ struct Diag {
     file: i32,
     line: i32,
     col: i32,
-    msg: str,
     // Diagnostic code (`W0001` etc.) and severity for lint output; frontend
     // errors leave `code` empty and render without a bracket code.
     code: str,
+    msg: str,
     warn: bool,
     next: *mut Diag,
 }
@@ -31,13 +31,17 @@ fn diags_new() -> Diags {
 }
 
 fn diag_add(d: *mut Diags, a: *mut Arena, file: i32, line: i32, col: i32, msg: str) {
+    diag_addc(d, a, file, line, col, "", msg);
+}
+
+fn diag_addc(d: *mut Diags, a: *mut Arena, file: i32, line: i32, col: i32, code: str, msg: str) {
     let p: *mut Diag = rt_alloc(a, sizeof(Diag)) as *mut Diag;
     unsafe {
         (*p).file = file;
         (*p).line = line;
         (*p).col = col;
+        (*p).code = code;
         (*p).msg = msg;
-        (*p).code = "";
         (*p).warn = false;
         (*p).next = null;
         if (*d).tail == null {
@@ -160,6 +164,18 @@ fn lx_bump(l: *mut Lex) {
 fn lx_error(l: *mut Lex, msg: str) {
     unsafe {
         diag_add((*l).d, (*l).a, (*l).file, (*l).line, (*l).col, msg);
+    }
+}
+
+fn lx_errorc(l: *mut Lex, code: str, msg: str) {
+    unsafe {
+        diag_addc((*l).d, (*l).a, (*l).file, (*l).line, (*l).col, code, msg);
+    }
+}
+
+fn lx_error_atc(l: *mut Lex, line: i32, col: i32, code: str, msg: str) {
+    unsafe {
+        diag_addc((*l).d, (*l).a, (*l).file, line, col, code, msg);
     }
 }
 
@@ -331,7 +347,7 @@ fn lx_decode(b: *mut Buf, l: *mut Lex, quote: u8) -> str {
     loop {
         let c: u8 = lx_at(l);
         if c == 0 {
-            lx_error(l, "unterminated string literal");
+            lx_errorc(l, "E0002", "unterminated string literal");
             break;
         }
         if c == quote {
@@ -342,7 +358,7 @@ fn lx_decode(b: *mut Buf, l: *mut Lex, quote: u8) -> str {
             lx_bump(l);
             let e: u8 = lx_at(l);
             if e == 0 {
-                lx_error(l, "unterminated escape");
+                lx_errorc(l, "E0005", "unterminated escape");
                 break;
             }
             lx_bump(l);
@@ -364,7 +380,7 @@ fn lx_decode(b: *mut Buf, l: *mut Lex, quote: u8) -> str {
                 let h1: u8 = lx_at(l);
                 let h2: u8 = lx_peek(l, 1);
                 if !lx_hexdigit(h1) || !lx_hexdigit(h2) {
-                    lx_error(l, "invalid hex escape");
+                    lx_errorc(l, "E0005", "invalid hex escape");
                 } else {
                     let v: i32 = lx_hexval(h1) * 16 + lx_hexval(h2);
                     rt_b(b, v as u8);
@@ -372,7 +388,7 @@ fn lx_decode(b: *mut Buf, l: *mut Lex, quote: u8) -> str {
                     lx_bump(l);
                 }
             } else {
-                lx_error(l, "unknown escape sequence");
+                lx_errorc(l, "E0005", "unknown escape sequence");
             }
             continue;
         }
@@ -431,10 +447,10 @@ fn lx_lex_char(l: *mut Lex) {
                 lx_bump(l);
                 lx_bump(l);
             } else {
-                lx_error(l, "invalid hex escape");
+                lx_errorc(l, "E0006", "invalid hex escape");
             }
         } else {
-            lx_error(l, "unknown escape sequence");
+            lx_errorc(l, "E0006", "unknown escape sequence");
         }
         unsafe { (*t).ival = v as i64; }
     } else {
@@ -444,7 +460,7 @@ fn lx_lex_char(l: *mut Lex) {
     if lx_at(l) == 39 {
         lx_bump(l);
     } else {
-        lx_error(l, "unterminated character literal");
+        lx_errorc(l, "E0006", "unterminated character literal");
     }
     unsafe {
         (*t).len = (*l).pos - (*t).start;
@@ -477,23 +493,49 @@ fn lx_lex_number(l: *mut Lex) {
             lx_bump(l);
             continue;
         }
-        if !lx_hexdigit(c) {
+        let mut isdig: bool = false;
+        if base == 16 {
+            isdig = lx_hexdigit(c);
+        } else {
+            isdig = lx_digit(c);
+        }
+        if !isdig {
             break;
         }
         let d: u64 = lx_hexval(c) as u64;
         if d >= base {
-            lx_error(l, "digit out of range for base");
+            lx_errorc(l, "E0004", "digit out of range for base");
         }
-        v = v * base + d;
+        if v > (18446744073709551615 - d) / base {
+            lx_errorc(l, "E0004", "integer literal does not fit in `u64`");
+            v = 18446744073709551615;
+        } else {
+            v = v * base + d;
+        }
         lx_bump(l);
     }
     if base == 10 && ((lx_at(l) == 46 && lx_digit(lx_peek(l, 1)))
                       || lx_at(l) == 101 || lx_at(l) == 69) {
         unsafe { (*t).kind = T::Float; }
+        let mut start_line: i32 = 0;
+        let mut start_col: i32 = 0;
+        unsafe {
+            start_line = (*t).line;
+            start_col = (*t).col;
+        }
+        let mut bad: bool = false;
         if lx_at(l) == 46 {
             lx_bump(l);
-            while lx_digit(lx_at(l)) {
+            let mut fdigits: i32 = 0;
+            while lx_digit(lx_at(l)) || lx_at(l) == 95 {
+                if lx_at(l) != 95 {
+                    fdigits = fdigits + 1;
+                }
                 lx_bump(l);
+            }
+            if fdigits == 0 {
+                lx_error_atc(l, start_line, start_col, "E0004", "expected digits after the decimal point");
+                bad = true;
             }
         }
         if lx_at(l) == 101 || lx_at(l) == 69 {
@@ -501,10 +543,56 @@ fn lx_lex_number(l: *mut Lex) {
             if lx_at(l) == 45 || lx_at(l) == 43 {
                 lx_bump(l);
             }
-            while lx_digit(lx_at(l)) {
+            let mut edigits: i32 = 0;
+            while lx_digit(lx_at(l)) || lx_at(l) == 95 {
+                if lx_at(l) != 95 {
+                    edigits = edigits + 1;
+                }
+                lx_bump(l);
+            }
+            if edigits == 0 {
+                lx_error_atc(l, start_line, start_col, "E0004", "expected digits in the exponent");
+                bad = true;
+            }
+        }
+        let mut num_end: usize = 0;
+        unsafe { num_end = (*l).pos; }
+        let mut suf_line: i32 = 0;
+        let mut suf_col: i32 = 0;
+        unsafe {
+            suf_line = (*l).line;
+            suf_col = (*l).col;
+        }
+        let mut has_suffix: bool = false;
+        if lx_ident_char(lx_at(l)) {
+            has_suffix = true;
+            while lx_ident_char(lx_at(l)) {
                 lx_bump(l);
             }
         }
+        let mut text: str = "";
+        unsafe { text = rt_slice((*l).src, start, num_end); }
+        let mut ok: bool = true;
+        let bits: i64 = rt_f64_bits(text, &mut ok);
+        if !bad && has_suffix {
+            lx_error_atc(l, suf_line, suf_col, "E0004", "invalid suffix on float literal (CoreX has no literal suffixes; use `as` to convert)");
+            bad = true;
+        }
+        if !bad && !ok {
+            lx_error_atc(l, start_line, start_col, "E0004", "float literal is out of range");
+        }
+        unsafe {
+            (*t).ival = bits;
+            (*t).len = (*l).pos - start;
+            (*t).text = text;
+        }
+        return;
+    }
+    if lx_ident_char(lx_at(l)) {
+        while lx_ident_char(lx_at(l)) {
+            lx_bump(l);
+        }
+        lx_errorc(l, "E0004", "invalid suffix on integer literal (CoreX has no literal suffixes; use `as` to convert)");
     }
     unsafe {
         (*t).ival = v as i64;
@@ -682,7 +770,7 @@ fn lx_run(a: *mut Arena, f: *mut Src, d: *mut Diags) -> TokArr {
         }
         let kind: T = lx_punct(l);
         if kind == T::Eof {
-            lx_error(l, "unexpected character");
+            lx_errorc(l, "E0001", "unexpected character");
             lx_bump(l);
             continue;
         }

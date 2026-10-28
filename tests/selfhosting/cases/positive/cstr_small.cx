@@ -1,0 +1,10 @@
+// `str_to_cstr` aborts with exit 101 when the buffer cannot hold the NUL.
+fn main() -> i32 {
+    let mut buf: [u8; 2] = [0; 2];
+    let mut p: *mut u8 = &mut buf[0];
+    unsafe {
+        let c: cstr = str_to_cstr(p, 2, "abc");
+        print(cstr_len(c));
+    }
+    return 0;
+}

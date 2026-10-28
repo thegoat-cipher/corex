@@ -29,6 +29,14 @@ fn sdiag(s: *mut Sem, file: i32, line: i32, col: i32, msg: str) {
     }
 }
 
+fn sdiagc(s: *mut Sem, code: str, file: i32, line: i32, col: i32, msg: str) {
+    unsafe {
+    diag_addc((*s).d, (*s).a, file, line, col, code, msg);
+    (*s).errors = (*s).errors + 1;
+
+    }
+}
+
 fn tkind_of(t: *mut Type) -> K {
     unsafe {
     return (*t).kind;
@@ -56,6 +64,45 @@ fn type_is_signed(t: *mut Type) -> bool {
     return k == K::I8 || k == K::I16 || k == K::I32 || k == K::I64 || k == K::Isize;
 
     }
+}
+
+fn type_is_float(t: *mut Type) -> bool {
+    unsafe {
+    if t == null {
+        return false;
+    }
+    return (*t).kind == K::F32 || (*t).kind == K::F64;
+
+    }
+}
+
+// Integer types that participate in `as` conversions to and from floats.
+// `char` and enums are distinct from `Int` in the reference type model, so
+// char/enum <-> float casts stay rejected.
+fn type_is_num(t: *mut Type) -> bool {
+    unsafe {
+    if t == null {
+        return false;
+    }
+    let k: K = (*t).kind;
+    return k == K::I8 || k == K::I16 || k == K::I32 || k == K::I64
+        || k == K::U8 || k == K::U16 || k == K::U32 || k == K::U64
+        || k == K::Usize || k == K::Isize;
+
+    }
+}
+
+// Largest literal magnitude accepted for an integer type, mirroring the
+// oracle's `IntTy::max_literal`. Non-int kinds (char) are unbounded here.
+fn int_max_literal(k: K) -> u64 {
+    if k == K::I8 { return 127; }
+    if k == K::I16 { return 32767; }
+    if k == K::I32 { return 2147483647; }
+    if k == K::I64 || k == K::Isize { return 9223372036854775807; }
+    if k == K::U8 { return 255; }
+    if k == K::U16 { return 65535; }
+    if k == K::U32 { return 4294967295; }
+    return 18446744073709551615;
 }
 
 fn type_ok(s: *mut Sem, t: *mut Type) -> bool {
@@ -944,6 +991,130 @@ fn eval_int(s: *mut Sem, e: *mut Expr) -> i64 {
     }
 }
 
+// Evaluate a constant float expression to binary64 bits. Only literal, unary
+// minus, float-typed constant references, and float casts are folded; anything
+// else is reported instead of silently producing a wrong constant.
+fn eval_float_bits(s: *mut Sem, e: *mut Expr) -> i64 {
+    unsafe {
+    if e == null {
+        return 0;
+    }
+    let k: E = (*e).kind;
+    if k == E::FloatLit {
+        return (*e).ival;
+    }
+    if k == E::Ident {
+        let d: *mut Decl = lookup(s, (*e).name);
+        if d != null && (*d).kind == D::Const && (*d).cval_kind == 3 {
+            return (*d).cval;
+        }
+        sdiag(s, (*e).file, (*e).line, (*e).col, "float constant initializer must be a literal");
+        return 0;
+    }
+    if k == E::Unary && (*e).op == T::Minus {
+        let bits: i64 = eval_float_bits(s, (*e).lhs);
+        let one: i64 = 1;
+        let sign: i64 = one << 63;
+        return bits ^ sign;
+    }
+    if k == E::Cast {
+        let to: *mut Type = (*e).ty;
+        let bits2: i64 = eval_float_bits(s, (*e).lhs);
+        if to != null && (*to).kind == K::F32 {
+            return rt_f32_as_f64(rt_f64_as_f32(bits2));
+        }
+        if to != null && (*to).kind == K::F64 {
+            return bits2;
+        }
+    }
+    sdiag(s, (*e).file, (*e).line, (*e).col, "float constant initializer must be a literal");
+    return 0;
+
+    }
+}
+
+// True when `cand` is declared before `cur` in the global list. A static
+// initializer may only copy globals that are already initialized, which also
+// rules out self-reference and cycles.
+fn global_before(s: *mut Sem, cand: *mut Decl, cur: *mut Decl) -> bool {
+    unsafe {
+    let mut d: *mut Decl = (*s).globals;
+    while d != null {
+        if d == cur {
+            return false;
+        }
+        if d == cand {
+            return true;
+        }
+        d = (*d).next;
+    }
+    return false;
+
+    }
+}
+
+// Constant expressions accepted in global initializers: literals, enum
+// variants, previously declared globals and constants, `sizeof`/`alignof`/
+// `offsetof`, `&global`, unary/binary arithmetic, casts, and aggregate
+// literals built from those. Nothing here runs at load time.
+fn is_const_expr(s: *mut Sem, e: *mut Expr, cur: *mut Decl) -> bool {
+    unsafe {
+    if e == null {
+        return true;
+    }
+    let k: E = (*e).kind;
+    if k == E::IntLit || k == E::FloatLit || k == E::StrLit || k == E::CharLit
+        || k == E::BoolLit || k == E::NullLit || k == E::Path
+        || k == E::Sizeof || k == E::Alignof || k == E::Offsetof {
+        return true;
+    }
+    if k == E::Ident {
+        if (*e).decl == null {
+            return false;
+        }
+        let d: *mut Decl = (*e).decl;
+        if (*d).kind == D::Const {
+            return true;
+        }
+        if (*d).kind == D::Global {
+            return global_before(s, d, cur);
+        }
+        return false;
+    }
+    if k == E::Unary {
+        if (*e).op == T::Amp {
+            if (*e).lhs != null && (*(*e).lhs).kind == E::Ident
+                && (*(*e).lhs).decl != null && (*(*(*e).lhs).decl).kind == D::Global {
+                return true;
+            }
+            return false;
+        }
+        return is_const_expr(s, (*e).lhs, cur);
+    }
+    if k == E::Binary {
+        return is_const_expr(s, (*e).lhs, cur) && is_const_expr(s, (*e).rhs, cur);
+    }
+    if k == E::Cast {
+        return is_const_expr(s, (*e).lhs, cur);
+    }
+    if k == E::StructLit || k == E::ArrayLit {
+        let mut a: *mut Expr = (*e).args;
+        while a != null {
+            if !is_const_expr(s, a, cur) {
+                return false;
+            }
+            a = (*a).next;
+        }
+        if k == E::ArrayLit && (*e).rhs != null {
+            return is_const_expr(s, (*e).rhs, cur);
+        }
+        return true;
+    }
+    return false;
+
+    }
+}
+
 fn is_untyped(e: *mut Expr) -> bool {
     unsafe {
     if e == null {
@@ -1037,16 +1208,25 @@ fn check_expr(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
     let k: E = (*e).kind;
     if k == E::IntLit {
         if expected != null && type_is_int(expected) {
+            if ((*e).ival as u64) > int_max_literal((*expected).kind) {
+                sdiagc(s, "E0215", (*e).file, (*e).line, (*e).col, "integer literal does not fit in the annotated type");
+            }
             (*e).ty = expected;
             return expected;
+        }
+        if ((*e).ival as u64) > 2147483647 {
+            sdiagc(s, "E0215", (*e).file, (*e).line, (*e).col, "integer literal does not fit in `i32`");
         }
         let t: *mut Type = type_new((*s).a, K::I32);
         (*e).ty = t;
         return t;
     }
     if k == E::FloatLit {
-        sdiag(s, (*e).file, (*e).line, (*e).col, "floating point is not supported by the bootstrap compiler");
-        let t: *mut Type = type_new((*s).a, K::I32);
+        let mut kind: K = K::F64;
+        if expected != null && ((*expected).kind == K::F32 || (*expected).kind == K::F64) {
+            kind = (*expected).kind;
+        }
+        let t: *mut Type = type_new((*s).a, kind);
         (*e).ty = t;
         return t;
     }
@@ -1088,7 +1268,7 @@ fn check_expr(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
     if k == E::Ident {
         let d: *mut Decl = lookup(s, (*e).name);
         if d == null {
-            sdiag(s, (*e).file, (*e).line, (*e).col, "undefined name");
+            sdiagc(s, "E0201", (*e).file, (*e).line, (*e).col, "undefined name");
             let t: *mut Type = type_new((*s).a, K::I32);
             (*e).ty = t;
             return t;
@@ -1177,7 +1357,7 @@ fn check_expr(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
         if (*e).rhs != null && (*bt).kind == K::Array && (*((*e).rhs)).kind == E::IntLit {
             let v: i64 = (*((*e).rhs)).ival;
             if v < 0 || v >= (*bt).len as i64 {
-                sdiag(s, (*((*e).rhs)).file, (*((*e).rhs)).line, (*((*e).rhs)).col, "array index is out of bounds");
+                sdiagc(s, "E0222", (*((*e).rhs)).file, (*((*e).rhs)).line, (*((*e).rhs)).col, "array index is out of bounds");
             }
         }
         (*e).opty = bt;
@@ -1194,7 +1374,7 @@ fn check_expr(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
         } else if bk == K::Slice || bk == K::Str {
             res = bt;
         } else {
-            sdiag(s, (*e).file, (*e).line, (*e).col, "cannot slice a value of this type");
+            sdiagc(s, "E0213", (*e).file, (*e).line, (*e).col, "cannot slice a value of this type");
             res = type_new((*s).a, K::Slice);
             (*res).elem = type_new((*s).a, K::I32);
         }
@@ -1275,7 +1455,7 @@ fn check_expr(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
             }
             let bt: *mut Type = resolve_type(s, check_expr(s, (*e).lhs, null));
             if (*e).is_mut && !place_mut(s, (*e).lhs) {
-                sdiag(s, (*e).file, (*e).line, (*e).col, "cannot take a mutable reference to this place");
+                sdiagc(s, "E0220", (*e).file, (*e).line, (*e).col, "cannot take a mutable reference to this place");
             }
             (*e).opty = bt;
             if expected != null && (*expected).kind == K::Slice && (*bt).kind == K::Array
@@ -1308,9 +1488,29 @@ fn check_expr(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
             return (*e).ty;
         }
         if op == T::Minus {
+            if (*e).lhs != null && (*(*e).lhs).kind == E::IntLit {
+                let lit: *mut Expr = (*e).lhs;
+                let mut et: *mut Type = null;
+                if expected != null && type_is_int(expected) {
+                    et = resolve_type(s, expected);
+                } else {
+                    et = type_new((*s).a, K::I32);
+                }
+                let v: u64 = (*lit).ival as u64;
+                // The oracle accepts `max + 1` for signed targets (so MIN is
+                // spellable) and any magnitude for unsigned targets.
+                let lim: u64 = int_max_literal((*et).kind);
+                if type_is_signed(et) && v > lim + 1 {
+                    sdiagc(s, "E0215", (*lit).file, (*lit).line, (*lit).col, "integer literal does not fit in the annotated type");
+                }
+                (*lit).ty = et;
+                (*e).opty = et;
+                (*e).ty = et;
+                return et;
+            }
             let bt: *mut Type = resolve_type(s, check_expr(s, (*e).lhs, expected));
-            if !type_is_int(bt) {
-                sdiag(s, (*e).file, (*e).line, (*e).col, "unary minus requires an integer");
+            if !type_is_int(bt) && !type_is_float(bt) {
+                sdiag(s, (*e).file, (*e).line, (*e).col, "unary minus requires a number");
             }
             (*e).opty = bt;
             (*e).ty = bt;
@@ -1339,18 +1539,24 @@ fn check_expr(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
         let to_i: bool = type_is_int(tt);
         let from_p: bool = type_is_ptr_like(bt);
         let to_p: bool = type_is_ptr_like(tt);
+        let from_f: bool = type_is_float(bt);
+        let to_f: bool = type_is_float(tt);
+        let from_n: bool = type_is_num(bt);
+        let to_n: bool = type_is_num(tt);
         if (*bt).kind == K::Enum && to_i {
             // enum -> integer
         } else if from_i && to_i {
             // integer -> integer
         } else if from_p && to_p {
             // pointer -> pointer
+        } else if (from_n && to_f) || (from_f && to_n) || (from_f && to_f) {
+            // integer <-> float and float <-> float
         } else if (from_i && to_p) || (from_p && to_i) {
             if (*s).unsafe_depth == 0 {
                 sdiag(s, (*e).file, (*e).line, (*e).col, "integer/pointer casts require unsafe");
             }
         } else {
-            sdiag(s, (*e).file, (*e).line, (*e).col, "invalid cast");
+            sdiagc(s, "E0210", (*e).file, (*e).line, (*e).col, "invalid cast");
         }
         (*e).opty = bt;
         (*e).ty = tt;
@@ -1536,10 +1742,8 @@ fn check_binary(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
                     sdiag(s, (*e).file, (*e).line, (*e).col, "null comparison requires a pointer");
                     t2 = t1;
                 }
-            } else if is_untyped((*e).rhs) && type_is_int(t1) {
-                t2 = resolve_type(s, ck(s, (*e).rhs, t1));
             } else {
-                t2 = resolve_type(s, ck(s, (*e).rhs, null));
+                t2 = resolve_type(s, ck(s, (*e).rhs, t1));
             }
             if is_untyped((*e).lhs) && type_is_int(t2) {
                 t1 = resolve_type(s, ck(s, (*e).lhs, t2));
@@ -1559,7 +1763,11 @@ fn check_binary(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
         return bt;
     }
     let mut t1: *mut Type = null;
-    if op == T::Plus || op == T::Minus {
+    // Pointer arithmetic detection. An untyped integer literal cannot be a
+    // pointer, and checking it without the expected type would reject large
+    // literals such as `(u64::MAX - d) / base` before the expected type
+    // reaches them, so the oracle skips this pre-check for literals too.
+    if (op == T::Plus || op == T::Minus) && !is_untyped((*e).lhs) {
         let l0: *mut Type = resolve_type(s, ck(s, (*e).lhs, null));
         if !type_ok(s, l0) {
             sdiag(s, (*e).file, (*e).line, (*e).col, "internal: invalid operand type");
@@ -1582,7 +1790,7 @@ fn check_binary(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
             return l0;
         }
     }
-    if expected != null && type_is_int(expected) {
+    if expected != null && (type_is_int(expected) || type_is_float(expected)) {
         t1 = resolve_type(s, ck(s, (*e).lhs, expected));
     } else {
         t1 = resolve_type(s, ck(s, (*e).lhs, null));
@@ -1590,6 +1798,17 @@ fn check_binary(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
     let t2: *mut Type = resolve_type(s, ck(s, (*e).rhs, t1));
     if is_untyped((*e).lhs) && type_is_int(t2) {
         t1 = resolve_type(s, ck(s, (*e).lhs, t2));
+    }
+    if type_is_float(t1) || type_is_float(t2) {
+        if !type_is_float(t1) || !type_is_float(t2) || !type_eq(t1, t2) {
+            sdiagc(s, "E0203", (*((*e).rhs)).file, (*((*e).rhs)).line, (*((*e).rhs)).col, "arithmetic operands have different types");
+        } else if op != T::Plus && op != T::Minus && op != T::Star
+            && op != T::Slash && op != T::Percent {
+            sdiagc(s, "E0210", (*e).file, (*e).line, (*e).col, "operator is not defined for floating-point operands");
+        }
+        (*e).opty = t1;
+        (*e).ty = t1;
+        return t1;
     }
     if !type_is_int(t1) || !type_is_int(t2) {
         if (*t1).kind == K::Bool && (*t2).kind == K::Bool {
@@ -1625,6 +1844,8 @@ fn builtin_id(name: str) -> i32 {
     if rt_eq(name, "vec_push") { return 14; }
     if rt_eq(name, "vec_free") { return 15; }
     if rt_eq(name, "vec_slice") { return 16; }
+    if rt_eq(name, "read_file") { return 17; }
+    if rt_eq(name, "write_file") { return 18; }
     return 0;
 
     }
@@ -1717,13 +1938,13 @@ fn check_call(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
             let mut n: i32 = 0;
             while par != null {
                 if arg == null {
-                    sdiag(s, (*e).file, (*e).line, (*e).col, "missing function argument");
+                    sdiagc(s, "E0204", (*e).file, (*e).line, (*e).col, "missing function argument");
                     break;
                 }
                 let pt: *mut Type = resolve_type(s, (*par).ty);
                 let at: *mut Type = resolve_type(s, check_expr(s, arg, pt));
                 if !type_compat(pt, at) {
-                    sdiag(s, (*arg).file, (*arg).line, (*arg).col, "argument type mismatch");
+                    sdiagc(s, "E0203", (*arg).file, (*arg).line, (*arg).col, "argument type mismatch");
                 }
                 arg = (*arg).next;
                 par = (*par).next;
@@ -1738,7 +1959,7 @@ fn check_call(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
                     arg = (*arg).next;
                 }
             } else if arg != null {
-                sdiag(s, (*e).file, (*e).line, (*e).col, "too many function arguments");
+                sdiagc(s, "E0204", (*e).file, (*e).line, (*e).col, "too many function arguments");
             }
             let rt: *mut Type = resolve_type(s, (*d).ty);
             (*e).ty = rt;
@@ -1750,13 +1971,19 @@ fn check_call(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
     if bid == 1 {
         let arg: *mut Expr = (*e).args;
         if arg == null || (*arg).next != null {
-            sdiag(s, (*e).file, (*e).line, (*e).col, "print takes one argument");
+            sdiagc(s, "E0204", (*e).file, (*e).line, (*e).col, "print takes one argument");
+        }
+        if arg == null {
+            let vt0: *mut Type = type_new((*s).a, K::Void);
+            (*e).ty = vt0;
+            return vt0;
         }
         let at: *mut Type = resolve_type(s, check_expr(s, arg, null));
         let kk: K = (*at).kind;
         let printable: bool = type_is_int(at) || kk == K::Bool || kk == K::Str
             || (kk == K::Array && (*((*at).elem)).kind == K::U8)
-            || (kk == K::Slice && (*((*at).elem)).kind == K::U8) || kk == K::Enum;
+            || (kk == K::Slice && (*((*at).elem)).kind == K::U8) || kk == K::Enum
+            || kk == K::F32 || kk == K::F64;
         if !printable {
             sdiag(s, (*e).file, (*e).line, (*e).col, "print does not accept this type");
         }
@@ -1768,7 +1995,11 @@ fn check_call(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
     if bid == 2 {
         let arg: *mut Expr = (*e).args;
         if arg == null || (*arg).next != null {
-            sdiag(s, (*e).file, (*e).line, (*e).col, "len takes one argument");
+            sdiagc(s, "E0204", (*e).file, (*e).line, (*e).col, "len takes one argument");
+        }
+        if arg == null {
+            (*e).ty = ut;
+            return ut;
         }
         let at: *mut Type = resolve_type(s, check_expr(s, arg, null));
         let kk: K = (*at).kind;
@@ -1852,6 +2083,13 @@ fn check_call(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
     }
     if bid == 8 {
         let arg: *mut Expr = (*e).args;
+        if arg == null {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "data_ptr takes one argument");
+            let u8z: *mut Type = type_new((*s).a, K::U8);
+            let tz: *mut Type = type_ptr((*s).a, u8z, false);
+            (*e).ty = tz;
+            return tz;
+        }
         let at: *mut Type = resolve_type(s, check_expr(s, arg, null));
         let kk: K = (*at).kind;
         if kk != K::Str && kk != K::Slice {
@@ -1921,7 +2159,7 @@ fn check_call(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
             }
         }
         if !inferred {
-            sdiag(s, (*e).file, (*e).line, (*e).col, "cannot infer the element type of vec_new; annotate the binding or context");
+            sdiagc(s, "E0230", (*e).file, (*e).line, (*e).col, "cannot infer the element type of vec_new; annotate the binding or context");
             let bad: *mut Type = type_new((*s).a, K::I32);
             (*e).ty = bad;
             return bad;
@@ -1960,7 +2198,7 @@ fn check_call(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
             if okv {
                 let vt: *mut Type = resolve_type(s, check_expr(s, val, elem));
                 if !type_compat(elem, vt) {
-                    sdiag(s, (*val).file, (*val).line, (*val).col, "vec_push value type mismatch");
+                    sdiagc(s, "E0203", (*val).file, (*val).line, (*val).col, "vec_push value type mismatch");
                 }
             } else {
                 let _ = resolve_type(s, check_expr(s, val, null));
@@ -2002,7 +2240,7 @@ fn check_call(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
                 elem4 = (*(*at3).elem).elem;
                 ok4 = true;
             } else {
-                sdiag(s, (*arg).file, (*arg).line, (*arg).col, "vec_slice expects a reference to vec<T>");
+                sdiagc(s, "E0203", (*arg).file, (*arg).line, (*arg).col, "vec_slice expects a reference to vec<T>");
             }
             if (*arg).next != null {
                 sdiag(s, (*e).file, (*e).line, (*e).col, "vec_slice takes one argument");
@@ -2017,6 +2255,55 @@ fn check_call(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
         (*st).elem = elem4;
         (*e).ty = st;
         return st;
+    }
+    if bid == 17 {
+        let arg: *mut Expr = (*e).args;
+        let u8r: *mut Type = type_new((*s).a, K::U8);
+        let path_ty: *mut Type = type_new((*s).a, K::Slice);
+        (*path_ty).elem = u8r;
+        if arg == null || (*arg).next != null {
+            sdiagc(s, "E0204", (*e).file, (*e).line, (*e).col, "read_file takes one argument");
+        }
+        if arg != null {
+            let at: *mut Type = resolve_type(s, check_expr(s, arg, path_ty));
+            let kk: K = (*at).kind;
+            let okp: bool = kk == K::Str || (kk == K::Slice && (*at).elem != null && (*(*at).elem).kind == K::U8);
+            if !okp {
+                sdiagc(s, "E0203", (*arg).file, (*arg).line, (*arg).col, "read_file path must be str or [u8]");
+            }
+        }
+        let vt: *mut Type = type_vec((*s).a, u8r);
+        (*e).ty = vt;
+        return vt;
+    }
+    if bid == 18 {
+        let arg: *mut Expr = (*e).args;
+        let u8w: *mut Type = type_new((*s).a, K::U8);
+        let bytes_ty: *mut Type = type_new((*s).a, K::Slice);
+        (*bytes_ty).elem = u8w;
+        if arg == null || (*arg).next == null || (*(*arg).next).next != null {
+            sdiagc(s, "E0204", (*e).file, (*e).line, (*e).col, "write_file takes two arguments");
+        }
+        if arg != null {
+            let pt: *mut Type = resolve_type(s, check_expr(s, arg, bytes_ty));
+            let pk: K = (*pt).kind;
+            let okp2: bool = pk == K::Str || (pk == K::Slice && (*pt).elem != null && (*(*pt).elem).kind == K::U8);
+            if !okp2 {
+                sdiag(s, (*arg).file, (*arg).line, (*arg).col, "write_file path must be str or [u8]");
+            }
+            let de: *mut Expr = (*arg).next;
+            if de != null {
+                let dt: *mut Type = resolve_type(s, check_expr(s, de, bytes_ty));
+                let dk: K = (*dt).kind;
+                let okd: bool = dk == K::Str || (dk == K::Slice && (*dt).elem != null && (*(*dt).elem).kind == K::U8);
+                if !okd {
+                    sdiagc(s, "E0203", (*de).file, (*de).line, (*de).col, "write_file expects str or [u8] data");
+                }
+            }
+        }
+        let rt2: *mut Type = type_new((*s).a, K::I32);
+        (*e).ty = rt2;
+        return rt2;
     }
     let u8t: *mut Type = type_new((*s).a, K::U8);
     let pm: *mut Type = type_ptr((*s).a, u8t, true);
@@ -2066,7 +2353,15 @@ fn check_stmt(s: *mut Sem, st: *mut Stmt) {
         if t == null {
             t = it;
         } else if !type_compat(t, it) {
-            sdiag(s, (*st).file, (*st).line, (*st).col, "initializer type mismatch");
+            let mut ef: i32 = (*st).file;
+            let mut el: i32 = (*st).line;
+            let mut ec: i32 = (*st).col;
+            if (*st).expr != null {
+                ef = (*((*st).expr)).file;
+                el = (*((*st).expr)).line;
+                ec = (*((*st).expr)).col;
+            }
+            sdiagc(s, "E0203", ef, el, ec, "initializer type mismatch");
         }
         if (*t).kind == K::Void {
             sdiag(s, (*st).file, (*st).line, (*st).col, "cannot bind a void value");
@@ -2084,12 +2379,12 @@ fn check_stmt(s: *mut Sem, st: *mut Stmt) {
         let lt: *mut Type = resolve_type(s, check_expr(s, (*st).expr, null));
         let rt: *mut Type = resolve_type(s, check_expr(s, (*st).rhs, lt));
         if !type_compat(lt, rt) {
-            sdiag(s, (*st).file, (*st).line, (*st).col, "assignment type mismatch");
+            sdiagc(s, "E0203", (*st).file, (*st).line, (*st).col, "assignment type mismatch");
         }
         if !is_place((*st).expr) {
             sdiag(s, (*st).file, (*st).line, (*st).col, "assignment target is not a place");
         } else if !place_mut(s, (*st).expr) {
-            sdiag(s, (*st).file, (*st).line, (*st).col, "cannot assign to an immutable place");
+            sdiagc(s, "E0205", (*st).file, (*st).line, (*st).col, "cannot assign to an immutable place");
         }
         if (*st).op != T::Eq && !type_is_int(lt) {
             sdiag(s, (*st).file, (*st).line, (*st).col, "compound assignment requires an integer");
@@ -2156,7 +2451,7 @@ fn check_stmt(s: *mut Sem, st: *mut Stmt) {
             } else {
                 let at: *mut Type = resolve_type(s, check_expr(s, (*st).expr, rt));
                 if !type_compat(rt, at) {
-                    sdiag(s, (*st).file, (*st).line, (*st).col, "return type mismatch");
+                    sdiagc(s, "E0203", (*st).file, (*st).line, (*st).col, "return type mismatch");
                 }
             }
         }
@@ -2386,7 +2681,7 @@ fn check_fn(s: *mut Sem, d: *mut Decl) {
     scope_pop(s);
     let rt: *mut Type = resolve_type(s, (*d).ty);
     if (*rt).kind != K::Void && !diverges(last_stmt((*d).body)) {
-        sdiag(s, (*d).file, (*d).line, (*d).col, "function can reach the end without returning");
+        sdiagc(s, "E0206", (*d).file, (*d).line, (*d).col, "function can reach the end without returning");
     }
     (*s).cur_fn = null;
 
@@ -2456,6 +2751,11 @@ fn sem_run_ex(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Progr
     (*s).errors = 0;
     (*s).labels = null;
     (*s).cur_module = "";
+    // A parse error leaves a partial AST; the oracle stops after parse
+    // failure, and walking the fragment risks dereferencing missing nodes.
+    if (*d).count > 0 {
+        return s;
+    }
     let mut it: *mut Item = (*prog).items;
     while it != null {
         if (*it).decl != null {
@@ -2480,6 +2780,9 @@ fn sem_run_ex(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Progr
             (*g).size = 4;
             (*g).alignment = 4;
         }
+        if (*g).kind == D::Struct && (*g).nfields == 0 {
+            sdiagc(s, "E0228", (*g).file, (*g).line, (*g).col, "structs must have at least one field");
+        }
         g = (*g).next;
     }
     g = (*s).globals;
@@ -2489,8 +2792,16 @@ fn sem_run_ex(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Progr
             if (*((*g).ty)).kind == K::Str {
                 (*g).cval_kind = 2;
                 (*g).cval_s = eval_str(s, (*g).init);
+            } else if (*((*g).ty)).kind == K::F32 || (*((*g).ty)).kind == K::F64 {
+                (*g).cval_kind = 3;
+                (*g).cval = eval_float_bits(s, (*g).init);
             } else if (*((*g).ty)).kind == K::Vec {
                 sdiag(s, (*g).file, (*g).line, (*g).col, "vec constants are not supported by the bootstrap compiler");
+                (*g).cval_kind = 1;
+                (*g).cval = 0;
+            } else if (*((*g).ty)).kind == K::Array || (*((*g).ty)).kind == K::Struct
+                || (*((*g).ty)).kind == K::Slice {
+                sdiagc(s, "E0231", (*g).file, (*g).line, (*g).col, "const values must be scalar, str, or a pointer");
                 (*g).cval_kind = 1;
                 (*g).cval = 0;
             } else {
@@ -2525,13 +2836,25 @@ fn sem_run_ex(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Progr
         if (*g).kind == D::Global {
             let gt: *mut Type = resolve_type(s, (*g).ty);
             if (*gt).kind == K::Vec {
-                sdiag(s, (*g).file, (*g).line, (*g).col, "vec globals are not supported by the bootstrap compiler");
+                let mut vf: i32 = (*g).file;
+                let mut vl: i32 = (*g).line;
+                let mut vc: i32 = (*g).col;
+                if (*g).init != null {
+                    vf = (*((*g).init)).file;
+                    vl = (*((*g).init)).line;
+                    vc = (*((*g).init)).col;
+                }
+                sdiagc(s, "E0226", vf, vl, vc, "vec globals are not supported by the bootstrap compiler");
             } else if (*g).init == null {
                 sdiag(s, (*g).file, (*g).line, (*g).col, "global requires an initializer");
             } else {
                 let at: *mut Type = resolve_type(s, check_expr(s, (*g).init, gt));
                 if !type_compat(gt, at) {
-                    sdiag(s, (*g).file, (*g).line, (*g).col, "global initializer type mismatch");
+                    sdiagc(s, "E0203", (*g).file, (*g).line, (*g).col, "global initializer type mismatch");
+                }
+                if !is_const_expr(s, (*g).init, g) {
+                    sdiagc(s, "E0226", (*((*g).init)).file, (*((*g).init)).line, (*((*g).init)).col,
+                        "global initializers must be constant expressions");
                 }
             }
         }

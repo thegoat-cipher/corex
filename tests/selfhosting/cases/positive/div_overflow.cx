@@ -1,0 +1,6 @@
+fn main() -> i32 {
+    let mut a: i32 = -2147483648;
+    let mut n: i32 = -1;
+    print(a / n);
+    return 0;
+}

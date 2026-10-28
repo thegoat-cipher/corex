@@ -1,0 +1,33 @@
+// Signed/unsigned division and remainder, including MIN edge values that do
+// not overflow.
+fn main() -> i32 {
+    let mut z: i32 = 0;
+    let mut a: i32 = 7;
+    let mut n: i32 = -3;
+    print(a / n);
+    print(a % n);
+    print(a / 3);
+    print(a % 3);
+    print(n / a);
+    print(n % a);
+    let umax: u64 = 18446744073709551615;
+    print(umax / 3);
+    print(umax % 10);
+    let u32max: u32 = 4294967295;
+    print(u32max / 7);
+    let mini: i32 = -2147483648;
+    print(mini / 1);
+    print(mini % 2);
+    let min64: i64 = 0 - 9223372036854775807;
+    print(min64 / 2);
+    let u8a: u8 = 200;
+    let u8b: u8 = 7;
+    print(u8a / u8b);
+    print(u8a % u8b);
+    z = z + 1;
+    a /= 2;
+    print(a);
+    a %= 2;
+    print(a);
+    return 0;
+}

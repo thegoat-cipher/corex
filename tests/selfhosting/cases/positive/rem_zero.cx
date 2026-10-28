@@ -1,0 +1,6 @@
+fn main() -> i32 {
+    let mut a: u64 = 10;
+    let mut z: u64 = 0;
+    print(a % z);
+    return 0;
+}

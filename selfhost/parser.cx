@@ -98,6 +98,16 @@ fn perr(p: *mut P, msg: str) {
     }
 }
 
+fn perrc(p: *mut P, code: str, msg: str) {
+    unsafe {
+    let t: *mut Tok = pk(p);
+    unsafe {
+        diag_addc((*p).d, (*p).a, (*t).file, (*t).line, (*t).col, code, msg);
+    }
+
+    }
+}
+
 fn expect(p: *mut P, k: T) -> *mut Tok {
     unsafe {
     let t: *mut Tok = pk(p);
@@ -105,7 +115,7 @@ fn expect(p: *mut P, k: T) -> *mut Tok {
         bump(p);
         return t;
     }
-    perr(p, "unexpected token");
+    perrc(p, "E0100", "unexpected token");
     return t;
 
     }
@@ -153,7 +163,28 @@ fn expect_vec_gt(p: *mut P) {
     }
 }
 
+// Syntactic nesting is bounded so adversarial input produces a diagnostic
+// instead of a stack overflow, mirroring the oracle's MAX_NESTING rule.
 fn parse_type(p: *mut P) -> *mut Type {
+    unsafe {
+    (*p).depth = (*p).depth + 1;
+    if (*p).depth > 200 {
+        perrc(p, "E0111", "nesting depth exceeds the limit of 200");
+        while !at(p, T::Semi) && !at(p, T::Comma) && !at(p, T::RParen)
+            && !at(p, T::RBrace) && !at(p, T::Eq) && !at(p, T::Eof) {
+            bump(p);
+        }
+        (*p).depth = (*p).depth - 1;
+        return type_prim((*p).a, K::I32);
+    }
+    let ty: *mut Type = parse_type_inner(p);
+    (*p).depth = (*p).depth - 1;
+    return ty;
+
+    }
+}
+
+fn parse_type_inner(p: *mut P) -> *mut Type {
     unsafe {
     let t: *mut Tok = pk(p);
     let k: T = (*t).kind;
@@ -886,6 +917,22 @@ fn parse_label(p: *mut P) -> *mut Stmt {
 
 fn parse_stmt(p: *mut P) -> *mut Stmt {
     unsafe {
+    (*p).depth = (*p).depth + 1;
+    if (*p).depth > 200 {
+        perrc(p, "E0111", "nesting depth exceeds the limit of 200");
+        sync(p);
+        (*p).depth = (*p).depth - 1;
+        return stmt_new((*p).a, S::Empty, pk(p));
+    }
+    let st: *mut Stmt = parse_stmt_inner(p);
+    (*p).depth = (*p).depth - 1;
+    return st;
+
+    }
+}
+
+fn parse_stmt_inner(p: *mut P) -> *mut Stmt {
+    unsafe {
     let t: *mut Tok = pk(p);
     let k: T = (*t).kind;
     if k == T::Ident && (*pk_n(p, 1)).kind == T::Colon {
@@ -1126,7 +1173,10 @@ fn parse_primary(p: *mut P) -> *mut Expr {
     if k == T::Float {
         bump(p);
         let e: *mut Expr = expr_new((*p).a, E::FloatLit, t);
-        unsafe { (*e).text = (*t).text; }
+        unsafe {
+            (*e).text = (*t).text;
+            (*e).ival = (*t).ival;
+        }
         return e;
     }
     if k == T::Str {
@@ -1281,9 +1331,11 @@ fn parse_primary(p: *mut P) -> *mut Expr {
         unsafe { (*e).name = name; }
         return e;
     }
-    perr(p, "expected expression");
+    perrc(p, "E0101", "expected expression");
     bump(p);
-    return null;
+    let e1: *mut Expr = expr_new((*p).a, E::IntLit, t);
+    unsafe { (*e1).ival = 0; }
+    return e1;
 
     }
 }
@@ -1309,6 +1361,10 @@ fn parse_postfix(p: *mut P) -> *mut Expr {
             let call: *mut Expr = expr_new((*p).a, E::Call, t);
             unsafe {
                 (*call).lhs = e;
+                // Diagnostics about a call belong at the callee, not at `(`.
+                (*call).file = (*e).file;
+                (*call).line = (*e).line;
+                (*call).col = (*e).col;
                 (*call).args = parse_args(p);
             }
             e = call;
@@ -1330,6 +1386,9 @@ fn parse_postfix(p: *mut P) -> *mut Expr {
                 let rx: *mut Expr = expr_new((*p).a, E::SliceRange, t);
                 unsafe {
                     (*rx).lhs = e;
+                    (*rx).file = (*e).file;
+                    (*rx).line = (*e).line;
+                    (*rx).col = (*e).col;
                     (*rx).rhs = start;
                     (*rx).args = end;
                 }
@@ -1393,6 +1452,26 @@ fn parse_postfix(p: *mut P) -> *mut Expr {
 
 fn parse_unary(p: *mut P) -> *mut Expr {
     unsafe {
+    (*p).depth = (*p).depth + 1;
+    if (*p).depth > 200 {
+        perrc(p, "E0111", "nesting depth exceeds the limit of 200");
+        while at(p, T::Minus) || at(p, T::Bang) || at(p, T::Star) || at(p, T::Amp) {
+            bump(p);
+        }
+        (*p).depth = (*p).depth - 1;
+        let e0: *mut Expr = expr_new((*p).a, E::IntLit, pk(p));
+        unsafe { (*e0).ival = 0; }
+        return e0;
+    }
+    let e1: *mut Expr = parse_unary_inner(p);
+    (*p).depth = (*p).depth - 1;
+    return e1;
+
+    }
+}
+
+fn parse_unary_inner(p: *mut P) -> *mut Expr {
+    unsafe {
     let t: *mut Tok = pk(p);
     let k: T = (*t).kind;
     if k == T::Minus || k == T::Bang || k == T::Star {
@@ -1430,6 +1509,10 @@ fn parse_cast(p: *mut P) -> *mut Expr {
         let c: *mut Expr = expr_new((*p).a, E::Cast, t);
         unsafe {
             (*c).lhs = e;
+            // Cast diagnostics belong at the operand, not at the target type.
+            (*c).file = (*e).file;
+            (*c).line = (*e).line;
+            (*c).col = (*e).col;
             (*c).type_arg = ty;
         }
         e = c;
@@ -1455,6 +1538,9 @@ fn parse_mul(p: *mut P) -> *mut Expr {
             (*b).op = k;
             (*b).lhs = e;
             (*b).rhs = r;
+            (*b).file = (*e).file;
+            (*b).line = (*e).line;
+            (*b).col = (*e).col;
         }
         e = b;
     }
@@ -1478,6 +1564,9 @@ fn parse_add(p: *mut P) -> *mut Expr {
             (*b).op = k;
             (*b).lhs = e;
             (*b).rhs = r;
+            (*b).file = (*e).file;
+            (*b).line = (*e).line;
+            (*b).col = (*e).col;
         }
         e = b;
     }
@@ -1501,6 +1590,9 @@ fn parse_shift(p: *mut P) -> *mut Expr {
             (*b).op = k;
             (*b).lhs = e;
             (*b).rhs = r;
+            (*b).file = (*e).file;
+            (*b).line = (*e).line;
+            (*b).col = (*e).col;
         }
         e = b;
     }
@@ -1524,6 +1616,9 @@ fn parse_rel(p: *mut P) -> *mut Expr {
             (*b).op = k;
             (*b).lhs = e;
             (*b).rhs = r;
+            (*b).file = (*e).file;
+            (*b).line = (*e).line;
+            (*b).col = (*e).col;
         }
         e = b;
     }
@@ -1547,6 +1642,9 @@ fn parse_eq(p: *mut P) -> *mut Expr {
             (*b).op = k;
             (*b).lhs = e;
             (*b).rhs = r;
+            (*b).file = (*e).file;
+            (*b).line = (*e).line;
+            (*b).col = (*e).col;
         }
         e = b;
     }
@@ -1566,6 +1664,9 @@ fn parse_bitand(p: *mut P) -> *mut Expr {
             (*b).op = T::Amp;
             (*b).lhs = e;
             (*b).rhs = r;
+            (*b).file = (*e).file;
+            (*b).line = (*e).line;
+            (*b).col = (*e).col;
         }
         e = b;
     }
@@ -1586,6 +1687,9 @@ fn parse_bitxor(p: *mut P) -> *mut Expr {
             (*b).op = T::Caret;
             (*b).lhs = e;
             (*b).rhs = r;
+            (*b).file = (*e).file;
+            (*b).line = (*e).line;
+            (*b).col = (*e).col;
         }
         e = b;
     }
@@ -1606,6 +1710,9 @@ fn parse_bitor(p: *mut P) -> *mut Expr {
             (*b).op = T::Pipe;
             (*b).lhs = e;
             (*b).rhs = r;
+            (*b).file = (*e).file;
+            (*b).line = (*e).line;
+            (*b).col = (*e).col;
         }
         e = b;
     }
@@ -1626,6 +1733,9 @@ fn parse_land(p: *mut P) -> *mut Expr {
             (*b).op = T::AmpAmp;
             (*b).lhs = e;
             (*b).rhs = r;
+            (*b).file = (*e).file;
+            (*b).line = (*e).line;
+            (*b).col = (*e).col;
         }
         e = b;
     }
@@ -1646,6 +1756,9 @@ fn parse_lor(p: *mut P) -> *mut Expr {
             (*b).op = T::PipePipe;
             (*b).lhs = e;
             (*b).rhs = r;
+            (*b).file = (*e).file;
+            (*b).line = (*e).line;
+            (*b).col = (*e).col;
         }
         e = b;
     }
@@ -1659,9 +1772,15 @@ fn parse_expr(p: *mut P) -> *mut Expr {
     unsafe {
         (*p).depth = (*p).depth + 1;
         if (*p).depth > 200 {
-            perr(p, "expression nesting too deep");
+            perrc(p, "E0111", "nesting depth exceeds the limit of 200");
+            while !at(p, T::Semi) && !at(p, T::Comma) && !at(p, T::RParen)
+                && !at(p, T::RBracket) && !at(p, T::RBrace) && !at(p, T::Eof) {
+                bump(p);
+            }
             (*p).depth = (*p).depth - 1;
-            return null;
+            let e0: *mut Expr = expr_new((*p).a, E::IntLit, pk(p));
+            (*e0).ival = 0;
+            return e0;
         }
     }
     let e: *mut Expr = parse_lor(p);

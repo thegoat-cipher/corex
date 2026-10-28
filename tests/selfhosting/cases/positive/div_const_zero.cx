@@ -1,0 +1,5 @@
+// A constant zero divisor is still checked at run time, like the oracle.
+fn main() -> i32 {
+    print(1 / 0);
+    return 0;
+}

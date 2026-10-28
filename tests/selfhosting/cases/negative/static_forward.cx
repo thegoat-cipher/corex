@@ -1,0 +1,3 @@
+static B: [i32; 2] = A;
+static A: [i32; 2] = [1, 2];
+fn main() -> i32 { print(B[0]); return 0; }
