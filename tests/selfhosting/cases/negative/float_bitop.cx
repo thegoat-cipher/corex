@@ -1,0 +1,5 @@
+fn main() -> i32 {
+    let a: f64 = 1.5;
+    print(a & 1.0);
+    return 0;
+}

@@ -1,0 +1,6 @@
+// `print` aborts with exit 101 once the magnitude reaches 1e18.
+fn main() -> i32 {
+    let x: f64 = 1.0e18;
+    print(x);
+    return 0;
+}

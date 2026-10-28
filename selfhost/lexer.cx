@@ -459,7 +459,13 @@ fn lx_lex_number(l: *mut Lex) {
             lx_bump(l);
             continue;
         }
-        if !lx_hexdigit(c) {
+        let mut isdig: bool = false;
+        if base == 16 {
+            isdig = lx_hexdigit(c);
+        } else {
+            isdig = lx_digit(c);
+        }
+        if !isdig {
             break;
         }
         let d: u64 = lx_hexval(c) as u64;
@@ -474,8 +480,15 @@ fn lx_lex_number(l: *mut Lex) {
         unsafe { (*t).kind = T::Float; }
         if lx_at(l) == 46 {
             lx_bump(l);
-            while lx_digit(lx_at(l)) {
+            let mut fdigits: i32 = 0;
+            while lx_digit(lx_at(l)) || lx_at(l) == 95 {
+                if lx_at(l) != 95 {
+                    fdigits = fdigits + 1;
+                }
                 lx_bump(l);
+            }
+            if fdigits == 0 {
+                lx_error(l, "expected digits after the decimal point");
             }
         }
         if lx_at(l) == 101 || lx_at(l) == 69 {
@@ -483,10 +496,44 @@ fn lx_lex_number(l: *mut Lex) {
             if lx_at(l) == 45 || lx_at(l) == 43 {
                 lx_bump(l);
             }
-            while lx_digit(lx_at(l)) {
+            let mut edigits: i32 = 0;
+            while lx_digit(lx_at(l)) || lx_at(l) == 95 {
+                if lx_at(l) != 95 {
+                    edigits = edigits + 1;
+                }
                 lx_bump(l);
             }
+            if edigits == 0 {
+                lx_error(l, "expected digits in the exponent");
+            }
         }
+        let mut num_end: usize = 0;
+        unsafe { num_end = (*l).pos; }
+        if lx_ident_char(lx_at(l)) {
+            while lx_ident_char(lx_at(l)) {
+                lx_bump(l);
+            }
+            lx_error(l, "invalid suffix on float literal (CoreX has no literal suffixes; use `as` to convert)");
+        }
+        let mut text: str = "";
+        unsafe { text = rt_slice((*l).src, start, num_end); }
+        let mut ok: bool = true;
+        let bits: i64 = rt_f64_bits(text, &mut ok);
+        if !ok {
+            lx_error(l, "float literal is out of range");
+        }
+        unsafe {
+            (*t).ival = bits;
+            (*t).len = (*l).pos - start;
+            (*t).text = text;
+        }
+        return;
+    }
+    if lx_ident_char(lx_at(l)) {
+        while lx_ident_char(lx_at(l)) {
+            lx_bump(l);
+        }
+        lx_error(l, "invalid suffix on integer literal (CoreX has no literal suffixes; use `as` to convert)");
     }
     unsafe {
         (*t).ival = v as i64;

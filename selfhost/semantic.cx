@@ -56,6 +56,32 @@ fn type_is_signed(t: *mut Type) -> bool {
     }
 }
 
+fn type_is_float(t: *mut Type) -> bool {
+    unsafe {
+    if t == null {
+        return false;
+    }
+    return (*t).kind == K::F32 || (*t).kind == K::F64;
+
+    }
+}
+
+// Integer types that participate in `as` conversions to and from floats.
+// `char` and enums are distinct from `Int` in the reference type model, so
+// char/enum <-> float casts stay rejected.
+fn type_is_num(t: *mut Type) -> bool {
+    unsafe {
+    if t == null {
+        return false;
+    }
+    let k: K = (*t).kind;
+    return k == K::I8 || k == K::I16 || k == K::I32 || k == K::I64
+        || k == K::U8 || k == K::U16 || k == K::U32 || k == K::U64
+        || k == K::Usize || k == K::Isize;
+
+    }
+}
+
 fn type_ok(s: *mut Sem, t: *mut Type) -> bool {
     unsafe {
     if t == null { return false; }
@@ -526,6 +552,48 @@ fn eval_int(s: *mut Sem, e: *mut Expr) -> i64 {
     }
 }
 
+// Evaluate a constant float expression to binary64 bits. Only literal, unary
+// minus, float-typed constant references, and float casts are folded; anything
+// else is reported instead of silently producing a wrong constant.
+fn eval_float_bits(s: *mut Sem, e: *mut Expr) -> i64 {
+    unsafe {
+    if e == null {
+        return 0;
+    }
+    let k: E = (*e).kind;
+    if k == E::FloatLit {
+        return (*e).ival;
+    }
+    if k == E::Ident {
+        let d: *mut Decl = lookup(s, (*e).name);
+        if d != null && (*d).kind == D::Const && (*d).cval_kind == 3 {
+            return (*d).cval;
+        }
+        sdiag(s, (*e).file, (*e).line, (*e).col, "float constant initializer must be a literal");
+        return 0;
+    }
+    if k == E::Unary && (*e).op == T::Minus {
+        let bits: i64 = eval_float_bits(s, (*e).lhs);
+        let one: i64 = 1;
+        let sign: i64 = one << 63;
+        return bits ^ sign;
+    }
+    if k == E::Cast {
+        let to: *mut Type = (*e).ty;
+        let bits2: i64 = eval_float_bits(s, (*e).lhs);
+        if to != null && (*to).kind == K::F32 {
+            return rt_f32_as_f64(rt_f64_as_f32(bits2));
+        }
+        if to != null && (*to).kind == K::F64 {
+            return bits2;
+        }
+    }
+    sdiag(s, (*e).file, (*e).line, (*e).col, "float constant initializer must be a literal");
+    return 0;
+
+    }
+}
+
 fn is_untyped(e: *mut Expr) -> bool {
     unsafe {
     if e == null {
@@ -546,6 +614,22 @@ fn is_untyped(e: *mut Expr) -> bool {
             || op == T::Shl || op == T::Shr {
             return is_untyped((*e).lhs) && is_untyped((*e).rhs);
         }
+    }
+    return false;
+
+    }
+}
+
+fn is_float_lit(e: *mut Expr) -> bool {
+    unsafe {
+    if e == null {
+        return false;
+    }
+    if (*e).kind == E::FloatLit {
+        return true;
+    }
+    if (*e).kind == E::Unary && (*e).op == T::Minus {
+        return is_float_lit((*e).lhs);
     }
     return false;
 
@@ -619,8 +703,11 @@ fn check_expr(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
         return t;
     }
     if k == E::FloatLit {
-        sdiag(s, (*e).file, (*e).line, (*e).col, "floating point is not supported by the bootstrap compiler");
-        let t: *mut Type = type_new((*s).a, K::I32);
+        let mut kind: K = K::F64;
+        if expected != null && ((*expected).kind == K::F32 || (*expected).kind == K::F64) {
+            kind = (*expected).kind;
+        }
+        let t: *mut Type = type_new((*s).a, kind);
         (*e).ty = t;
         return t;
     }
@@ -839,8 +926,8 @@ fn check_expr(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
         }
         if op == T::Minus {
             let bt: *mut Type = resolve_type(s, check_expr(s, (*e).lhs, expected));
-            if !type_is_int(bt) {
-                sdiag(s, (*e).file, (*e).line, (*e).col, "unary minus requires an integer");
+            if !type_is_int(bt) && !type_is_float(bt) {
+                sdiag(s, (*e).file, (*e).line, (*e).col, "unary minus requires a number");
             }
             (*e).opty = bt;
             (*e).ty = bt;
@@ -869,12 +956,18 @@ fn check_expr(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
         let to_i: bool = type_is_int(tt);
         let from_p: bool = type_is_ptr(bt);
         let to_p: bool = type_is_ptr(tt);
+        let from_f: bool = type_is_float(bt);
+        let to_f: bool = type_is_float(tt);
+        let from_n: bool = type_is_num(bt);
+        let to_n: bool = type_is_num(tt);
         if (*bt).kind == K::Enum && to_i {
             // enum -> integer
         } else if from_i && to_i {
             // integer -> integer
         } else if from_p && to_p {
             // pointer -> pointer
+        } else if (from_n && to_f) || (from_f && to_n) || (from_f && to_f) {
+            // integer <-> float and float <-> float
         } else if (from_i && to_p) || (from_p && to_i) {
             if (*s).unsafe_depth == 0 {
                 sdiag(s, (*e).file, (*e).line, (*e).col, "integer/pointer casts require unsafe");
@@ -1047,7 +1140,8 @@ fn check_binary(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
                     sdiag(s, (*e).file, (*e).line, (*e).col, "null comparison requires a pointer");
                     t2 = t1;
                 }
-            } else if is_untyped((*e).rhs) && type_is_int(t1) {
+            } else if (is_untyped((*e).rhs) && type_is_int(t1))
+                   || (is_float_lit((*e).rhs) && type_is_float(t1)) {
                 t2 = resolve_type(s, ck(s, (*e).rhs, t1));
             } else {
                 t2 = resolve_type(s, ck(s, (*e).rhs, null));
@@ -1093,7 +1187,7 @@ fn check_binary(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
             return l0;
         }
     }
-    if expected != null && type_is_int(expected) {
+    if expected != null && (type_is_int(expected) || type_is_float(expected)) {
         t1 = resolve_type(s, ck(s, (*e).lhs, expected));
     } else {
         t1 = resolve_type(s, ck(s, (*e).lhs, null));
@@ -1101,6 +1195,17 @@ fn check_binary(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
     let t2: *mut Type = resolve_type(s, ck(s, (*e).rhs, t1));
     if is_untyped((*e).lhs) && type_is_int(t2) {
         t1 = resolve_type(s, ck(s, (*e).lhs, t2));
+    }
+    if type_is_float(t1) || type_is_float(t2) {
+        if !type_is_float(t1) || !type_is_float(t2) || !type_eq(t1, t2) {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "arithmetic operands have different types");
+        } else if op != T::Plus && op != T::Minus && op != T::Star
+            && op != T::Slash && op != T::Percent {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "operator is not defined for floating-point operands");
+        }
+        (*e).opty = t1;
+        (*e).ty = t1;
+        return t1;
     }
     if !type_is_int(t1) || !type_is_int(t2) {
         if (*t1).kind == K::Bool && (*t2).kind == K::Bool {
@@ -1196,7 +1301,8 @@ fn check_call(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
         let kk: K = (*at).kind;
         let printable: bool = type_is_int(at) || kk == K::Bool || kk == K::Str
             || (kk == K::Array && (*((*at).elem)).kind == K::U8)
-            || (kk == K::Slice && (*((*at).elem)).kind == K::U8) || kk == K::Enum;
+            || (kk == K::Slice && (*((*at).elem)).kind == K::U8) || kk == K::Enum
+            || kk == K::F32 || kk == K::F64;
         if !printable {
             sdiag(s, (*e).file, (*e).line, (*e).col, "print does not accept this type");
         }
@@ -1870,6 +1976,9 @@ fn sem_run(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program)
             if (*((*g).ty)).kind == K::Str {
                 (*g).cval_kind = 2;
                 (*g).cval_s = eval_str(s, (*g).init);
+            } else if (*((*g).ty)).kind == K::F32 || (*((*g).ty)).kind == K::F64 {
+                (*g).cval_kind = 3;
+                (*g).cval = eval_float_bits(s, (*g).init);
             } else if (*((*g).ty)).kind == K::Vec {
                 sdiag(s, (*g).file, (*g).line, (*g).col, "vec constants are not supported by the bootstrap compiler");
                 (*g).cval_kind = 1;

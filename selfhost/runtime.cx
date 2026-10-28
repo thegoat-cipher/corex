@@ -571,3 +571,490 @@ fn rt_temp_path(a: *mut Arena, ext: str) -> cstr {
     let out: str = rt_view(bp);
     return rt_to_cstr(a, out);
 }
+
+// ---------------------------------------------------------------------------
+// Decimal -> binary64 conversion (integer arithmetic only).
+//
+// The compiler must produce exactly the bit patterns the Rust oracle produces
+// for `f64` literals, and it must do so without executing floating-point
+// arithmetic itself: the same source is compiled by Stage 0 and by every
+// self-hosted stage, so a host FPU difference would break the fixed point.
+//
+// The conversion uses a small fixed-capacity bignum:
+//
+//   value = D * 10^dexp
+//         = (D * 5^dexp) * 2^dexp            (dexp >= 0)
+//         = (D / 5^-dexp) * 2^dexp           (dexp < 0)
+//
+// A 54-bit quotient plus a sticky remainder drives round-to-nearest-even.
+// At most 1024 significant decimal digits are retained; a longer literal is
+// truncated with a sticky bit (32 significant digits already over-determine a
+// binary64 value, so this limit is far outside the representable range).
+
+const F64_MAXDIG: i32 = 1024;
+
+struct Big {
+    n: i32,
+    v: [u32; 192],
+}
+
+fn bn_zero(b: *mut Big) {
+    unsafe {
+        (*b).n = 0;
+        let mut i: i32 = 0;
+        while i < 192 {
+            (*b).v[i as usize] = 0;
+            i = i + 1;
+        }
+    }
+}
+
+fn bn_mul_add(b: *mut Big, m: u32, add: u32) {
+    unsafe {
+        let mut carry: u64 = add as u64;
+        let mut i: i32 = 0;
+        while i < (*b).n {
+            let p: u64 = ((*b).v[i as usize] as u64) * (m as u64) + carry;
+            (*b).v[i as usize] = (p & 4294967295) as u32;
+            carry = p >> 32;
+            i = i + 1;
+        }
+        while carry != 0 {
+            if (*b).n >= 192 {
+                return;
+            }
+            (*b).v[(*b).n as usize] = (carry & 4294967295) as u32;
+            (*b).n = (*b).n + 1;
+            carry = carry >> 32;
+        }
+    }
+}
+
+fn bn_bitlen64(x: u64) -> i32 {
+    let mut v: u64 = x;
+    let mut n: i32 = 0;
+    while v != 0 {
+        v = v >> 1;
+        n = n + 1;
+    }
+    return n;
+}
+
+fn bn_bitlen(b: *mut Big) -> i32 {
+    unsafe {
+        if (*b).n == 0 {
+            return 0;
+        }
+        let top: u32 = (*b).v[((*b).n - 1) as usize];
+        return ((*b).n - 1) * 32 + bn_bitlen64(top as u64);
+    }
+}
+
+fn bn_bit(b: *mut Big, i: i32) -> u32 {
+    unsafe {
+        let w: i32 = i / 32;
+        if w >= (*b).n {
+            return 0;
+        }
+        let s: i32 = i % 32;
+        return ((*b).v[w as usize] >> (s as u32)) & 1;
+    }
+}
+
+fn bn_shl1(b: *mut Big) {
+    unsafe {
+        if (*b).n == 0 {
+            return;
+        }
+        let mut carry: u32 = 0;
+        let mut i: i32 = 0;
+        while i < (*b).n {
+            let w: u32 = (*b).v[i as usize];
+            (*b).v[i as usize] = (w << 1) | carry;
+            carry = w >> 31;
+            i = i + 1;
+        }
+        if carry != 0 && (*b).n < 192 {
+            (*b).v[(*b).n as usize] = carry;
+            (*b).n = (*b).n + 1;
+        }
+    }
+}
+
+fn bn_shl(b: *mut Big, bits: i32) {
+    unsafe {
+        if bits <= 0 || (*b).n == 0 {
+            return;
+        }
+        let words: i32 = bits / 32;
+        let rem: i32 = bits % 32;
+        let mut i: i32 = (*b).n - 1;
+        while i >= 0 {
+            (*b).v[(i + words) as usize] = (*b).v[i as usize];
+            i = i - 1;
+        }
+        i = 0;
+        while i < words {
+            (*b).v[i as usize] = 0;
+            i = i + 1;
+        }
+        (*b).n = (*b).n + words;
+        if rem > 0 {
+            let mut carry: u32 = 0;
+            i = 0;
+            while i < (*b).n {
+                let w: u32 = (*b).v[i as usize];
+                (*b).v[i as usize] = (w << (rem as u32)) | carry;
+                carry = w >> ((32 - rem) as u32);
+                i = i + 1;
+            }
+            if carry != 0 && (*b).n < 192 {
+                (*b).v[(*b).n as usize] = carry;
+                (*b).n = (*b).n + 1;
+            }
+        }
+    }
+}
+
+fn bn_cmp(a: *mut Big, b: *mut Big) -> i32 {
+    unsafe {
+        if (*a).n != (*b).n {
+            return (*a).n - (*b).n;
+        }
+        let mut i: i32 = (*a).n - 1;
+        while i >= 0 {
+            if (*a).v[i as usize] != (*b).v[i as usize] {
+                if (*a).v[i as usize] < (*b).v[i as usize] {
+                    return -1;
+                }
+                return 1;
+            }
+            i = i - 1;
+        }
+        return 0;
+    }
+}
+
+fn bn_sub(a: *mut Big, b: *mut Big) {
+    unsafe {
+        let mut borrow: i64 = 0;
+        let mut i: i32 = 0;
+        while i < (*a).n {
+            let mut d: i64 = (*a).v[i as usize] as i64;
+            d = d - borrow;
+            if i < (*b).n {
+                d = d - ((*b).v[i as usize] as i64);
+            }
+            if d < 0 {
+                d = d + 4294967296;
+                borrow = 1;
+            } else {
+                borrow = 0;
+            }
+            (*a).v[i as usize] = d as u32;
+            i = i + 1;
+        }
+        while (*a).n > 0 && (*a).v[((*a).n - 1) as usize] == 0 {
+            (*a).n = (*a).n - 1;
+        }
+    }
+}
+
+// Returns the binary64 bit pattern of the decimal literal `s`. The input has
+// already been validated by the lexer (digits, optional `.`, optional
+// exponent); it never carries a sign. `ok` is cleared when the literal
+// overflows the finite binary64 range, which the oracle rejects.
+fn rt_f64_bits(s: str, ok: *mut bool) -> i64 {
+    unsafe {
+        (*ok) = true;
+        let n: usize = len(s);
+        let mut digits: Big = Big { n: 0, v: [0; 192] };
+        let mut frac: i64 = 0;
+        let mut dexp: i64 = 0;
+        let mut nd: i32 = 0;
+        let mut started: bool = false;
+        let mut seen_dot: bool = false;
+        let mut tail_nonzero: bool = false;
+        let mut i: usize = 0;
+        while i < n {
+            let c: u8 = s[i];
+            if c == 95 {
+                i = i + 1;
+                continue;
+            }
+            if c == 46 {
+                seen_dot = true;
+                i = i + 1;
+                continue;
+            }
+            if c == 101 || c == 69 {
+                break;
+            }
+            if c < 48 || c > 57 {
+                break;
+            }
+            let d: u32 = (c - 48) as u32;
+            if seen_dot {
+                frac = frac + 1;
+            }
+            if !started && d == 0 {
+                i = i + 1;
+                continue;
+            }
+            started = true;
+            if nd < F64_MAXDIG {
+                bn_mul_add(&mut digits, 10, d);
+                nd = nd + 1;
+            } else {
+                dexp = dexp + 1;
+                if d != 0 {
+                    tail_nonzero = true;
+                }
+            }
+            i = i + 1;
+        }
+        if nd == 0 {
+            return 0;
+        }
+        let mut exp10: i64 = 0;
+        if i < n && (s[i] == 101 || s[i] == 69) {
+            i = i + 1;
+            let mut neg: bool = false;
+            if i < n && (s[i] == 43 || s[i] == 45) {
+                if s[i] == 45 {
+                    neg = true;
+                }
+                i = i + 1;
+            }
+            let mut ev: i64 = 0;
+            while i < n {
+                let c: u8 = s[i];
+                if c == 95 {
+                    i = i + 1;
+                    continue;
+                }
+                if c < 48 || c > 57 {
+                    break;
+                }
+                if ev < 100000000 {
+                    ev = ev * 10 + ((c - 48) as i64);
+                }
+                i = i + 1;
+            }
+            if neg {
+                exp10 = 0 - ev;
+            } else {
+                exp10 = ev;
+            }
+        }
+        dexp = dexp + exp10 - frac;
+        let nd64: i64 = nd as i64;
+        if nd64 - 1 + dexp >= 309 {
+            (*ok) = false;
+            return 9218868437227405312;
+        }
+        if nd64 + dexp <= -325 {
+            return 0;
+        }
+        let mut e2: i64 = dexp;
+        let mut qbig: Big = Big { n: 1, v: [0; 192] };
+        qbig.v[0] = 1;
+        if dexp >= 0 {
+            let mut k: i64 = 0;
+            while k < dexp {
+                bn_mul_add(&mut digits, 5, 0);
+                k = k + 1;
+            }
+        } else {
+            let mut k: i64 = 0;
+            while k < 0 - dexp {
+                bn_mul_add(&mut qbig, 5, 0);
+                k = k + 1;
+            }
+        }
+        let bl: i32 = bn_bitlen(&mut digits) - bn_bitlen(&mut qbig);
+        // A/B lands strictly inside (2^53, 2^55), so the quotient has 54 or
+        // 55 bits and its low bit is the round bit.
+        let sh: i32 = 54 - bl;
+        if sh >= 0 {
+            bn_shl(&mut digits, sh);
+        } else {
+            bn_shl(&mut qbig, 0 - sh);
+        }
+        // Long division: q = floor(digits / qbig), rem = remainder.
+        let mut rem: Big = Big { n: 0, v: [0; 192] };
+        let mut q: u64 = 0;
+        let mut idx: i32 = bn_bitlen(&mut digits) - 1;
+        while idx >= 0 {
+            bn_shl1(&mut rem);
+            if bn_bit(&mut digits, idx) != 0 {
+                if rem.n == 0 {
+                    rem.n = 1;
+                }
+                rem.v[0] = rem.v[0] | 1;
+            }
+            q = q << 1;
+            if bn_cmp(&mut rem, &mut qbig) >= 0 {
+                bn_sub(&mut rem, &mut qbig);
+                q = q | 1;
+            }
+            idx = idx - 1;
+        }
+        let mut sticky: bool = rem.n != 0 || tail_nonzero;
+        let mut exp: i64 = e2 - (sh as i64);
+        while q >= 18014398509481984 {
+            if (q & 1) != 0 {
+                sticky = true;
+            }
+            q = q >> 1;
+            exp = exp + 1;
+        }
+        let mut biased: i64 = exp + 1076;
+        if biased >= 2047 {
+            (*ok) = false;
+            return 9218868437227405312;
+        }
+        if biased >= 1 {
+            let guard: u64 = q & 1;
+            let mut sig: u64 = q >> 1;
+            if guard != 0 && (sticky || (q & 2) != 0) {
+                sig = sig + 1;
+                if sig == 9007199254740992 {
+                    sig = 4503599627370496;
+                    exp = exp + 1;
+                    biased = biased + 1;
+                }
+            }
+            if biased >= 2047 {
+                (*ok) = false;
+                return 9218868437227405312;
+            }
+            let be: u64 = biased as u64;
+            return ((be << 52) | (sig & 4503599627370495)) as i64;
+        }
+        // Subnormal: round to the 2^-1074 grid. With q < 2^55 a shift above
+        // 55 leaves both the quotient and the round bit at zero.
+        let shift: i64 = 0 - (exp + 1074);
+        if shift > 55 {
+            return 0;
+        }
+        let sh32: i32 = shift as i32;
+        let mut m: u64 = q >> (sh32 as u64);
+        let guard2: u64 = (q >> ((sh32 - 1) as u64)) & 1;
+        let mask: u64 = (1 as u64 << ((sh32 - 1) as u64)) - 1;
+        let rest: u64 = q & mask;
+        if guard2 != 0 && (sticky || rest != 0 || (m & 1) != 0) {
+            m = m + 1;
+        }
+        if m >= 4503599627370496 {
+            return 4503599627370496;
+        }
+        return m as i64;
+    }
+}
+
+// Round a binary64 bit pattern to binary32 (round-to-nearest-even, overflow to
+// infinity, underflow to subnormal/zero). Used for `f32` literals, mirroring
+// the oracle's `value as f32`.
+fn rt_f64_as_f32(bits: i64) -> i64 {
+    let b: u64 = bits as u64;
+    let sign: u64 = b & 9223372036854775808;
+    let expf: i32 = ((b >> 52) & 2047) as i32;
+    let man: u64 = b & 4503599627370495;
+    if expf == 2047 {
+        return ((sign >> 32) | 2139095040) as i64;
+    }
+    let mut m: u64 = man;
+    let mut e: i32 = -1074;
+    if expf != 0 {
+        m = man | 4503599627370496;
+        e = expf - 1075;
+    }
+    if m == 0 {
+        return (sign >> 32) as i64;
+    }
+    let top: i32 = bn_bitlen64(m) - 1 + e;
+    if top > 127 {
+        return ((sign >> 32) | 2139095040) as i64;
+    }
+    if top < -126 {
+        let s: i32 = 0 - 149 - e;
+        if s > 53 {
+            return (sign >> 32) as i64;
+        }
+        let mut m32: u64 = m >> (s as u64);
+        if s > 0 {
+            let g: u64 = (m >> ((s - 1) as u64)) & 1;
+            let mask: u64 = (1 as u64 << ((s - 1) as u64)) - 1;
+            let rest: u64 = m & mask;
+            if g != 0 && (rest != 0 || (m32 & 1) != 0) {
+                m32 = m32 + 1;
+            }
+        }
+        if m32 >= 8388608 {
+            return ((sign >> 32) | 8388608) as i64;
+        }
+        return ((sign >> 32) | m32) as i64;
+    }
+    let sh: i32 = bn_bitlen64(m) - 24;
+    let mut m24: u64 = m >> (sh as u64);
+    let mut top2: i32 = top;
+    if sh > 0 {
+        let g: u64 = (m >> ((sh - 1) as u64)) & 1;
+        let mask: u64 = (1 as u64 << ((sh - 1) as u64)) - 1;
+        let rest: u64 = m & mask;
+        if g != 0 && (rest != 0 || (m24 & 1) != 0) {
+            m24 = m24 + 1;
+            if m24 == 16777216 {
+                m24 = 8388608;
+                top2 = top2 + 1;
+            }
+        }
+    }
+    if top2 > 127 {
+        return ((sign >> 32) | 2139095040) as i64;
+    }
+    let ef: u64 = (top2 + 127) as u64;
+    let out: u64 = sign | (ef << 23) | (m24 & 8388607);
+    return out as i64;
+}
+
+// Zero-padded 16-digit hexadecimal, for LLVM `0x...` floating constants.
+fn rt_hex16(b: *mut Buf, value: u64) {
+    let hexes: [u8; 16] = [48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 97, 98, 99, 100, 101, 102];
+    let mut i: i32 = 15;
+    while i >= 0 {
+        let sh: u64 = (i * 4) as u64;
+        let nib: usize = ((value >> sh) & 15) as usize;
+        rt_b(b, hexes[nib]);
+        i = i - 1;
+    }
+}
+
+// Widen a binary32 bit pattern to binary64 exactly.
+fn rt_f32_as_f64(bits: i64) -> i64 {
+    let b: u64 = bits as u64;
+    let sign: u64 = (b >> 32) << 63;
+    let ef: i32 = ((b >> 23) & 255) as i32;
+    let man: u64 = b & 8388607;
+    if ef == 255 {
+        return ((sign >> 32) | 9218868437227405312) as i64;
+    }
+    if ef == 0 {
+        if man == 0 {
+            return (sign >> 32) as i64;
+        }
+        let mut m: u64 = man;
+        let mut e: i32 = -126;
+        while (m & 8388608) == 0 {
+            m = m << 1;
+            e = e - 1;
+        }
+        let expfield: u64 = (e + 1023) as u64;
+        let out: u64 = sign | (expfield << 52) | ((m & 8388607) << 29);
+        return out as i64;
+    }
+    let expfield2: u64 = (ef + 896) as u64;
+    let out2: u64 = sign | (expfield2 << 52) | (man << 29);
+    return out2 as i64;
+}

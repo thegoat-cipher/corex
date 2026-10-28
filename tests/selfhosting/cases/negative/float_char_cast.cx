@@ -1,0 +1,5 @@
+fn main() -> i32 {
+    let c: char = 'a';
+    let x: f64 = c as f64;
+    return 0;
+}

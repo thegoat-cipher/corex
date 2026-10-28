@@ -827,7 +827,10 @@ fn parse_primary(p: *mut P) -> *mut Expr {
     if k == T::Float {
         bump(p);
         let e: *mut Expr = expr_new((*p).a, E::FloatLit, t);
-        unsafe { (*e).text = (*t).text; }
+        unsafe {
+            (*e).text = (*t).text;
+            (*e).ival = (*t).ival;
+        }
         return e;
     }
     if k == T::Str {
