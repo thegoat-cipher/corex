@@ -265,6 +265,50 @@ fn var_name(f: *mut Fn, slot: i32) -> str {
     }
 }
 
+// A struct whose layout LLVM reproduces exactly: no union, no packed, no
+// explicit alignment, no bitfields, and every field type is itself plain.
+// Non-plain aggregates are lowered to `[size x i8]` and accessed through the
+// byte offsets computed by semantic analysis.
+fn struct_plain(d: *mut Decl) -> bool {
+    unsafe {
+    if d == null {
+        return true;
+    }
+    if (*d).is_union || (*d).is_packed || (*d).explicit_align > 0 {
+        return false;
+    }
+    let mut f: *mut Field = (*d).fields;
+    while f != null {
+        if (*f).bit_width > 0 {
+            return false;
+        }
+        if !type_plain((*f).ty) {
+            return false;
+        }
+        f = (*f).next;
+    }
+    return true;
+
+    }
+}
+
+fn type_plain(t: *mut Type) -> bool {
+    unsafe {
+    if t == null {
+        return true;
+    }
+    let k: K = (*t).kind;
+    if k == K::Struct {
+        return struct_plain((*t).decl);
+    }
+    if k == K::Array {
+        return type_plain((*t).elem);
+    }
+    return true;
+
+    }
+}
+
 fn llty(cg: *mut Cg, t: *mut Type) -> str {
     unsafe {
     unsafe {
@@ -296,12 +340,18 @@ fn llty(cg: *mut Cg, t: *mut Type) -> str {
     if k == K::Struct {
         let mut b: Buf = rt_buf((*cg).a);
         let bp: *mut Buf = &mut b;
-        rt_s(bp, "%struct.");
-        if (*t).decl != null {
-            rt_s(bp, (*((*t).decl)).name);
-        } else {
-            rt_s(bp, "unknown");
+        if (*t).decl == null || struct_plain((*t).decl) {
+            rt_s(bp, "%struct.");
+            if (*t).decl != null {
+                rt_s(bp, (*((*t).decl)).name);
+            } else {
+                rt_s(bp, "unknown");
+            }
+            return rt_view(bp);
         }
+        rt_b(bp, 91);
+        rt_i(bp, (*((*t).decl)).size as i64);
+        rt_s(bp, " x i8]");
         return rt_view(bp);
     }
     return "i64";
@@ -725,10 +775,15 @@ fn gen_addr(f: *mut Fn, e: *mut Expr) -> Val {
         }
         let id: i32 = fnewtmp(f);
         fs(f, "  %t"); fi(f, id as i64);
-        fs(f, " = getelementptr inbounds ");
-        fs(f, llty((*f).cg, bt));
-        fs(f, ", ptr "); fs(f, base.reg);
-        fs(f, ", i32 0, i32 "); fi(f, (*e).index as i64); fnewline(f);
+        if (*bt).decl != null && !struct_plain((*bt).decl) {
+            fs(f, " = getelementptr inbounds i8, ptr "); fs(f, base.reg);
+            fs(f, ", i64 "); fi(f, (*e).ival); fnewline(f);
+        } else {
+            fs(f, " = getelementptr inbounds ");
+            fs(f, llty((*f).cg, bt));
+            fs(f, ", ptr "); fs(f, base.reg);
+            fs(f, ", i32 0, i32 "); fi(f, (*e).index as i64); fnewline(f);
+        }
         return v_addr((*e).ty, reg_of(f, id));
     }
     if k == E::Index {
@@ -1072,6 +1127,165 @@ fn fn_ptr_val(f: *mut Fn, name: str, ty: *mut Type) -> Val {
     }
 }
 
+// Load/store with an optional explicit alignment. An alignment of 0 omits the
+// attribute (the LLVM default), which is what plain struct fields use.
+fn load_val_align(f: *mut Fn, ptr: str, ty: *mut Type, al: i64) -> Val {
+    unsafe {
+    if is_agg(ty) {
+        return v_addr(ty, ptr);
+    }
+    let id: i32 = fnewtmp(f);
+    fs(f, "  %t"); fi(f, id as i64);
+    fs(f, " = load "); fs(f, llty((*f).cg, ty));
+    fs(f, ", ptr "); fs(f, ptr);
+    if al > 0 {
+        fs(f, ", align "); fi(f, al);
+    }
+    fnewline(f);
+    return v_ssa(ty, reg_of(f, id));
+
+    }
+}
+
+fn store_val_align(f: *mut Fn, ptr: str, v: Val, ty: *mut Type, al: i64) {
+    unsafe {
+    if is_agg(ty) {
+        let op: str = materialize(f, v, ty);
+        fs(f, "  store "); fs(f, llty((*f).cg, ty));
+        fs(f, " "); fs(f, op);
+        fs(f, ", ptr "); fs(f, ptr);
+    } else {
+        fs(f, "  store "); fs(f, llty((*f).cg, ty));
+        fs(f, " "); fs(f, operand(f, v, ty));
+        fs(f, ", ptr "); fs(f, ptr);
+    }
+    if al > 0 {
+        fs(f, ", align "); fi(f, al);
+    }
+    fnewline(f);
+
+    }
+}
+
+fn field_of(e: *mut Expr) -> *mut Field {
+    unsafe {
+    let bt: *mut Type = (*e).opty;
+    if bt == null || (*bt).decl == null {
+        return null;
+    }
+    return find_field((*bt).decl, (*e).field);
+
+    }
+}
+
+// Non-plain aggregates are byte arrays whose fields may be unaligned.
+fn field_access_align(e: *mut Expr) -> i64 {
+    unsafe {
+    let bt: *mut Type = (*e).opty;
+    if bt != null && (*bt).decl != null && !struct_plain((*bt).decl) {
+        return 1;
+    }
+    return 0;
+
+    }
+}
+
+fn mask_low(width: i32) -> i64 {
+    unsafe {
+    let mut m: i64 = 1;
+    let mut i: i32 = 0;
+    while i < width {
+        m = m * 2;
+        i = i + 1;
+    }
+    return m - 1;
+
+    }
+}
+
+fn load_bitfield(f: *mut Fn, ptr: str, fld: *mut Field) -> Val {
+    unsafe {
+    let unit: *mut Type = (*fld).ty;
+    let ty: str = llty((*f).cg, unit);
+    let raw: Val = load_val_align(f, ptr, unit, 1);
+    let mut cur: str = operand(f, raw, unit);
+    if (*fld).bit_offset > 0 {
+        let id: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, id as i64);
+        fs(f, " = lshr "); fs(f, ty); fs(f, " "); fs(f, cur);
+        fs(f, ", "); fi(f, (*fld).bit_offset as i64); fnewline(f);
+        cur = reg_of(f, id);
+    }
+    let bits: i32 = type_bits(unit);
+    if (*fld).bit_width < bits {
+        let id: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, id as i64);
+        fs(f, " = and "); fs(f, ty); fs(f, " "); fs(f, cur);
+        fs(f, ", "); fi(f, mask_low((*fld).bit_width)); fnewline(f);
+        cur = reg_of(f, id);
+        if type_is_signed(unit) {
+            let shift: i32 = bits - (*fld).bit_width;
+            let wide: i32 = fnewtmp(f);
+            fs(f, "  %t"); fi(f, wide as i64);
+            fs(f, " = shl "); fs(f, ty); fs(f, " "); fs(f, cur);
+            fs(f, ", "); fi(f, shift as i64); fnewline(f);
+            let back: i32 = fnewtmp(f);
+            fs(f, "  %t"); fi(f, back as i64);
+            fs(f, " = ashr "); fs(f, ty); fs(f, " "); fs(f, reg_of(f, wide));
+            fs(f, ", "); fi(f, shift as i64); fnewline(f);
+            cur = reg_of(f, back);
+        }
+    }
+    return v_ssa(unit, cur);
+
+    }
+}
+
+fn store_bitfield(f: *mut Fn, ptr: str, fld: *mut Field, v: Val) {
+    unsafe {
+    let unit: *mut Type = (*fld).ty;
+    let ty: str = llty((*f).cg, unit);
+    let bits: i32 = type_bits(unit);
+    let width: i32 = (*fld).bit_width;
+    let off: i32 = (*fld).bit_offset;
+    if width >= bits && off == 0 {
+        store_val_align(f, ptr, v, unit, 1);
+        return;
+    }
+    let raw: Val = load_val_align(f, ptr, unit, 1);
+    let low: i64 = mask_low(width);
+    let mut shifted_mask: i64 = low;
+    let mut i: i32 = 0;
+    while i < off {
+        shifted_mask = shifted_mask * 2;
+        i = i + 1;
+    }
+    let keep_inv: i64 = 0 - (shifted_mask + 1);
+    let keep: i32 = fnewtmp(f);
+    fs(f, "  %t"); fi(f, keep as i64);
+    fs(f, " = and "); fs(f, ty); fs(f, " "); fs(f, operand(f, raw, unit));
+    fs(f, ", "); fi(f, keep_inv); fnewline(f);
+    let masked: i32 = fnewtmp(f);
+    fs(f, "  %t"); fi(f, masked as i64);
+    fs(f, " = and "); fs(f, ty); fs(f, " "); fs(f, operand(f, v, unit));
+    fs(f, ", "); fi(f, low); fnewline(f);
+    let mut placed: str = reg_of(f, masked);
+    if off > 0 {
+        let sh: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, sh as i64);
+        fs(f, " = shl "); fs(f, ty); fs(f, " "); fs(f, placed);
+        fs(f, ", "); fi(f, off as i64); fnewline(f);
+        placed = reg_of(f, sh);
+    }
+    let res: i32 = fnewtmp(f);
+    fs(f, "  %t"); fi(f, res as i64);
+    fs(f, " = or "); fs(f, ty); fs(f, " "); fs(f, reg_of(f, keep));
+    fs(f, ", "); fs(f, placed); fnewline(f);
+    store_val_align(f, ptr, v_ssa(unit, reg_of(f, res)), unit, 1);
+
+    }
+}
+
 fn gen_expr(f: *mut Fn, e: *mut Expr) -> Val {
     unsafe {
     unsafe {
@@ -1193,6 +1407,13 @@ fn gen_expr(f: *mut Fn, e: *mut Expr) -> Val {
     }
     if k == E::Index || k == E::Field {
         let a: Val = gen_addr(f, e);
+        if k == E::Field {
+            let fld: *mut Field = field_of(e);
+            if fld != null && (*fld).bit_width > 0 {
+                return load_bitfield(f, a.reg, fld);
+            }
+            return load_val_align(f, a.reg, (*e).ty, field_access_align(e));
+        }
         return load_val(f, a.reg, (*e).ty);
     }
     if k == E::Unary {
@@ -1241,18 +1462,34 @@ fn gen_expr(f: *mut Fn, e: *mut Expr) -> Val {
         let ty: *mut Type = (*e).ty;
         let slot: str = ftemp(f, ty);
         let d: *mut Decl = (*ty).decl;
+        let plain: bool = struct_plain(d);
+        if !plain {
+            fs(f, "  store "); fs(f, llty((*f).cg, ty));
+            fs(f, " zeroinitializer, ptr "); fs(f, slot); fs(f, ", align 1\n");
+        }
         let mut arg: *mut Expr = (*e).args;
         while arg != null {
             let fld: *mut Field = find_field(d, (*arg).field);
             if fld != null {
                 let id: i32 = fnewtmp(f);
                 fs(f, "  %t"); fi(f, id as i64);
-                fs(f, " = getelementptr inbounds "); fs(f, llty((*f).cg, ty));
-                fs(f, ", ptr "); fs(f, slot);
-                fs(f, ", i32 0, i32 "); fi(f, (*fld).index as i64); fnewline(f);
+                if plain {
+                    fs(f, " = getelementptr inbounds "); fs(f, llty((*f).cg, ty));
+                    fs(f, ", ptr "); fs(f, slot);
+                    fs(f, ", i32 0, i32 "); fi(f, (*fld).index as i64); fnewline(f);
+                } else {
+                    fs(f, " = getelementptr inbounds i8, ptr "); fs(f, slot);
+                    fs(f, ", i64 "); fi(f, (*fld).offset as i64); fnewline(f);
+                }
                 let faddr: str = reg_of(f, id);
                 let v: Val = gen_expr(f, arg);
-                store_val(f, faddr, v, (*fld).ty);
+                if (*fld).bit_width > 0 {
+                    store_bitfield(f, faddr, fld, v);
+                } else if plain {
+                    store_val(f, faddr, v, (*fld).ty);
+                } else {
+                    store_val_align(f, faddr, v, (*fld).ty, 1);
+                }
             }
             arg = (*arg).next;
         }
@@ -1933,20 +2170,45 @@ fn gen_stmt(f: *mut Fn, st: *mut Stmt) {
         return;
     }
     if k == S::Assign {
-        let addr: Val = gen_addr(f, (*st).expr);
-        let ty: *mut Type = (*(*st).expr).ty;
-        if (*st).op == T::Eq {
-            let v: Val = gen_expr(f, (*st).rhs);
-            store_val(f, addr.reg, v, ty);
-            return;
+        let target: *mut Expr = (*st).expr;
+        let addr: Val = gen_addr(f, target);
+        let ty: *mut Type = (*target).ty;
+        let is_field: bool = (*target).kind == E::Field;
+        let mut fld: *mut Field = null;
+        let mut al: i64 = 0;
+        if is_field {
+            fld = field_of(target);
+            al = field_access_align(target);
         }
-        let old: Val = load_val(f, addr.reg, ty);
-        let rv: Val = gen_expr(f, (*st).rhs);
-        let a: str = operand(f, old, ty);
-        let b: str = operand(f, rv, ty);
-        let res: str = gen_simple_bin(f, assign_base((*st).op), a, b, ty);
-        fs(f, "  store "); fs(f, llty((*f).cg, ty)); fs(f, " "); fs(f, res);
-        fs(f, ", ptr "); fs(f, addr.reg); fnewline(f);
+        let mut bits: bool = false;
+        if fld != null && (*fld).bit_width > 0 {
+            bits = true;
+        }
+        let mut out: Val = null_val();
+        if (*st).op == T::Eq {
+            out = gen_expr(f, (*st).rhs);
+        } else {
+            let mut old: Val = null_val();
+            if bits {
+                old = load_bitfield(f, addr.reg, fld);
+            } else if is_field {
+                old = load_val_align(f, addr.reg, ty, al);
+            } else {
+                old = load_val(f, addr.reg, ty);
+            }
+            let rv: Val = gen_expr(f, (*st).rhs);
+            let a: str = operand(f, old, ty);
+            let b: str = operand(f, rv, ty);
+            let res: str = gen_simple_bin(f, assign_base((*st).op), a, b, ty);
+            out = v_ssa(ty, res);
+        }
+        if bits {
+            store_bitfield(f, addr.reg, fld, out);
+        } else if is_field {
+            store_val_align(f, addr.reg, out, ty, al);
+        } else {
+            store_val(f, addr.reg, out, ty);
+        }
         return;
     }
     if k == S::Expr {
@@ -2181,7 +2443,7 @@ fn gen_types(cg: *mut Cg) {
     unsafe {
     let mut d: *mut Decl = (*((*cg).sem)).globals;
     while d != null {
-        if (*d).kind == D::Struct {
+        if (*d).kind == D::Struct && struct_plain(d) {
             rt_s((*cg).types, "%struct.");
             rt_s((*cg).types, (*d).name);
             rt_s((*cg).types, " = type { ");

@@ -506,28 +506,169 @@ fn type_align(s: *mut Sem, t: *mut Type) -> usize {
     }
 }
 
+fn type_bits(t: *mut Type) -> i32 {
+    unsafe {
+    if t == null {
+        return 0;
+    }
+    let k: K = (*t).kind;
+    if k == K::I8 || k == K::U8 {
+        return 8;
+    }
+    if k == K::I16 || k == K::U16 {
+        return 16;
+    }
+    if k == K::I32 || k == K::U32 || k == K::Enum {
+        return 32;
+    }
+    if k == K::I64 || k == K::U64 || k == K::Usize || k == K::Isize {
+        return 64;
+    }
+    return 0;
+
+    }
+}
+
+fn field_duplicate(d: *mut Decl, target: *mut Field) -> bool {
+    unsafe {
+    let mut q: *mut Field = (*d).fields;
+    while q != null && q != target {
+        if rt_eq((*q).name, (*target).name) {
+            return true;
+        }
+        q = (*q).next;
+    }
+    return false;
+
+    }
+}
+
 fn layout_struct(s: *mut Sem, d: *mut Decl) {
     unsafe {
     if (*d).laid_out {
         return;
     }
+    if (*d).busy {
+        sdiag(s, (*d).file, (*d).line, (*d).col, "type contains itself by value; use a pointer");
+        (*d).size = 8;
+        (*d).alignment = 8;
+        (*d).laid_out = true;
+        return;
+    }
     (*d).busy = true;
+    if (*d).is_union {
+        let mut size: usize = 0;
+        let mut al: usize = 1;
+        let mut f: *mut Field = (*d).fields;
+        if f == null {
+            sdiag(s, (*d).file, (*d).line, (*d).col, "unions must have at least one field");
+        }
+        while f != null {
+            if field_duplicate(d, f) {
+                sdiag(s, (*d).file, (*d).line, (*d).col, "duplicate field name");
+            }
+            let ft: *mut Type = resolve_type(s, (*f).ty);
+            if (*ft).kind == K::Array && (*ft).len == 0 {
+                sdiag(s, (*d).file, (*d).line, (*d).col, "flexible array members are not allowed in unions");
+            }
+            let fa: usize = type_align(s, ft);
+            let fs: usize = type_size(s, ft);
+            (*f).offset = 0;
+            (*f).size = fs;
+            (*f).alignment = fa;
+            (*f).bit_offset = 0;
+            if fs > size {
+                size = fs;
+            }
+            if fa > al {
+                al = fa;
+            }
+            f = (*f).next;
+        }
+        if (*d).explicit_align > al {
+            al = (*d).explicit_align;
+        }
+        (*d).alignment = al;
+        (*d).size = align_to(size, al);
+        (*d).busy = false;
+        (*d).laid_out = true;
+        return;
+    }
     let mut off: usize = 0;
     let mut al: usize = 1;
+    let mut unit_off: usize = 0;
+    let mut unit_bits: i32 = 0;
+    let mut unit_used: i32 = 0;
     let mut f: *mut Field = (*d).fields;
+    if f == null {
+        sdiag(s, (*d).file, (*d).line, (*d).col, "structs must have at least one field");
+    }
     while f != null {
+        if field_duplicate(d, f) {
+            sdiag(s, (*d).file, (*d).line, (*d).col, "duplicate field name");
+        }
         let ft: *mut Type = resolve_type(s, (*f).ty);
+        if (*ft).kind == K::Array && (*ft).len == 0 {
+            if (*f).next != null {
+                sdiag(s, (*d).file, (*d).line, (*d).col, "flexible array member must be the last field");
+            }
+        }
         let fa: usize = type_align(s, ft);
         let fs: usize = type_size(s, ft);
-        off = align_to(off, fa);
-        (*f).offset = off;
-        (*f).size = fs;
-        (*f).alignment = fa;
-        off = off + fs;
-        if fa > al {
-            al = fa;
+        if (*f).bit_width > 0 {
+            let bits: i32 = type_bits(ft);
+            if bits == 0 {
+                sdiag(s, (*d).file, (*d).line, (*d).col, "bitfield requires an integer or enum type");
+                (*f).bit_width = 0;
+            } else if (*f).bit_width > bits {
+                sdiag(s, (*d).file, (*d).line, (*d).col, "bitfield width exceeds the width of its type");
+                (*f).bit_width = bits;
+            }
+        }
+        if (*f).bit_width > 0 {
+            let bits: i32 = type_bits(ft);
+            let mut fits: bool = false;
+            if unit_bits == bits && unit_used + (*f).bit_width <= bits {
+                fits = true;
+            }
+            if fits {
+                (*f).offset = unit_off;
+                (*f).bit_offset = unit_used;
+                unit_used = unit_used + (*f).bit_width;
+            } else {
+                if !(*d).is_packed {
+                    off = align_to(off, fa);
+                }
+                (*f).offset = off;
+                (*f).bit_offset = 0;
+                off = off + fs;
+                unit_off = (*f).offset;
+                unit_bits = bits;
+                unit_used = (*f).bit_width;
+            }
+            (*f).size = fs;
+            (*f).alignment = fa;
+            if !(*d).is_packed && fa > al {
+                al = fa;
+            }
+        } else {
+            unit_bits = 0;
+            if !(*d).is_packed {
+                off = align_to(off, fa);
+            }
+            (*f).offset = off;
+            (*f).bit_offset = 0;
+            off = off + fs;
+            (*f).size = fs;
+            (*f).alignment = fa;
+            if !(*d).is_packed && fa > al {
+                al = fa;
+            }
         }
         f = (*f).next;
+    }
+    if (*d).explicit_align > al {
+        al = (*d).explicit_align;
     }
     (*d).alignment = al;
     (*d).size = align_to(off, al);
@@ -674,6 +815,10 @@ fn eval_int(s: *mut Sem, e: *mut Expr) -> i64 {
         if (*t).kind == K::Struct && (*t).decl != null {
             let f: *mut Field = find_field((*t).decl, (*e).field);
             if f != null {
+                if (*f).bit_width > 0 {
+                    sdiag(s, (*e).file, (*e).line, (*e).col, "offsetof cannot be applied to a bitfield");
+                    return 0;
+                }
                 return (*f).offset as i64;
             }
         }
@@ -990,6 +1135,7 @@ fn check_expr(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
             return t;
         }
         (*e).index = (*f).index;
+        (*e).ival = (*f).offset as i64;
         (*e).opty = bt;
         (*e).ty = (*f).ty;
         return (*f).ty;
@@ -1103,7 +1249,11 @@ fn check_expr(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
             if (*tt).kind == K::Struct && (*tt).decl != null {
                 let f: *mut Field = find_field((*tt).decl, (*e).field);
                 if f != null {
-                    (*e).ival = (*f).offset as i64;
+                    if (*f).bit_width > 0 {
+                        sdiag(s, (*e).file, (*e).line, (*e).col, "offsetof cannot be applied to a bitfield");
+                    } else {
+                        (*e).ival = (*f).offset as i64;
+                    }
                 }
             }
         }
@@ -1122,6 +1272,7 @@ fn check_expr(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
         }
         let st: *mut Type = type_new((*s).a, K::Struct);
         (*st).decl = d;
+        let mut nargs: i32 = 0;
         let mut arg: *mut Expr = (*e).args;
         while arg != null {
             let f: *mut Field = find_field(d, (*arg).field);
@@ -1133,22 +1284,29 @@ fn check_expr(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
                     sdiag(s, (*arg).file, (*arg).line, (*arg).col, "field type mismatch");
                 }
             }
+            nargs = nargs + 1;
             arg = (*arg).next;
         }
-        let mut f: *mut Field = (*d).fields;
-        while f != null {
-            let mut found: bool = false;
-            let mut arg2: *mut Expr = (*e).args;
-            while arg2 != null {
-                if rt_eq((*arg2).field, (*f).name) {
-                    found = true;
+        if (*d).is_union {
+            if nargs != 1 {
+                sdiag(s, (*e).file, (*e).line, (*e).col, "a union literal initializes exactly one field");
+            }
+        } else {
+            let mut f: *mut Field = (*d).fields;
+            while f != null {
+                let mut found: bool = false;
+                let mut arg2: *mut Expr = (*e).args;
+                while arg2 != null {
+                    if rt_eq((*arg2).field, (*f).name) {
+                        found = true;
+                    }
+                    arg2 = (*arg2).next;
                 }
-                arg2 = (*arg2).next;
+                if !found {
+                    sdiag(s, (*e).file, (*e).line, (*e).col, "missing struct field");
+                }
+                f = (*f).next;
             }
-            if !found {
-                sdiag(s, (*e).file, (*e).line, (*e).col, "missing struct field");
-            }
-            f = (*f).next;
         }
         (*e).ty = st;
         return st;

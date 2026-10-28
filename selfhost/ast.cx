@@ -99,6 +99,8 @@ struct Field {
     size: usize,
     alignment: usize,
     index: i32,
+    bit_width: i32,
+    bit_offset: i32,
 }
 
 struct Variant {
@@ -127,6 +129,9 @@ struct Decl {
     cval_s: str,
     is_mut: bool,
     is_extern: bool,
+    is_union: bool,
+    is_packed: bool,
+    explicit_align: usize,
     busy: bool,
     laid_out: bool,
     slot: i32,
@@ -242,6 +247,9 @@ fn decl_new(a: *mut Arena, kind: D, name: str, file: i32, line: i32, col: i32) -
         (*d).cval_s = "";
         (*d).is_mut = false;
         (*d).is_extern = false;
+        (*d).is_union = false;
+        (*d).is_packed = false;
+        (*d).explicit_align = 0;
         (*d).busy = false;
         (*d).laid_out = false;
         (*d).slot = -1;

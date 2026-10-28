@@ -1,0 +1,36 @@
+typedef Word = u64;
+struct Point { x: i32, y: i32 }
+union Value { i: i32, f: f32, b: u8 }
+packed struct Packed { tag: u8, value: u32 }
+align(16) struct Aligned { x: u8 }
+struct Bits { a: u8: 3, b: u8: 5, flag: u8: 1 }
+struct Flexible { len: u64, data: [u8; 0] }
+
+fn main() -> i32 {
+    print(sizeof(Point));
+    print(alignof(Point));
+    print(offsetof(Point, y));
+    print(sizeof(Packed));
+    print(sizeof(Aligned));
+    print(alignof(Aligned));
+    print(sizeof(Bits));
+    print(sizeof(Flexible));
+    print(sizeof(Word));
+    let p: Point = Point { y: 2, x: 1 };
+    print(p.x);
+    print(p.y);
+    let v: Value = Value { i: 65 };
+    print(v.i);
+    print(v.b);
+    let mut bits: Bits = Bits { a: 5, b: 17, flag: 1 };
+    print(bits.a);
+    print(bits.b);
+    print(bits.flag);
+    bits.a = 2;
+    bits.flag = 0;
+    print(bits.a);
+    print(bits.b);
+    print(bits.flag);
+    print(Aligned { x: 3 }.x);
+    return 0;
+}
