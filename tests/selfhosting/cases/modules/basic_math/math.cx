@@ -1,0 +1,18 @@
+module math;
+
+pub struct Vec2 { x: i32, y: i32 }
+pub enum Op { Add, Sub, Mul }
+pub const K: i32 = 5;
+
+pub fn add(a: i32, b: i32) -> i32 { return a + b; }
+pub fn make(x: i32, y: i32) -> Vec2 { return Vec2 { x: x, y: y }; }
+pub fn apply(op: Op, a: i32, b: i32) -> i32 {
+    switch op {
+        case Op::Add { return a + b; }
+        case Op::Sub { return a - b; }
+        case Op::Mul { return a * b; }
+    }
+    return 0;
+}
+fn secret() -> i32 { return 77; }
+pub fn revealed() -> i32 { return secret(); }

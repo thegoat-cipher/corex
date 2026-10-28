@@ -1,0 +1,7 @@
+module app;
+mod math;
+
+fn main() -> i32 {
+    print(math::secret());
+    return 0;
+}

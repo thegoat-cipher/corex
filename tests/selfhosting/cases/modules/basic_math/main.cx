@@ -1,0 +1,13 @@
+module app;
+mod math;
+
+fn main() -> i32 {
+    print(math::add(20, 22));
+    let v: math::Vec2 = math::make(3, 4);
+    print(v.x);
+    print(v.y);
+    print(math::K);
+    print(math::apply(math::Op::Mul, 6, 7));
+    print(math::revealed());
+    return 0;
+}

@@ -1,0 +1,7 @@
+module app;
+mod opt;
+
+fn main() -> i32 {
+    print(opt::speed());
+    return 0;
+}

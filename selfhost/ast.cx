@@ -129,6 +129,8 @@ struct Decl {
     cval_s: str,
     is_mut: bool,
     is_extern: bool,
+    is_pub: bool,
+    unit: str,
     is_union: bool,
     is_packed: bool,
     explicit_align: usize,
@@ -158,6 +160,8 @@ struct Program {
     items_tail: *mut Item,
     decls: *mut Decl,
     decls_tail: *mut Decl,
+    module_name: str,
+    deps: *mut PathList,
 }
 
 struct SrcList {
@@ -247,6 +251,8 @@ fn decl_new(a: *mut Arena, kind: D, name: str, file: i32, line: i32, col: i32) -
         (*d).cval_s = "";
         (*d).is_mut = false;
         (*d).is_extern = false;
+        (*d).is_pub = false;
+        (*d).unit = "";
         (*d).is_union = false;
         (*d).is_packed = false;
         (*d).explicit_align = 0;
@@ -278,7 +284,8 @@ fn item_new(a: *mut Arena, kind: I, d: *mut Decl, tok: *mut Tok) -> *mut Item {
 }
 
 fn prog_init() -> Program {
-    return Program { items: null, items_tail: null, decls: null, decls_tail: null };
+    return Program { items: null, items_tail: null, decls: null, decls_tail: null,
+        module_name: "", deps: null };
 }
 
 fn prog_add(p: *mut Program, it: *mut Item) {
@@ -325,4 +332,19 @@ fn srcs_get(sl: *mut SrcList, id: i32) -> *mut Src {
         }
     }
     return null;
+}
+
+fn prog_append(dst: *mut Program, src: *mut Program) {
+    unsafe {
+    if (*src).items == null {
+        return;
+    }
+    if (*dst).items_tail == null {
+        (*dst).items = (*src).items;
+    } else {
+        (*(*dst).items_tail).next = (*src).items;
+    }
+    (*dst).items_tail = (*src).items_tail;
+
+    }
 }

@@ -18,6 +18,7 @@ struct Sem {
     slot: i32,
     errors: i32,
     labels: *mut Lbl,
+    cur_module: str,
 }
 
 fn sdiag(s: *mut Sem, file: i32, line: i32, col: i32, msg: str) {
@@ -318,7 +319,7 @@ fn collect_label_stmt(s: *mut Sem, st: *mut Stmt) {
     }
 }
 
-fn lookup(s: *mut Sem, name: str) -> *mut Decl {
+fn lookup_raw(s: *mut Sem, name: str) -> *mut Decl {
     unsafe {
     let mut sc: *mut Scope = (*s).scope;
     while sc != null {
@@ -332,6 +333,60 @@ fn lookup(s: *mut Sem, name: str) -> *mut Decl {
         sc = (*sc).parent;
     }
     return sem_find(s, name);
+
+    }
+}
+
+// Unqualified names inside a module unit resolve against the unit's mangled
+// names first, then against the flat namespace.
+fn lookup(s: *mut Sem, name: str) -> *mut Decl {
+    unsafe {
+    if !rt_eq((*s).cur_module, "") && !has_dollar(name) {
+        let mut b: Buf = rt_buf((*s).a);
+        let bp: *mut Buf = &mut b;
+        rt_s(bp, (*s).cur_module);
+        rt_s(bp, "$");
+        rt_s(bp, name);
+        let d: *mut Decl = lookup_raw(s, rt_view(bp));
+        if d != null {
+            return d;
+        }
+    }
+    return lookup_raw(s, name);
+
+    }
+}
+
+// Items of another unit are reachable only when declared `pub`.
+fn visible(s: *mut Sem, d: *mut Decl) -> bool {
+    unsafe {
+    if d == null {
+        return true;
+    }
+    if rt_eq((*d).unit, "") {
+        return true;
+    }
+    if rt_eq((*d).unit, (*s).cur_module) {
+        return true;
+    }
+    return (*d).is_pub;
+
+    }
+}
+
+fn decl_value_type(s: *mut Sem, e: *mut Expr, d: *mut Decl) -> *mut Type {
+    unsafe {
+    (*e).decl = d;
+    if !visible(s, d) {
+        sdiag(s, (*e).file, (*e).line, (*e).col, "item is private to its module");
+    }
+    if (*d).kind == D::Func {
+        let ft: *mut Type = decl_fn_type(s, d);
+        (*e).ty = ft;
+        return ft;
+    }
+    (*e).ty = (*d).ty;
+    return (*d).ty;
 
     }
 }
@@ -685,18 +740,24 @@ fn resolve_type(s: *mut Sem, t: *mut Type) -> *mut Type {
     }
     let k: K = (*t).kind;
     if k == K::Named {
-        let d: *mut Decl = sem_find(s, (*t).name);
+        let d: *mut Decl = lookup(s, (*t).name);
         if d == null {
             sdiag(s, 0, 0, 0, "unknown type");
             (*t).kind = K::I32;
             return t;
         }
         if (*d).kind == D::Struct {
+            if !visible(s, d) {
+                sdiag(s, 0, 0, 0, "type is private to its module");
+            }
             (*t).kind = K::Struct;
             (*t).decl = d;
             return t;
         }
         if (*d).kind == D::Enum {
+            if !visible(s, d) {
+                sdiag(s, 0, 0, 0, "type is private to its module");
+            }
             (*t).kind = K::Enum;
             (*t).decl = d;
             return t;
@@ -793,9 +854,20 @@ fn eval_int(s: *mut Sem, e: *mut Expr) -> i64 {
         return 0;
     }
     if k == E::Path {
-        let d: *mut Decl = sem_find(s, (*e).name);
+        let mut ename: str = (*e).name;
+        let mut vname: str = (*e).field;
+        if !rt_eq((*e).text, "") {
+            let mut b: Buf = rt_buf((*s).a);
+            let bp: *mut Buf = &mut b;
+            rt_s(bp, (*e).name);
+            rt_s(bp, "$");
+            rt_s(bp, (*e).field);
+            ename = rt_view(bp);
+            vname = (*e).text;
+        }
+        let d: *mut Decl = lookup(s, ename);
         if d != null && (*d).kind == D::Enum {
-            let v: *mut Variant = find_variant(d, (*e).field);
+            let v: *mut Variant = find_variant(d, vname);
             if v != null {
                 return (*v).value;
             }
@@ -1007,22 +1079,53 @@ fn check_expr(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
             (*e).ty = t;
             return t;
         }
-        (*e).decl = d;
-        if (*d).kind == D::Func {
-            let ft: *mut Type = decl_fn_type(s, d);
-            (*e).ty = ft;
-            return ft;
-        }
-        (*e).ty = (*d).ty;
-        return (*d).ty;
+        return decl_value_type(s, e, d);
     }
     if k == E::Path {
-        let d: *mut Decl = sem_find(s, (*e).name);
+        let mut qb: Buf = rt_buf((*s).a);
+        let qbp: *mut Buf = &mut qb;
+        rt_s(qbp, (*e).name);
+        rt_s(qbp, "$");
+        rt_s(qbp, (*e).field);
+        let qname: str = rt_view(qbp);
+        if !rt_eq((*e).text, "") {
+            let d: *mut Decl = sem_find(s, qname);
+            if d == null || (*d).kind != D::Enum {
+                sdiag(s, (*e).file, (*e).line, (*e).col, "unknown enum");
+                let t: *mut Type = type_new((*s).a, K::I32);
+                (*e).ty = t;
+                return t;
+            }
+            if !visible(s, d) {
+                sdiag(s, (*e).file, (*e).line, (*e).col, "item is private to its module");
+            }
+            let v: *mut Variant = find_variant(d, (*e).text);
+            if v == null {
+                sdiag(s, (*e).file, (*e).line, (*e).col, "unknown enum variant");
+                let t: *mut Type = type_new((*s).a, K::I32);
+                (*e).ty = t;
+                return t;
+            }
+            (*e).decl = d;
+            (*e).index = (*v).value as i32;
+            let t: *mut Type = type_new((*s).a, K::Enum);
+            (*t).decl = d;
+            (*e).ty = t;
+            return t;
+        }
+        let item: *mut Decl = sem_find(s, qname);
+        if item != null && (*item).kind != D::Enum {
+            return decl_value_type(s, e, item);
+        }
+        let d: *mut Decl = lookup(s, (*e).name);
         if d == null || (*d).kind != D::Enum {
             sdiag(s, (*e).file, (*e).line, (*e).col, "unknown enum");
             let t: *mut Type = type_new((*s).a, K::I32);
             (*e).ty = t;
             return t;
+        }
+        if !visible(s, d) {
+            sdiag(s, (*e).file, (*e).line, (*e).col, "item is private to its module");
         }
         let v: *mut Variant = find_variant(d, (*e).field);
         if v == null {
@@ -1263,7 +1366,7 @@ fn check_expr(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
         return t;
     }
     if k == E::StructLit {
-        let d: *mut Decl = sem_find(s, (*e).name);
+        let d: *mut Decl = lookup(s, (*e).name);
         if d == null || (*d).kind != D::Struct {
             sdiag(s, (*e).file, (*e).line, (*e).col, "unknown struct type");
             let t: *mut Type = type_new((*s).a, K::I32);
@@ -1553,21 +1656,34 @@ fn check_call(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
         (*e).ty = t;
         return t;
     }
-    if (*((*e).lhs)).kind != E::Ident {
-        return check_indirect_call(s, e, expected);
-    }
-    let name: str = (*((*e).lhs)).name;
-    // A local binding shadows a function of the same name: that call is
-    // indirect through the binding's function pointer.
-    if lookup_local(s, name) != null {
+    let lk: E = (*((*e).lhs)).kind;
+    let mut name: str = "";
+    if lk == E::Ident {
+        name = (*((*e).lhs)).name;
+        // A local binding shadows a function of the same name: that call is
+        // indirect through the binding's function pointer.
+        if lookup_local(s, name) != null {
+            return check_indirect_call(s, e, expected);
+        }
+    } else if lk == E::Path && rt_eq((*((*e).lhs)).text, "") {
+        let mut b: Buf = rt_buf((*s).a);
+        let bp: *mut Buf = &mut b;
+        rt_s(bp, (*((*e).lhs)).name);
+        rt_s(bp, "$");
+        rt_s(bp, (*((*e).lhs)).field);
+        name = rt_view(bp);
+    } else {
         return check_indirect_call(s, e, expected);
     }
     let bid: i32 = builtin_id(name);
     if bid != 0 {
         (*e).index = bid;
     } else {
-        let d: *mut Decl = sem_find(s, name);
+        let d: *mut Decl = lookup(s, name);
         if d != null && (*d).kind == D::Func {
+            if !visible(s, d) {
+                sdiag(s, (*e).file, (*e).line, (*e).col, "item is private to its module");
+            }
             (*e).decl = d;
             let mut arg: *mut Expr = (*e).args;
             let mut par: *mut Param = (*d).params;
@@ -2216,6 +2332,7 @@ fn check_fn(s: *mut Sem, d: *mut Decl) {
     (*s).loop_depth = 0;
     (*s).switch_depth = 0;
     (*s).labels = null;
+    (*s).cur_module = (*d).unit;
     collect_labels(s, (*d).body);
     scope_push(s);
     let mut p: *mut Param = (*d).params;
@@ -2245,6 +2362,7 @@ fn resolve_all_types(s: *mut Sem) {
     unsafe {
     let mut d: *mut Decl = (*s).globals;
     while d != null {
+        (*s).cur_module = (*d).unit;
         if (*d).kind == D::Func {
             (*d).ty = resolve_type(s, (*d).ty);
             let mut p: *mut Param = (*d).params;
@@ -2273,11 +2391,13 @@ fn layout_all(s: *mut Sem) {
     unsafe {
     let mut d: *mut Decl = (*s).globals;
     while d != null {
+        (*s).cur_module = (*d).unit;
         if (*d).kind == D::Struct {
             layout_struct(s, d);
         }
         d = (*d).next;
     }
+    (*s).cur_module = "";
 
     }
 }
@@ -2299,6 +2419,7 @@ fn sem_run(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program)
     (*s).slot = 0;
     (*s).errors = 0;
     (*s).labels = null;
+    (*s).cur_module = "";
     let mut it: *mut Item = (*prog).items;
     while it != null {
         if (*it).decl != null {

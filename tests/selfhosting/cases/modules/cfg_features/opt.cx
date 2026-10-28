@@ -1,0 +1,7 @@
+module opt;
+
+#[cfg(feature = "fast")]
+pub fn speed() -> i32 { return 100; }
+
+#[cfg(not(feature = "fast"))]
+pub fn speed() -> i32 { return 1; }

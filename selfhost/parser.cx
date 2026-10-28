@@ -15,6 +15,11 @@ struct P {
     depth: i32,
     vec_depth: i32,
     pending_gt: i32,
+    module_name: str,
+    deps: *mut PathList,
+    cfg: *mut PathList,
+    discard: bool,
+    is_root: bool,
 }
 
 fn pk(p: *mut P) -> *mut Tok {
@@ -239,10 +244,21 @@ fn parse_type(p: *mut P) -> *mut Type {
     }
     if k == T::Ident {
         bump(p);
-        if at(p, T::ColonColon) {
-            perr(p, "qualified type names are not supported");
+        if eat(p, T::ColonColon) {
+            if !at(p, T::Ident) {
+                perr(p, "expected type name after `::`");
+                return type_prim((*p).a, K::I32);
+            }
+            let second: str = (*pk(p)).text;
             bump(p);
-            if at(p, T::Ident) { bump(p); }
+            let mut b: Buf = rt_buf((*p).a);
+            let bp: *mut Buf = &mut b;
+            rt_s(bp, (*t).text);
+            rt_s(bp, "$");
+            rt_s(bp, second);
+            let ty: *mut Type = type_new((*p).a, K::Named);
+            (*ty).name = rt_view(bp);
+            return ty;
         }
         let ty: *mut Type = type_new((*p).a, K::Named);
         unsafe { (*ty).name = (*t).text; }
@@ -310,16 +326,51 @@ fn append_variant(d: *mut Decl, v: *mut Variant) {
     }
 }
 
+// Append an item, applying the unit's module prefix and dropping items whose
+// `#[cfg]` evaluated to false.
 fn add_item(p: *mut P, it: *mut Item) {
     unsafe {
-    unsafe {
-        if (*p).items_tail == null {
-            (*p).items = it;
-        } else {
-            (*(*p).items_tail).next = it;
-        }
-        (*p).items_tail = it;
+    if (*p).discard {
+        return;
     }
+    let d: *mut Decl = (*it).decl;
+    if d != null {
+        (*d).is_pub = (*it).is_pub;
+        (*d).unit = (*p).module_name;
+        let mut keep: bool = false;
+        if (*p).is_root && (*d).kind == D::Func
+            && (rt_eq((*d).name, "main") || rt_eq((*d).name, "_start")) {
+            keep = true;
+        }
+        if !keep && !rt_eq((*p).module_name, "") && !rt_eq((*d).name, "") && !has_dollar((*d).name) {
+            let mut b: Buf = rt_buf((*p).a);
+            let bp: *mut Buf = &mut b;
+            rt_s(bp, (*p).module_name);
+            rt_s(bp, "$");
+            rt_s(bp, (*d).name);
+            (*d).name = rt_view(bp);
+        }
+    }
+    if (*p).items_tail == null {
+        (*p).items = it;
+    } else {
+        (*(*p).items_tail).next = it;
+    }
+    (*p).items_tail = it;
+
+    }
+}
+
+fn has_dollar(s: str) -> bool {
+    unsafe {
+    let mut i: usize = 0;
+    while i < len(s) {
+        if s[i] == 36 {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
 
     }
 }
@@ -1150,17 +1201,42 @@ fn parse_primary(p: *mut P) -> *mut Expr {
         let name: str = (*t).text;
         if eat(p, T::ColonColon) {
             let vt: *mut Tok = pk(p);
-            if at(p, T::Ident) {
+            if !at(p, T::Ident) {
+                perr(p, "expected an item name after `::`");
+                return null;
+            }
+            bump(p);
+            let second: str = (*vt).text;
+            if eat(p, T::ColonColon) {
+                let vv: *mut Tok = pk(p);
+                if !at(p, T::Ident) {
+                    perr(p, "expected enum variant");
+                    return null;
+                }
                 bump(p);
                 let e: *mut Expr = expr_new((*p).a, E::Path, t);
                 unsafe {
                     (*e).name = name;
-                    (*e).field = (*vt).text;
+                    (*e).field = second;
+                    (*e).text = (*vv).text;
                 }
                 return e;
             }
-            perr(p, "expected enum variant");
-            return null;
+            let mut b: Buf = rt_buf((*p).a);
+            let bp: *mut Buf = &mut b;
+            rt_s(bp, name);
+            rt_s(bp, "$");
+            rt_s(bp, second);
+            let qname: str = rt_view(bp);
+            if struct_lit_ahead(p) {
+                return parse_struct_lit(p, qname, t);
+            }
+            let e: *mut Expr = expr_new((*p).a, E::Path, t);
+            unsafe {
+                (*e).name = name;
+                (*e).field = second;
+            }
+            return e;
         }
         if struct_lit_ahead(p) {
             return parse_struct_lit(p, name, t);
@@ -1619,7 +1695,121 @@ fn parse_file(p: *mut P, path: str) {
     }
 }
 
+fn cfg_has(p: *mut P, key: str) -> bool {
+    unsafe {
+    let mut q: *mut PathList = (*p).cfg;
+    while q != null {
+        if rt_eq((*q).path, key) {
+            return true;
+        }
+        q = (*q).next;
+    }
+    return false;
+
+    }
+}
+
+fn parse_cfg_expr(p: *mut P) -> bool {
+    unsafe {
+    if !at(p, T::Ident) {
+        perr(p, "expected cfg key");
+        return false;
+    }
+    let name: str = (*pk(p)).text;
+    bump(p);
+    if rt_eq(name, "not") {
+        expect(p, T::LParen);
+        let v: bool = parse_cfg_expr(p);
+        expect(p, T::RParen);
+        return !v;
+    }
+    if rt_eq(name, "all") || rt_eq(name, "any") {
+        expect(p, T::LParen);
+        let mut allv: bool = true;
+        let mut anyv: bool = false;
+        while !at(p, T::RParen) && !at(p, T::Eof) {
+            let v: bool = parse_cfg_expr(p);
+            if v {
+                anyv = true;
+            } else {
+                allv = false;
+            }
+            if !eat(p, T::Comma) {
+                break;
+            }
+        }
+        expect(p, T::RParen);
+        if rt_eq(name, "all") {
+            return allv;
+        }
+        return anyv;
+    }
+    if !eat(p, T::Eq) {
+        return cfg_has(p, name);
+    }
+    if !at(p, T::Str) {
+        perr(p, "expected a string cfg value");
+        return false;
+    }
+    let val: str = (*pk(p)).text;
+    bump(p);
+    let mut b: Buf = rt_buf((*p).a);
+    let bp: *mut Buf = &mut b;
+    rt_s(bp, name);
+    rt_s(bp, "=");
+    rt_s(bp, val);
+    return cfg_has(p, rt_view(bp));
+
+    }
+}
+
+fn parse_cfg_attrs(p: *mut P) -> bool {
+    unsafe {
+    let mut enabled: bool = true;
+    while at(p, T::Hash) {
+        bump(p);
+        expect(p, T::LBracket);
+        if !at(p, T::Ident) {
+            perr(p, "expected attribute name");
+            return enabled;
+        }
+        let name: str = (*pk(p)).text;
+        bump(p);
+        if !rt_eq(name, "cfg") {
+            perr(p, "unknown attribute");
+            while !at(p, T::RBracket) && !at(p, T::Eof) {
+                bump(p);
+            }
+            expect(p, T::RBracket);
+            continue;
+        }
+        expect(p, T::LParen);
+        let v: bool = parse_cfg_expr(p);
+        expect(p, T::RParen);
+        expect(p, T::RBracket);
+        if !v {
+            enabled = false;
+        }
+    }
+    return enabled;
+
+    }
+}
+
 fn parse_item(p: *mut P) {
+    unsafe {
+    let enabled: bool = parse_cfg_attrs(p);
+    let save: bool = (*p).discard;
+    if !enabled {
+        (*p).discard = true;
+    }
+    parse_item_inner(p);
+    (*p).discard = save;
+
+    }
+}
+
+fn parse_item_inner(p: *mut P) {
     unsafe {
     let mut is_pub: bool = false;
     if eat(p, T::KwPub) {
@@ -1683,13 +1873,44 @@ fn parse_item(p: *mut P) {
         let _ = c_name;
         return;
     }
-    if k == T::KwModule || k == T::KwMod {
-        perr(p, "module declarations are not supported by the bootstrap compiler");
-        sync(p);
+    if k == T::KwModule {
+        bump(p);
+        if !at(p, T::Ident) {
+            perr(p, "expected module name");
+            sync(p);
+            return;
+        }
+        if !rt_eq((*p).module_name, "") {
+            perr(p, "a file may declare only one module");
+        }
+        (*p).module_name = (*pk(p)).text;
+        bump(p);
+        expect(p, T::Semi);
+        return;
+    }
+    if k == T::KwMod {
+        bump(p);
+        if !at(p, T::Ident) {
+            perr(p, "expected module dependency name");
+            sync(p);
+            return;
+        }
+        let dep: str = (*pk(p)).text;
+        bump(p);
+        if at(p, T::LBrace) {
+            perr(p, "inline modules are not supported; use `mod name;`");
+            sync(p);
+            return;
+        }
+        expect(p, T::Semi);
+        let pl: *mut PathList = rt_alloc((*p).a, sizeof(PathList)) as *mut PathList;
+        (*pl).path = dep;
+        (*pl).next = (*p).deps;
+        (*p).deps = pl;
         return;
     }
     if k == T::Hash {
-        perr(p, "attributes are not supported by the bootstrap compiler");
+        perr(p, "attribute is not attached to an item");
         sync(p);
         return;
     }
@@ -1699,7 +1920,8 @@ fn parse_item(p: *mut P) {
     }
 }
 
-fn parse_program(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, root: str) -> Program {
+fn parse_program_cfg(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, root: str,
+    cfg: *mut PathList, is_root: bool) -> Program {
     unsafe {
     let p: *mut P = rt_alloc(a, sizeof(P)) as *mut P;
     unsafe {
@@ -1717,14 +1939,25 @@ fn parse_program(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, root: str) ->
         (*p).depth = 0;
         (*p).vec_depth = 0;
         (*p).pending_gt = 0;
+        (*p).module_name = "";
+        (*p).deps = null;
+        (*p).cfg = cfg;
+        (*p).discard = false;
+        (*p).is_root = is_root;
     }
     parse_file(p, root);
     let mut prog: Program = prog_init();
     unsafe {
         prog.items = (*p).items;
         prog.items_tail = (*p).items_tail;
+        prog.module_name = (*p).module_name;
+        prog.deps = (*p).deps;
     }
     return prog;
 
     }
+}
+
+fn parse_program(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, root: str) -> Program {
+    return parse_program_cfg(a, d, srcs, root, null, true);
 }
