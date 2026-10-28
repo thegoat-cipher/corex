@@ -274,8 +274,10 @@ The bootstrap now covers floats, function types/pointers, `for`/`do`/labels/
 C `extern`/variadics, static aggregates, checked division, IO builtins, and
 diagnostic codes. It still has no threads/atomics/`volatile`/TLS/inline asm, no
 LSP/line-editor parity, and rejects `-g` because it emits no DWARF. Module
-builds are whole-program rather than separate-object. Rust `corex` remains the
-full-language Stage 0 reference. Details: `docs/selfhosting/master.md`,
+builds are whole-program rather than separate-object. `examples/features.cx`
+still fails on float compound assignment; the other seven examples match.
+Rust `corex` remains the full-language Stage 0 reference. Details:
+`docs/selfhosting/master.md`,
 `bootstrap-results.md`, `validation-report.md`, and `tasks.md`.
 
 ## Repository layout

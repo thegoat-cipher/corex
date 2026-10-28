@@ -135,7 +135,9 @@ executable.
 
 Still absent from the bootstrap: threads, atomics, `volatile`, TLS, inline asm,
 LSP/line-editor parity, DWARF (`-g`), and full Rust-suite parity. Module builds
-are whole-program (no separate interface files). Aggregate/bool calling
+are whole-program (no separate interface files). `examples/features.cx` still
+fails because float compound assignment (`ratio *= 2.0`) is rejected by
+semantic analysis; the other seven examples match the oracle. Aggregate/bool calling
 conventions differ from the Rust compiler, so objects from the two compilers are
 not link-compatible for aggregate parameters. Vec constants/globals are
 rejected; vec headers copy shallowly. REPL prints no prompts. See

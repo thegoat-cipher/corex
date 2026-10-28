@@ -36,7 +36,7 @@ behavioural corpus (241 checks per stage), CLI parity (62), differential dumps
 | SH-023 | Static aggregate/global initializers | COMPLETED | `statics.cx`; `const_value`/`const_init` |
 | SH-024 | `str_to_cstr`, `read_file`, `write_file` | COMPLETED | P0 IO builtins; CLI/file tests |
 | SH-025 | Diagnostics/parser recovery/fuzz | COMPLETED | malformed corpus; fuzz/ASan |
-| SH-026 | Example and `lib/corex` compatibility matrix | COMPLETED | 7/8 examples byte-identical; matrix recorded; SH-034 tracks lib gaps |
+| SH-026 | Example and `lib/corex` compatibility matrix | COMPLETED | 7/8 examples byte-identical; `features.cx` blocked by float compound assignment; SH-034 tracks lib gaps |
 | SH-027 | Function types/pointers | COMPLETED | `fn_pointers.cx`; indirect calls |
 | SH-028 | Unions/bitfields/FAM/packed/align | COMPLETED | layout/access differential |
 | SH-029 | `for`/`do while`/labels/`goto` | COMPLETED | control-flow cases |
