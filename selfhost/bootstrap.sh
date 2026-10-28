@@ -98,4 +98,8 @@ echo "== Malformed input / ASan =="
 tests/selfhosting/fuzz.sh "$STAGE2"
 
 echo
+echo "== Performance baseline =="
+tests/selfhosting/perf.sh "$STAGE2"
+
+echo
 echo "bootstrap ok"

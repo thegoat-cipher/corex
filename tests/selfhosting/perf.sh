@@ -20,8 +20,10 @@ trap 'rm -rf "$TMP"' EXIT
 
 [ -x "$COMPILER" ] || { echo "missing compiler: $COMPILER" >&2; exit 2; }
 SRC="$ROOT/selfhost/corexc.cx"
-BYTES="$(wc -c <"$SRC" | tr -d ' ')"
-LINES="$(wc -l <"$SRC" | tr -d ' ')"
+# The compiler is one translation unit assembled by textual imports; measure the
+# whole closure, not just the 12-line root file.
+BYTES="$(cat "$ROOT"/selfhost/*.cx | wc -c | tr -d ' ')"
+LINES="$(cat "$ROOT"/selfhost/*.cx | wc -l | tr -d ' ')"
 
 # GNU time prints "<seconds> <maxrss KiB>"; fall back to bash SECONDS.
 have_gnu_time=0
@@ -69,7 +71,7 @@ if [ "$have_gnu_time" -eq 1 ]; then
 fi
 
 printf 'perf: %s\n' "$COMPILER"
-printf 'source: %s bytes, %s lines\n' "$BYTES" "$LINES"
+printf 'closure: %s bytes, %s lines (selfhost/*.cx)\n' "$BYTES" "$LINES"
 printf 'self-compile --opt 0 (best of 3): %d ms\n' "$best_ms"
 printf 'frontend check compiler source (best of 5): %d ms\n' "$best_check_ms"
 printf 'frontend corpus: %d files, %d bytes in %d ms' \
@@ -77,11 +79,13 @@ printf 'frontend corpus: %d files, %d bytes in %d ms' \
   "$corpus_bytes" "$corpus_ms"
 awk -v b="$corpus_bytes" -v ms="$corpus_ms" \
   'BEGIN { printf " (%.2f MB/s)\n", (b / 1048576.0) / (ms / 1000.0) }'
-printf 'compiler-source throughput: '
+printf 'frontend throughput (immutable closure): '
 awk -v b="$BYTES" -v ms="$best_check_ms" \
   'BEGIN { printf "%.2f MB/s\n", (b / 1048576.0) / (ms / 1000.0) }'
 if [ "$have_gnu_time" -eq 1 ]; then
   printf 'peak RSS self-compile: %d KiB\n' "${rss_kb:-0}"
+  check_rss="$(/usr/bin/time -f "%M" "$COMPILER" check "$SRC" 2>&1 >/dev/null | tail -1)"
+  printf 'peak RSS frontend check: %s KiB\n' "${check_rss:-0}"
 else
   printf 'peak RSS: unavailable (no GNU time)\n'
 fi
