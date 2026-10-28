@@ -94,4 +94,8 @@ echo "== Differential dumps =="
 tests/selfhosting/dump.sh "$STAGE2"
 
 echo
+echo "== Malformed input / ASan =="
+tests/selfhosting/fuzz.sh "$STAGE2"
+
+echo
 echo "bootstrap ok"

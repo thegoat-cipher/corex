@@ -1009,6 +1009,13 @@ fn ck(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
 
 fn check_binary(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
     unsafe {
+    // A parse error can leave one operand null; the diagnostic is already
+    // recorded, so return a placeholder instead of dereferencing null.
+    if (*e).lhs == null || (*e).rhs == null {
+        let t: *mut Type = type_new((*s).a, K::I32);
+        (*e).ty = t;
+        return t;
+    }
     if expected != null && !type_ok(s, expected) {
         sdiag(s, (*e).file, (*e).line, (*e).col, "internal: invalid expected type");
         let bad: *mut Type = type_new((*s).a, K::I32);
