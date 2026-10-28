@@ -1,0 +1,3 @@
+align(16) struct A { x: u8 }
+static G: A = A { x: 3 };
+fn main() -> i32 { return 0; }

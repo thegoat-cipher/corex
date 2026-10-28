@@ -503,7 +503,7 @@ fn parse_layout_attrs(p: *mut P, is_packed: *mut bool, explicit_align: *mut usiz
             if at(p, T::Int) {
                 let v: i64 = (*pk(p)).ival;
                 if v <= 0 || (v & (v - 1)) != 0 {
-                    perr(p, "alignment must be a power of two");
+                    perrc(p, "E0110", "alignment must be a power of two");
                 }
                 (*explicit_align) = v as usize;
                 bump(p);
@@ -1981,7 +1981,7 @@ fn expand_macro(p: *mut P, m: *mut Macro, args: *mut Expr, tok: *mut Tok) -> *mu
         a = (*a).next;
     }
     if np != na {
-        perr(p, "macro argument count mismatch");
+        perrc(p, "E0204", "macro argument count mismatch");
     }
     if (*p).macro_depth >= 64 {
         perr(p, "macro expansion depth exceeds 64");
@@ -2197,7 +2197,7 @@ fn parse_item_inner(p: *mut P) {
     }
     if k == T::KwMacro {
         if is_pub {
-            perr(p, "`pub` does not apply to `macro`");
+            perrc(p, "E0100", "`pub` does not apply to `macro`");
         }
         bump(p);
         if !at(p, T::Ident) {
@@ -2359,11 +2359,19 @@ fn parse_program(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, root: str) ->
 
 // Parse source text that has no file (`-` and `exec`). Diagnostics name the
 // synthetic file; relative `import`s resolve against the working directory.
-fn parse_program_text(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, name: str, text: str) -> Program {
+fn parse_program_text_all(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, name: str,
+                          text: str, incs: *mut *u8, nincs: i32, cfg: *mut PathList) -> Program {
     unsafe {
     let p: *mut P = p_init(a, d, srcs);
+    (*p).incs = incs;
+    (*p).nincs = nincs;
+    (*p).cfg = cfg;
     parse_src_text(p, name, "", text);
     return p_program(p);
 
     }
+}
+
+fn parse_program_text(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, name: str, text: str) -> Program {
+    return parse_program_text_all(a, d, srcs, name, text, null, 0, null);
 }

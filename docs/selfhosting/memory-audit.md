@@ -78,18 +78,36 @@ Implemented:
   backslashes, NUL, and non-printable bytes;
 - driver argv arrays: `rt_argv` allocates `n + 1` zeroed pointers (NULL
   terminator), and every call sets exactly `n` entries;
-- pointer null checks in semantic type helpers; the parser/checker now reject
-  malformed inputs instead of dereferencing null.
+- pointer null checks in semantic type helpers; the parser/checker reject
+  malformed inputs instead of dereferencing null;
+- generated programs check array, slice, `str`, and `vec` indices and slice
+  ranges at runtime (`corex: index out of bounds` / `corex: slice range out of
+  bounds`, exit 101); constant array indices out of range are rejected in the
+  frontend. Checked division/remainder aborts on zero and `MIN / -1`
+  (`corex: division by zero or signed overflow`, exit 101).
+
+Sanitizer policy:
+
+- `tests/selfhosting/fuzz.sh` builds the compiler hosted with
+  `--hosted --emit obj` and links it with `cc -fsanitize=address -no-pie`;
+- the sanitizer runs with `ASAN_OPTIONS=detect_leaks=0:abort_on_error=1`
+  because the compiler intentionally retains every allocation in a
+  process-lifetime arena;
+- the gate requires no ASan report, no signal, and an exit code in {0,1,2} for
+  the malformed corpus, 200 deterministic mutants, and the positive corpus;
+- CI sets `COREX_REQUIRE_ASAN=1`: a skipped ASan build is a gate failure there.
+  Locally a missing ASan runtime is reported and skipped;
+- ASan covers `check` (lexer/parser/semantic); `fmt`, `lint`, `doc`, `dump`,
+  and `repl` are exercised by the CLI tests but are not part of the sanitizer
+  gate.
 
 Not implemented (documented limits):
 
-- generated programs do not get dynamic array/str bounds checks from the
-  bootstrap backend; invalid indices are undefined at the machine level. The
-  corpus uses valid indices. The Rust compiler still checks them, so this is a
-  bootstrap-subset behavior, not a language change.
-- no ASan/Valgrind/sanitizer pass for the self-hosted compiler;
 - no guard pages around the arena; overflow is prevented by the explicit size
-  check, not hardware.
+  check, not hardware;
+- raw pointer arithmetic and `ptr[i]` are unchecked by design, matching the
+  language's unsafe surface; only arrays, slices, `str`, and `vec` get runtime
+  bounds checks.
 
 ## 6. Double-free / use-after-free
 
@@ -123,7 +141,10 @@ there is no long-lived leak surface.
 ## 9. Verification evidence
 
 - `selfhost/bootstrap.sh`: Stage 2 == Stage 3 == Stage 4; three corpus runs.
-- 241 checks per compiler stage, 723 total on Stage 1/2/3; all pass.
+- 249 checks per compiler stage, 747 total on Stage 1/2/3; all pass.
+- 327 fuzz/ASan checks: 215 unsanitized (13 checked-in fuzz inputs, 2 generated,
+  200 mutants) plus 112 ASan (2 self-host checks, 37 positive cases, 13 fuzz
+  inputs, 60 mutants); no signals or sanitizer reports.
 - Arena stress: 128 × 32-byte blocks, patterns verified, `used = 4096`.
 - Struct-size parity between Rust Stage 0 and Stage 1 binaries.
 - Static ELF, no libc (`ldd` reports "not a dynamic executable").
@@ -135,5 +156,11 @@ there is no long-lived leak surface.
    the reference for untrusted input.
 2. The arena reservation is 512 MiB; a pathological input exceeding it aborts
    rather than growing. This is a deliberate fixed-memory policy.
-3. No sanitizer validation of the self-hosted compiler.
-4. Generated code has no bounds checks; programs must index validly.
+3. ASan covers the compiler's `check` path only, runs with `detect_leaks=0`,
+   and does not instrument generated user programs; those are covered by the
+   behavioural corpus and abort cases.
+4. Static initializers for non-plain aggregates are rejected (E0226) instead of
+   being lowered to byte arrays, so a future round must extend `const_value`
+   before lifting that restriction.
+5. Generated bounds checks cover arrays, slices, `str`, and `vec`; raw pointer
+   arithmetic remains unchecked by design.

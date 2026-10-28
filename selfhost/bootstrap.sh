@@ -7,7 +7,7 @@
 # Stage 3: the CoreX source compiled by Stage 2.
 #
 # Stage 2 and Stage 3 must be byte-identical under the controlled toolchain.
-# Usage: selfhost/bootstrap.sh [--jobs N]
+# Usage: selfhost/bootstrap.sh
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"

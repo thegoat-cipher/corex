@@ -319,7 +319,7 @@ rc=$?
 set -e
 expect_rc 1 "$rc" "import without -I fails"
 
-# --cfg is accepted (it only gates `#[cfg]`, which the bootstrap rejects).
+# --cfg is accepted on link commands too (and gates `#[cfg]`).
 "$COMPILER" build "$TMP/hostmain.cx" --cfg feature=fast -o "$TMP/cfgmain" >/dev/null
 set +e
 "$TMP/cfgmain" >/dev/null 2>&1
@@ -348,6 +348,166 @@ expect_rc 2 "$rc" "unknown --emit value"
 # --shared link flag on a program with an entry point.
 "$COMPILER" build "$TMP/hostmain.cx" --shared -o "$TMP/hshared.so" >/dev/null
 file "$TMP/hshared.so" | grep -q "shared object" && ok || bad "--shared is not a shared object"
+
+# --- build failures propagate a nonzero status ----------------------------
+# A link failure (unwritable output path) must exit 3 and must not claim
+# success. Regression for the CLI contract.
+set +e
+out="$("$COMPILER" build "$TMP/hostmain.cx" -o "$TMP/missing-dir/out" 2>"$TMP/badbuild.err")"
+rc=$?
+set -e
+expect_rc 3 "$rc" "build link failure status"
+case "$out" in
+  *compiled*) bad "build failure printed 'compiled': $out" ;;
+  *) ok ;;
+esac
+[ -e "$TMP/missing-dir/out" ] && bad "build failure left an output file" || ok
+
+# A tool killed by a signal is a failure, not exit status 0.
+cat >"$TMP/fakecc.sh" <<'CCEOF'
+#!/bin/sh
+kill -SEGV $$
+CCEOF
+chmod +x "$TMP/fakecc.sh"
+set +e
+out="$(COREX_CC="$TMP/fakecc.sh" "$COMPILER" build "$TMP/hostmain.cx" -o "$TMP/sigout" 2>"$TMP/sig.err")"
+rc=$?
+set -e
+expect_rc 3 "$rc" "signal-killed tool status"
+case "$out" in
+  *compiled*) bad "signal-killed tool printed 'compiled': $out" ;;
+  *) ok ;;
+esac
+[ -e "$TMP/sigout" ] && bad "signal-killed tool left an output file" || ok
+
+# --- cfg parity: built-in target keys and frontend options ----------------
+cat >"$TMP/cfgbranch.cx" <<'CXEOF'
+#[cfg(target_os = "linux")]
+fn main() -> i32 { return 1; }
+#[cfg(not(target_os = "linux"))]
+fn main() -> i32 { return 2; }
+CXEOF
+set +e
+"$COMPILER" run "$TMP/cfgbranch.cx" >/dev/null 2>&1
+rc=$?
+set -e
+expect_rc 1 "$rc" "built-in cfg target_os selects linux"
+
+# `check` and `emit-ir` accept frontend options, including import paths.
+"$COMPILER" check "$TMP/hostmain.cx" --cfg feature=fast >/dev/null
+ok
+"$COMPILER" check "$TMP/useimp.cx" -I "$TMP/inc" >/dev/null
+ok
+"$COMPILER" emit-ir "$TMP/hostmain.cx" --cfg feature=fast >/dev/null
+ok
+"$COMPILER" emit-ir "$TMP/useimp.cx" -I "$TMP/inc" >/dev/null
+ok
+
+# stdin parsing receives --cfg and --sanitize; build from stdin also works.
+cat >"$TMP/stdincfg.cx" <<'CXEOF'
+#[cfg(feature = "fast")]
+fn main() -> i32 { return 1; }
+#[cfg(not(feature = "fast"))]
+fn main() -> i32 { return 2; }
+CXEOF
+"$COMPILER" build - --cfg feature=fast -o "$TMP/stdincfg" <"$TMP/stdincfg.cx" >/dev/null
+set +e
+"$TMP/stdincfg" >/dev/null 2>&1
+rc=$?
+set -e
+expect_rc 1 "$rc" "stdin build honours --cfg"
+
+cat >"$TMP/stdinsan.cx" <<'CXEOF'
+#[cfg(sanitize = "true")]
+fn main() -> i32 { return 4; }
+#[cfg(not(sanitize = "true"))]
+fn main() -> i32 { return 5; }
+CXEOF
+"$COMPILER" build - --sanitize -o "$TMP/stdinsan" <"$TMP/stdinsan.cx" >/dev/null
+set +e
+"$TMP/stdinsan" >/dev/null 2>&1
+rc=$?
+set -e
+expect_rc 4 "$rc" "stdin build honours --sanitize cfg"
+
+# --- labels inside unreachable regions ------------------------------------
+# The label is not the first statement of its block/if/loop/switch arm, so
+# the whole dead region must be scanned and emitted.
+cat >"$TMP/deadlabel.cx" <<'CXEOF'
+fn block_label() -> i32 {
+    goto done;
+    {
+        let x: i32 = 1;
+        done: return 7;
+    }
+}
+
+fn if_label() -> i32 {
+    goto done;
+    if 1 == 1 {
+        let x: i32 = 2;
+        done: return 8;
+    }
+    return 0;
+}
+
+fn loop_label() -> i32 {
+    goto done;
+    while false {
+        let x: i32 = 3;
+        done: return 9;
+    }
+    return 0;
+}
+
+fn switch_label() -> i32 {
+    goto done;
+    switch 1 {
+        case 1 {
+            let x: i32 = 4;
+            done: return 10;
+        }
+        default { return 0; }
+    }
+    return 0;
+}
+
+fn main() -> i32 {
+    if block_label() != 7 { return 1; }
+    if if_label() != 8 { return 2; }
+    if loop_label() != 9 { return 3; }
+    if switch_label() != 10 { return 4; }
+    return 0;
+}
+CXEOF
+set +e
+"$COMPILER" emit-ir "$TMP/deadlabel.cx" --verify >"$TMP/deadlabel.ll" 2>"$TMP/deadlabel.err"
+rc=$?
+set -e
+expect_rc 0 "$rc" "goto into unreachable label verifies"
+grep -q "IR verified by llvm-as" "$TMP/deadlabel.err" && ok || bad "dead-label IR was not verified"
+set +e
+"$COMPILER" run "$TMP/deadlabel.cx" >/dev/null 2>&1
+rc=$?
+set -e
+expect_rc 0 "$rc" "goto into unreachable label executes"
+
+# Float `%=` lowers to frem; it needs libm, so exercise it hosted.
+cat >"$TMP/fmod.cx" <<'CXEOF'
+fn main() -> i32 {
+    let mut f: f64 = 5.0;
+    f %= 1.5;
+    let mut g: f32 = 5.0;
+    g %= 1.5;
+    print(f);
+    print(g);
+    return 0;
+}
+CXEOF
+out="$(set +e; "$COMPILER" run "$TMP/fmod.cx" --hosted -l m 2>"$TMP/fmod.err")"
+rc=$?
+expect_rc 0 "$rc" "float %= hosted"
+[ "$out" = "$(printf '0.500000\n0.500000')" ] && ok || bad "float %= output: $out"
 
 # --- usage errors ----------------------------------------------------------
 set +e

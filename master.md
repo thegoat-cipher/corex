@@ -44,7 +44,7 @@ and tested; P2 remains optional and not started.
 | P1: inline asm, macros, cfg, shared libraries, dlopen | COMPLETED | `tests/concurrency.rs`, `tests/modules.rs` |
 | P1: benchmarks | COMPLETED | `scripts/bench.sh`, `docs/benchmarks.md` |
 | Self-hosting P0 blockers (static aggregates, collections/builder, driver helpers, nested `vec`, `switch` divergence) | COMPLETED | `tests/aggregates.rs`, `tests/collections.rs`, `tests/driver_helpers.rs`; `docs/self-hosting.md` §1.1 |
-| Self-hosted bootstrap compiler | COMPLETED (functional subset) | `selfhost/`; Stage 2/3/4 `d270cd67…`; 241 checks; CLI 62; dumps 73; fuzz 326; gaps: SH-033/034/037/039 |
+| Self-hosted bootstrap compiler | COMPLETED (functional subset) | `selfhost/`; Stage 2/3/4 reproducible; 249 checks; CLI 80; dumps 75; fuzz 327; gaps: SH-033/034/037/039 |
 
 Test totals: `cargo test` → **205 passed, 0 failed** (68 unit, 137 integration).
 
@@ -148,15 +148,15 @@ A CoreX-written compiler now lives under `selfhost/` and builds itself:
 
 | Stage | Built by | Hash |
 |---|---|---|
-| Stage 1 | Rust `corex` | `7b2f8837…` |
-| Stage 2 | Stage 1 | `644c22c5…` |
-| Stage 3 | Stage 2 | `644c22c5…` |
-| Stage 4 | Stage 3 | `644c22c5…` |
+| Stage 1 | Rust `corex` | `f4192f40…` |
+| Stage 2 | Stage 1 | `c33aff55…` |
+| Stage 3 | Stage 2 | `c33aff55…` |
+| Stage 4 | Stage 3 | `c33aff55…` |
 
 Stage 2/3/4 are byte-identical at `--opt 0` (LLVM 20.1.8, cc 15.2.0). The
-79-case corpus (64 positive runs at `--opt 0..3` + 15 negative) passes on Stage 1,
-Stage 2, and Stage 3. Stage 1 differs from Stage 2 by design: it is compiled by
-the Rust backend (different ABI), while Stage 2 onward use the self-hosted
-backend. The Rust compiler is unchanged and remains the full-language reference
-(205/205 tests). See `docs/selfhosting/` — start with `master.md`,
+249-check corpus passes on Stage 1, Stage 2, and Stage 3. Stage 1 differs from
+Stage 2 by design: it is compiled by the Rust backend (different ABI), while
+Stage 2 onward use the self-hosted backend. The Rust compiler is unchanged and
+remains the full-language reference (205/205 tests). See `docs/selfhosting/` —
+start with `master.md`,
 `bootstrap-results.md`, and `validation-report.md`.

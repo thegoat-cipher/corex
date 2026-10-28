@@ -102,15 +102,18 @@ jobs:
         run: ./scripts/example-matrix.sh
 
       - name: Self-hosting bootstrap and reproducibility
+        env:
+          COREX_REQUIRE_ASAN: "1"
         run: |
           set -euo pipefail
           (cd compiler && cargo build --release --locked)
           ./selfhost/bootstrap.sh 2>&1 | tee "$RUNNER_TEMP/bootstrap.log"
           grep -F "reproducible: stage2 == stage3 == stage4" "$RUNNER_TEMP/bootstrap.log"
-          grep -F "selfhosting tests: 241 passed, 0 failed" "$RUNNER_TEMP/bootstrap.log"
-          grep -F "cli tests: 62 passed, 0 failed" "$RUNNER_TEMP/bootstrap.log"
-          grep -F "dump tests: 73 passed, 0 failed" "$RUNNER_TEMP/bootstrap.log"
-          grep -E "fuzz tests: [0-9]+ passed, 0 failed" "$RUNNER_TEMP/bootstrap.log"
+          grep -F "selfhosting tests: 249 passed, 0 failed" "$RUNNER_TEMP/bootstrap.log"
+          grep -F "cli tests: 80 passed, 0 failed" "$RUNNER_TEMP/bootstrap.log"
+          grep -F "dump tests: 75 passed, 0 failed" "$RUNNER_TEMP/bootstrap.log"
+          grep -F "fuzz tests: 327 passed, 0 failed" "$RUNNER_TEMP/bootstrap.log"
+          grep -F "ASan: enabled" "$RUNNER_TEMP/bootstrap.log"
           grep -F "bootstrap ok" "$RUNNER_TEMP/bootstrap.log"
 
       - name: Optimized self-build reproducibility (--opt 1..3)

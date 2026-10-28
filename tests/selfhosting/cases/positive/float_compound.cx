@@ -1,0 +1,23 @@
+struct Acc { v: f64 }
+
+fn main() -> i32 {
+    let mut f: f64 = 3.5;
+    f += 1.25;
+    f -= 0.75;
+    f *= 2.0;
+    f /= 4.0;
+    print(f);
+
+    let mut g: f32 = 1.0;
+    g += 0.5;
+    g *= 4.0;
+    g -= 1.0;
+    g /= 5.0;
+    print(g);
+
+    let mut a: Acc = Acc { v: 1.5 };
+    a.v *= 2.0;
+    a.v += 0.5;
+    print(a.v);
+    return 0;
+}

@@ -72,7 +72,9 @@ for src in "$CASES"/negative/*.cx; do
     report_fail "negative/$name: accepted invalid input"
   elif [ ! -s "$TMP/neg.err" ]; then
     report_fail "negative/$name: rejected without a diagnostic"
-  elif [ -f "$CASES/negative/$name.code" ] && ! grep -qF "error[$(cat "$CASES/negative/$name.code")]" "$TMP/neg.err"; then
+  elif [ ! -f "$CASES/negative/$name.code" ]; then
+    report_fail "negative/$name: missing expected diagnostic code"
+  elif ! grep -qF "error[$(cat "$CASES/negative/$name.code")]" "$TMP/neg.err"; then
     report_fail "negative/$name: expected diagnostic code $(cat "$CASES/negative/$name.code")"
   else
     pass=$((pass + 1))

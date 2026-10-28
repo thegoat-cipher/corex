@@ -246,7 +246,7 @@ fn sem_add_global(s: *mut Sem, d: *mut Decl) {
     // A builtin name cannot be declared as a root-level function: it would
     // never be reachable. Mangled module items are unaffected.
     if (*d).kind == D::Func && !has_dollar((*d).name) && builtin_id((*d).name) != 0 {
-        sdiag(s, (*d).file, (*d).line, (*d).col, "reserved builtin name");
+        sdiagc(s, "E0202", (*d).file, (*d).line, (*d).col, "reserved builtin name");
         return;
     }
     let old: *mut Decl = sem_find(s, (*d).name);
@@ -321,6 +321,21 @@ fn sdiag_name(s: *mut Sem, file: i32, line: i32, col: i32, msg: str, name: str, 
     }
 }
 
+fn sdiagc_name(s: *mut Sem, code: str, file: i32, line: i32, col: i32,
+               msg: str, name: str, suffix: str) {
+    unsafe {
+    let mut b: Buf = rt_buf((*s).a);
+    let bp: *mut Buf = &mut b;
+    rt_s(bp, msg);
+    rt_s(bp, " `");
+    rt_s(bp, name);
+    rt_s(bp, "`");
+    rt_s(bp, suffix);
+    sdiagc(s, code, file, line, col, rt_view(bp));
+
+    }
+}
+
 fn collect_labels(s: *mut Sem, head: *mut Stmt) {
     unsafe {
     let mut p: *mut Stmt = head;
@@ -337,7 +352,7 @@ fn collect_label_stmt(s: *mut Sem, st: *mut Stmt) {
     let k: S = (*st).kind;
     if k == S::Label {
         if label_find(s, (*st).name) != null {
-            sdiag_name(s, (*st).file, (*st).line, (*st).col, "duplicate label", (*st).name, "");
+            sdiagc_name(s, "E0202", (*st).file, (*st).line, (*st).col, "duplicate label", (*st).name, "");
         } else {
             let l: *mut Lbl = rt_alloc((*s).a, sizeof(Lbl)) as *mut Lbl;
             (*l).next = (*s).labels;
@@ -657,7 +672,7 @@ fn layout_struct(s: *mut Sem, d: *mut Decl) {
         return;
     }
     if (*d).busy {
-        sdiag(s, (*d).file, (*d).line, (*d).col, "type contains itself by value; use a pointer");
+        sdiagc(s, "E0224", (*d).file, (*d).line, (*d).col, "type contains itself by value; use a pointer");
         (*d).size = 8;
         (*d).alignment = 8;
         (*d).laid_out = true;
@@ -673,11 +688,11 @@ fn layout_struct(s: *mut Sem, d: *mut Decl) {
         }
         while f != null {
             if field_duplicate(d, f) {
-                sdiag(s, (*d).file, (*d).line, (*d).col, "duplicate field name");
+                sdiagc(s, "E0228", (*d).file, (*d).line, (*d).col, "duplicate field name");
             }
             let ft: *mut Type = resolve_type(s, (*f).ty);
             if (*ft).kind == K::Array && (*ft).len == 0 {
-                sdiag(s, (*d).file, (*d).line, (*d).col, "flexible array members are not allowed in unions");
+                sdiagc(s, "E0224", (*d).file, (*d).line, (*d).col, "flexible array members are not allowed in unions");
             }
             let fa: usize = type_align(s, ft);
             let fs: usize = type_size(s, ft);
@@ -713,12 +728,12 @@ fn layout_struct(s: *mut Sem, d: *mut Decl) {
     }
     while f != null {
         if field_duplicate(d, f) {
-            sdiag(s, (*d).file, (*d).line, (*d).col, "duplicate field name");
+            sdiagc(s, "E0228", (*d).file, (*d).line, (*d).col, "duplicate field name");
         }
         let ft: *mut Type = resolve_type(s, (*f).ty);
         if (*ft).kind == K::Array && (*ft).len == 0 {
             if (*f).next != null {
-                sdiag(s, (*d).file, (*d).line, (*d).col, "flexible array member must be the last field");
+                sdiagc(s, "E0224", (*d).file, (*d).line, (*d).col, "flexible array member must be the last field");
             }
         }
         let fa: usize = type_align(s, ft);
@@ -726,10 +741,10 @@ fn layout_struct(s: *mut Sem, d: *mut Decl) {
         if (*f).bit_width > 0 {
             let bits: i32 = type_bits(ft);
             if bits == 0 {
-                sdiag(s, (*d).file, (*d).line, (*d).col, "bitfield requires an integer or enum type");
+                sdiagc(s, "E0216", (*d).file, (*d).line, (*d).col, "bitfield requires an integer or enum type");
                 (*f).bit_width = 0;
             } else if (*f).bit_width > bits {
-                sdiag(s, (*d).file, (*d).line, (*d).col, "bitfield width exceeds the width of its type");
+                sdiagc(s, "E0215", (*d).file, (*d).line, (*d).col, "bitfield width exceeds the width of its type");
                 (*f).bit_width = bits;
             }
         }
@@ -941,7 +956,7 @@ fn eval_int(s: *mut Sem, e: *mut Expr) -> i64 {
             let f: *mut Field = find_field((*t).decl, (*e).field);
             if f != null {
                 if (*f).bit_width > 0 {
-                    sdiag(s, (*e).file, (*e).line, (*e).col, "offsetof cannot be applied to a bitfield");
+                    sdiagc(s, "E0203", (*e).file, (*e).line, (*e).col, "offsetof cannot be applied to a bitfield");
                     return 0;
                 }
                 return (*f).offset as i64;
@@ -1268,7 +1283,12 @@ fn check_expr(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
     if k == E::Ident {
         let d: *mut Decl = lookup(s, (*e).name);
         if d == null {
-            sdiagc(s, "E0201", (*e).file, (*e).line, (*e).col, "undefined name");
+            if builtin_id((*e).name) != 0 {
+                sdiagc_name(s, "E0218", (*e).file, (*e).line, (*e).col,
+                    "builtin", (*e).name, " cannot be used as a value");
+            } else {
+                sdiagc(s, "E0201", (*e).file, (*e).line, (*e).col, "undefined name");
+            }
             let t: *mut Type = type_new((*s).a, K::I32);
             (*e).ty = t;
             return t;
@@ -1573,7 +1593,7 @@ fn check_expr(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
                 let f: *mut Field = find_field((*tt).decl, (*e).field);
                 if f != null {
                     if (*f).bit_width > 0 {
-                        sdiag(s, (*e).file, (*e).line, (*e).col, "offsetof cannot be applied to a bitfield");
+                        sdiagc(s, "E0203", (*e).file, (*e).line, (*e).col, "offsetof cannot be applied to a bitfield");
                     } else {
                         (*e).ival = (*f).offset as i64;
                     }
@@ -1612,7 +1632,7 @@ fn check_expr(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
         }
         if (*d).is_union {
             if nargs != 1 {
-                sdiag(s, (*e).file, (*e).line, (*e).col, "a union literal initializes exactly one field");
+                sdiagc(s, "E0229", (*e).file, (*e).line, (*e).col, "a union literal initializes exactly one field");
             }
         } else {
             let mut f: *mut Field = (*d).fields;
@@ -1855,7 +1875,7 @@ fn check_indirect_call(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut T
     unsafe {
     let ct: *mut Type = resolve_type(s, check_expr(s, (*e).lhs, null));
     if (*ct).kind != K::Fn {
-        sdiag(s, (*e).file, (*e).line, (*e).col, "call target must be a function or function pointer");
+        sdiagc(s, "E0218", (*e).file, (*e).line, (*e).col, "call target must be a function or function pointer");
         let bad: *mut Type = type_new((*s).a, K::I32);
         (*e).ty = bad;
         (*e).index = 0;
@@ -1866,7 +1886,7 @@ fn check_indirect_call(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut T
     let mut par: *mut Type = (*ct).params;
     while par != null {
         if arg == null {
-            sdiag(s, (*e).file, (*e).line, (*e).col, "missing function argument");
+            sdiagc(s, "E0204", (*e).file, (*e).line, (*e).col, "missing function argument");
             break;
         }
         let pt: *mut Type = resolve_type(s, par);
@@ -1878,7 +1898,7 @@ fn check_indirect_call(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut T
         par = (*par).next;
     }
     if arg != null {
-        sdiag(s, (*e).file, (*e).line, (*e).col, "too many function arguments");
+        sdiagc(s, "E0204", (*e).file, (*e).line, (*e).col, "too many function arguments");
     }
     let rt: *mut Type = resolve_type(s, (*ct).ret);
     (*e).index = 0;
@@ -2387,7 +2407,14 @@ fn check_stmt(s: *mut Sem, st: *mut Stmt) {
             sdiagc(s, "E0205", (*st).file, (*st).line, (*st).col, "cannot assign to an immutable place");
         }
         if (*st).op != T::Eq && !type_is_int(lt) {
-            sdiag(s, (*st).file, (*st).line, (*st).col, "compound assignment requires an integer");
+            let op: T = (*st).op;
+            let float_ok: bool = type_is_float(lt)
+                && (op == T::PlusEq || op == T::MinusEq || op == T::StarEq
+                    || op == T::SlashEq || op == T::PercentEq);
+            if !float_ok {
+                sdiagc(s, "E0210", (*st).file, (*st).line, (*st).col,
+                    "compound assignment requires an integer or a float arithmetic place");
+            }
         }
         return;
     }
@@ -2399,7 +2426,7 @@ fn check_stmt(s: *mut Sem, st: *mut Stmt) {
         let bt: *mut Type = type_new((*s).a, K::Bool);
         let ct: *mut Type = resolve_type(s, check_expr(s, (*st).expr, bt));
         if (*ct).kind != K::Bool {
-            sdiag(s, (*st).file, (*st).line, (*st).col, "if condition must be bool");
+            sdiagc(s, "E0214", (*st).file, (*st).line, (*st).col, "if condition must be bool");
         }
         check_block(s, (*st).body);
         if (*st).els != null {
@@ -2411,7 +2438,7 @@ fn check_stmt(s: *mut Sem, st: *mut Stmt) {
         let bt: *mut Type = type_new((*s).a, K::Bool);
         let ct: *mut Type = resolve_type(s, check_expr(s, (*st).expr, bt));
         if (*ct).kind != K::Bool {
-            sdiag(s, (*st).file, (*st).line, (*st).col, "while condition must be bool");
+            sdiagc(s, "E0214", (*st).file, (*st).line, (*st).col, "while condition must be bool");
         }
         (*s).loop_depth = (*s).loop_depth + 1;
         check_block(s, (*st).body);
@@ -2476,7 +2503,7 @@ fn check_stmt(s: *mut Sem, st: *mut Stmt) {
             let bt: *mut Type = type_new((*s).a, K::Bool);
             let ct: *mut Type = resolve_type(s, check_expr(s, (*st).expr, bt));
             if (*ct).kind != K::Bool {
-                sdiag(s, (*st).file, (*st).line, (*st).col, "for condition must be bool");
+                sdiagc(s, "E0214", (*st).file, (*st).line, (*st).col, "for condition must be bool");
             }
         }
         if (*st).step != null {
@@ -2495,7 +2522,7 @@ fn check_stmt(s: *mut Sem, st: *mut Stmt) {
         let bt: *mut Type = type_new((*s).a, K::Bool);
         let ct: *mut Type = resolve_type(s, check_expr(s, (*st).expr, bt));
         if (*ct).kind != K::Bool {
-            sdiag(s, (*st).file, (*st).line, (*st).col, "do while condition must be bool");
+            sdiagc(s, "E0214", (*st).file, (*st).line, (*st).col, "do while condition must be bool");
         }
         return;
     }
@@ -2852,7 +2879,12 @@ fn sem_run_ex(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Progr
                 if !type_compat(gt, at) {
                     sdiagc(s, "E0203", (*g).file, (*g).line, (*g).col, "global initializer type mismatch");
                 }
-                if !is_const_expr(s, (*g).init, g) {
+                if ((*gt).kind == K::Struct || (*gt).kind == K::Array) && !type_plain(gt) {
+                    // `llty` lowers these to `[size x i8]`, which a struct
+                    // literal constant cannot initialize.
+                    sdiagc(s, "E0226", (*((*g).init)).file, (*((*g).init)).line, (*((*g).init)).col,
+                        "static aggregates with packed, union, bitfield, or align(N) layout are not supported by the bootstrap compiler");
+                } else if !is_const_expr(s, (*g).init, g) {
                     sdiagc(s, "E0226", (*((*g).init)).file, (*((*g).init)).line, (*((*g).init)).col,
                         "global initializers must be constant expressions");
                 }

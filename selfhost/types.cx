@@ -78,3 +78,48 @@ fn type_fn(a: *mut Arena, params: *mut Type, ret: *mut Type, variadic: bool) -> 
     return t;
 }
 
+
+// A struct whose layout LLVM reproduces exactly: no union, no packed, no
+// explicit alignment, no bitfields, and every field type is itself plain.
+// Non-plain aggregates are lowered to `[size x i8]` and accessed through the
+// byte offsets computed by semantic analysis; their static initializers are
+// rejected by semantic analysis.
+fn struct_plain(d: *mut Decl) -> bool {
+    unsafe {
+    if d == null {
+        return true;
+    }
+    if (*d).is_union || (*d).is_packed || (*d).explicit_align > 0 {
+        return false;
+    }
+    let mut f: *mut Field = (*d).fields;
+    while f != null {
+        if (*f).bit_width > 0 {
+            return false;
+        }
+        if !type_plain((*f).ty) {
+            return false;
+        }
+        f = (*f).next;
+    }
+    return true;
+
+    }
+}
+
+fn type_plain(t: *mut Type) -> bool {
+    unsafe {
+    if t == null {
+        return true;
+    }
+    let k: K = (*t).kind;
+    if k == K::Struct {
+        return struct_plain((*t).decl);
+    }
+    if k == K::Array {
+        return type_plain((*t).elem);
+    }
+    return true;
+
+    }
+}
