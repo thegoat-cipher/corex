@@ -1,0 +1,65 @@
+// `for` and `do while`: clause handling, break/continue targets, nesting.
+fn main() -> i32 {
+    let mut sum: i32 = 0;
+    for (let mut i: i32 = 0; i < 5; i += 1) {
+        sum += i;
+    }
+    print(sum);
+
+    let mut n: i32 = 0;
+    do {
+        n += 1;
+    } while n < 3;
+    print(n);
+
+    let mut m: i32 = 0;
+    for (;;) {
+        m += 1;
+        if m == 4 { break; }
+    }
+    print(m);
+
+    // `continue` in a `for` must still run the step clause.
+    let mut odds: i32 = 0;
+    for (let mut j: i32 = 0; j < 10; j += 1) {
+        if j % 2 == 0 { continue; }
+        odds += j;
+    }
+    print(odds);
+
+    // `continue` in a `do while` jumps to the condition.
+    let mut c: i32 = 0;
+    let mut kept: i32 = 0;
+    do {
+        c += 1;
+        if c < 3 { continue; }
+        kept += 1;
+    } while c < 5;
+    print(kept);
+
+    // Nested loops: `break` and `continue` bind to the innermost loop.
+    let mut total: i32 = 0;
+    for (let mut i: i32 = 0; i < 4; i += 1) {
+        for (let mut j: i32 = 0; j < 4; j += 1) {
+            if j == 1 { continue; }
+            if j == 3 { break; }
+            total += i * 10 + j;
+        }
+    }
+    print(total);
+
+    // Empty init, assignment and compound assignment in the step.
+    let mut a: i32 = 5;
+    let mut b: i32 = 1;
+    for (; a < 8; b += a) {
+        a += 1;
+    }
+    print(a);
+    print(b);
+
+    // `do while` runs its body once even when the condition is false.
+    let mut once: i32 = 0;
+    do { once += 1; } while once > 10;
+    print(once);
+    return 0;
+}

@@ -1,0 +1,29 @@
+struct Op { name: str, f: fn(i32, i32) -> i32 }
+
+fn add(a: i32, b: i32) -> i32 { return a + b; }
+fn sub(a: i32, b: i32) -> i32 { return a - b; }
+fn mul(a: i32, b: i32) -> i32 { return a * b; }
+fn inc(x: i32) -> i32 { return x + 1; }
+
+fn noop() { print(0); }
+
+fn twice(f: fn(i32) -> i32, x: i32) -> i32 { return f(f(x)); }
+
+fn main() -> i32 {
+    print(sizeof(fn(i32) -> i32));
+    print(alignof(fn(i32) -> i32));
+    let o: Op = Op { name: "add", f: &add };
+    print(o.f(2, 3));
+    let ops: [Op; 2] = [Op { name: "sub", f: &sub }, Op { name: "mul", f: &mul }];
+    let mut i: usize = 0;
+    while i < 2 {
+        print(ops[i].f(6, 3));
+        i += 1;
+    }
+    print(twice(&inc, 0));
+    let v: fn() = &noop;
+    v();
+    let none: fn(i32) -> i32 = null;
+    if none != null { print(111); } else { print(222); }
+    return 0;
+}

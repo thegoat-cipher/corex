@@ -14,7 +14,8 @@ enum E {
 
 enum S {
     Let, Assign, Expr, If, While, Loop, Break, Continue,
-    Return, Unsafe, Block, Switch, Empty
+    Return, Unsafe, Block, Switch, Empty,
+    For, DoWhile, Label, Goto
 }
 
 enum D {
@@ -36,6 +37,7 @@ struct Expr {
     ival: i64,
     name: str,
     field: str,
+    sfield: str,
     text: str,
     type_arg: *mut Type,
     decl: *mut Decl,
@@ -63,6 +65,8 @@ struct Stmt {
     body: *mut Stmt,
     els: *mut Stmt,
     cases: *mut Case,
+    init: *mut Stmt,
+    step: *mut Stmt,
     name: str,
     ty: *mut Type,
     decl: *mut Decl,
@@ -71,6 +75,23 @@ struct Stmt {
     file: i32,
     line: i32,
     col: i32,
+}
+
+// A declarative expression macro: `macro name(a, b) = <expr>;`. Expansion
+// happens in the parser; the body is never seen by semantic analysis.
+struct Macro {
+    next: *mut Macro,
+    name: str,
+    params: *mut PathList,
+    body: *mut Expr,
+}
+
+// A function-local label for `name: stmt` / `goto name`. `id` is assigned by
+// the code generator; the semantic pass only needs the name list.
+struct Lbl {
+    next: *mut Lbl,
+    name: str,
+    id: i32,
 }
 
 struct Param {
@@ -88,6 +109,8 @@ struct Field {
     size: usize,
     alignment: usize,
     index: i32,
+    bit_width: i32,
+    bit_offset: i32,
 }
 
 struct Variant {
@@ -116,6 +139,13 @@ struct Decl {
     cval_s: str,
     is_mut: bool,
     is_extern: bool,
+    has_body: bool,
+    variadic: bool,
+    is_pub: bool,
+    unit: str,
+    is_union: bool,
+    is_packed: bool,
+    explicit_align: usize,
     busy: bool,
     laid_out: bool,
     slot: i32,
@@ -142,6 +172,8 @@ struct Program {
     items_tail: *mut Item,
     decls: *mut Decl,
     decls_tail: *mut Decl,
+    module_name: str,
+    deps: *mut PathList,
 }
 
 struct SrcList {
@@ -173,6 +205,7 @@ fn expr_new(a: *mut Arena, kind: E, tok: *mut Tok) -> *mut Expr {
         (*e).ival = 0;
         (*e).name = "";
         (*e).field = "";
+        (*e).sfield = "";
         (*e).text = "";
         (*e).type_arg = null;
         (*e).decl = null;
@@ -196,6 +229,8 @@ fn stmt_new(a: *mut Arena, kind: S, tok: *mut Tok) -> *mut Stmt {
         (*s).body = null;
         (*s).els = null;
         (*s).cases = null;
+        (*s).init = null;
+        (*s).step = null;
         (*s).name = "";
         (*s).ty = null;
         (*s).decl = null;
@@ -229,6 +264,13 @@ fn decl_new(a: *mut Arena, kind: D, name: str, file: i32, line: i32, col: i32) -
         (*d).cval_s = "";
         (*d).is_mut = false;
         (*d).is_extern = false;
+        (*d).has_body = false;
+        (*d).variadic = false;
+        (*d).is_pub = false;
+        (*d).unit = "";
+        (*d).is_union = false;
+        (*d).is_packed = false;
+        (*d).explicit_align = 0;
         (*d).busy = false;
         (*d).laid_out = false;
         (*d).slot = -1;
@@ -257,7 +299,8 @@ fn item_new(a: *mut Arena, kind: I, d: *mut Decl, tok: *mut Tok) -> *mut Item {
 }
 
 fn prog_init() -> Program {
-    return Program { items: null, items_tail: null, decls: null, decls_tail: null };
+    return Program { items: null, items_tail: null, decls: null, decls_tail: null,
+        module_name: "", deps: null };
 }
 
 fn prog_add(p: *mut Program, it: *mut Item) {
@@ -304,4 +347,19 @@ fn srcs_get(sl: *mut SrcList, id: i32) -> *mut Src {
         }
     }
     return null;
+}
+
+fn prog_append(dst: *mut Program, src: *mut Program) {
+    unsafe {
+    if (*src).items == null {
+        return;
+    }
+    if (*dst).items_tail == null {
+        (*dst).items = (*src).items;
+    } else {
+        (*(*dst).items_tail).next = (*src).items;
+    }
+    (*dst).items_tail = (*src).items_tail;
+
+    }
 }

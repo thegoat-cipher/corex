@@ -1,0 +1,9 @@
+module app;
+mod alloc;
+
+fn main() -> i32 {
+    print(alloc::free(null));
+    let p: *mut u8 = alloc::allocate(16);
+    print(alloc::free(p));
+    return 0;
+}

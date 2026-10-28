@@ -1,0 +1,2 @@
+struct S { d: [u8; 0], n: u8 }
+fn main() -> i32 { return 0; }

@@ -1,0 +1,21 @@
+macro square(x) = x * x;
+macro add3(a, b, c) = a + b + c;
+macro twice(e) = e + e;
+
+fn inc(v: i32) -> i32 { return v + 1; }
+
+struct P { x: i32, y: i32 }
+
+macro px(p) = p.x;
+
+fn main() -> i32 {
+    print(square(5));
+    print(add3(1, 2, 3));
+    print(twice(square(3)));
+    let p: i32 = 4;
+    print(square(p + 1));
+    let q: P = P { x: 7, y: 8 };
+    print(px(q));
+    print(add3(square(2), inc(1), p));
+    return 0;
+}

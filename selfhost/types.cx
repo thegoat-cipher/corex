@@ -3,7 +3,8 @@
 
 enum K {
     Void, Bool, I8, I16, I32, I64, U8, U16, U32, U64, Usize, Isize,
-    F32, F64, Char, Ptr, Array, Str, CStr, Named, Struct, Enum, Slice, Vec
+    F32, F64, Char, Ptr, Array, Str, CStr, Named, Struct, Enum, Slice, Vec,
+    Fn
 }
 
 struct Type {
@@ -14,6 +15,12 @@ struct Type {
     decl: *mut Decl,
     mutable: bool,
     name: str,
+    // Function types: `params`/`ret`/`variadic` describe the signature and
+    // `next` chains parameter types. Unused by every other kind.
+    next: *mut Type,
+    params: *mut Type,
+    ret: *mut Type,
+    variadic: bool,
 }
 
 fn type_new(a: *mut Arena, kind: K) -> *mut Type {
@@ -26,6 +33,10 @@ fn type_new(a: *mut Arena, kind: K) -> *mut Type {
         (*t).decl = null;
         (*t).mutable = false;
         (*t).name = "";
+        (*t).next = null;
+        (*t).params = null;
+        (*t).ret = null;
+        (*t).variadic = false;
     }
     return t;
 }
@@ -53,6 +64,16 @@ fn type_vec(a: *mut Arena, elem: *mut Type) -> *mut Type {
     let t: *mut Type = type_new(a, K::Vec);
     unsafe {
         (*t).elem = elem;
+    }
+    return t;
+}
+
+fn type_fn(a: *mut Arena, params: *mut Type, ret: *mut Type, variadic: bool) -> *mut Type {
+    let t: *mut Type = type_new(a, K::Fn);
+    unsafe {
+        (*t).params = params;
+        (*t).ret = ret;
+        (*t).variadic = variadic;
     }
     return t;
 }

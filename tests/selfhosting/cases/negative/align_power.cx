@@ -1,0 +1,2 @@
+align(3) struct S { x: u8 }
+fn main() -> i32 { return 0; }

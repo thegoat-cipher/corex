@@ -1,0 +1,6 @@
+fn f(x: i32) -> i32 { return x; }
+
+fn main() -> i32 {
+    let g: fn(i32) -> i32 = &f;
+    return g(1, 2);
+}

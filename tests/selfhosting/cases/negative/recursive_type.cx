@@ -1,0 +1,2 @@
+struct S { s: S }
+fn main() -> i32 { return 0; }

@@ -15,6 +15,13 @@ struct P {
     depth: i32,
     vec_depth: i32,
     pending_gt: i32,
+    module_name: str,
+    deps: *mut PathList,
+    cfg: *mut PathList,
+    discard: bool,
+    is_root: bool,
+    macros: *mut Macro,
+    macro_depth: i32,
 }
 
 fn pk(p: *mut P) -> *mut Tok {
@@ -206,16 +213,54 @@ fn parse_type(p: *mut P) -> *mut Type {
         return type_vec((*p).a, elem);
     }
     if k == T::KwFn {
-        perr(p, "function types are not supported by the bootstrap compiler");
         bump(p);
-        return type_prim((*p).a, K::I32);
+        expect(p, T::LParen);
+        let mut head: *mut Type = null;
+        let mut tail: *mut Type = null;
+        let mut variadic: bool = false;
+        while !at(p, T::RParen) && !at(p, T::Eof) {
+            if at(p, T::Ellipsis) {
+                bump(p);
+                variadic = true;
+                eat(p, T::Comma);
+                break;
+            }
+            let pt: *mut Type = parse_type(p);
+            (*pt).next = null;
+            if tail == null {
+                head = pt;
+            } else {
+                (*tail).next = pt;
+            }
+            tail = pt;
+            if !eat(p, T::Comma) {
+                break;
+            }
+        }
+        expect(p, T::RParen);
+        let mut ret: *mut Type = type_prim((*p).a, K::Void);
+        if eat(p, T::Arrow) {
+            ret = parse_type(p);
+        }
+        return type_fn((*p).a, head, ret, variadic);
     }
     if k == T::Ident {
         bump(p);
-        if at(p, T::ColonColon) {
-            perr(p, "qualified type names are not supported");
+        if eat(p, T::ColonColon) {
+            if !at(p, T::Ident) {
+                perr(p, "expected type name after `::`");
+                return type_prim((*p).a, K::I32);
+            }
+            let second: str = (*pk(p)).text;
             bump(p);
-            if at(p, T::Ident) { bump(p); }
+            let mut b: Buf = rt_buf((*p).a);
+            let bp: *mut Buf = &mut b;
+            rt_s(bp, (*t).text);
+            rt_s(bp, "$");
+            rt_s(bp, second);
+            let ty: *mut Type = type_new((*p).a, K::Named);
+            (*ty).name = rt_view(bp);
+            return ty;
         }
         let ty: *mut Type = type_new((*p).a, K::Named);
         unsafe { (*ty).name = (*t).text; }
@@ -283,16 +328,54 @@ fn append_variant(d: *mut Decl, v: *mut Variant) {
     }
 }
 
+// Append an item, applying the unit's module prefix and dropping items whose
+// `#[cfg]` evaluated to false.
 fn add_item(p: *mut P, it: *mut Item) {
     unsafe {
-    unsafe {
-        if (*p).items_tail == null {
-            (*p).items = it;
-        } else {
-            (*(*p).items_tail).next = it;
-        }
-        (*p).items_tail = it;
+    if (*p).discard {
+        return;
     }
+    let d: *mut Decl = (*it).decl;
+    if d != null {
+        (*d).is_pub = (*it).is_pub;
+        (*d).unit = (*p).module_name;
+        let mut keep: bool = false;
+        if (*p).is_root && (*d).kind == D::Func
+            && (rt_eq((*d).name, "main") || rt_eq((*d).name, "_start")) {
+            keep = true;
+        }
+        if (*d).is_extern {
+            keep = true;
+        }
+        if !keep && !rt_eq((*p).module_name, "") && !rt_eq((*d).name, "") && !has_dollar((*d).name) {
+            let mut b: Buf = rt_buf((*p).a);
+            let bp: *mut Buf = &mut b;
+            rt_s(bp, (*p).module_name);
+            rt_s(bp, "$");
+            rt_s(bp, (*d).name);
+            (*d).name = rt_view(bp);
+        }
+    }
+    if (*p).items_tail == null {
+        (*p).items = it;
+    } else {
+        (*(*p).items_tail).next = it;
+    }
+    (*p).items_tail = it;
+
+    }
+}
+
+fn has_dollar(s: str) -> bool {
+    unsafe {
+    let mut i: usize = 0;
+    while i < len(s) {
+        if s[i] == 36 {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
 
     }
 }
@@ -313,6 +396,12 @@ fn parse_fn(p: *mut P, is_pub: bool, is_extern: bool) {
     expect(p, T::LParen);
     while !at(p, T::RParen) && !at(p, T::Eof) {
         let pt: *mut Tok = pk(p);
+        if at(p, T::Ellipsis) {
+            bump(p);
+            (*d).variadic = true;
+            eat(p, T::Comma);
+            break;
+        }
         if !at(p, T::Ident) {
             perr(p, "expected parameter name");
             sync(p);
@@ -340,7 +429,10 @@ fn parse_fn(p: *mut P, is_pub: bool, is_extern: bool) {
         unsafe { (*d).ty = type_prim((*p).a, K::Void); }
     }
     if at(p, T::LBrace) {
-        unsafe { (*d).body = parse_block(p); }
+        unsafe {
+            (*d).has_body = true;
+            (*d).body = parse_block(p);
+        }
     } else {
         expect(p, T::Semi);
     }
@@ -352,7 +444,67 @@ fn parse_fn(p: *mut P, is_pub: bool, is_extern: bool) {
     }
 }
 
-fn parse_struct(p: *mut P, is_pub: bool) {
+fn parse_layout_attrs(p: *mut P, is_packed: *mut bool, explicit_align: *mut usize) {
+    unsafe {
+    let mut going: bool = true;
+    while going {
+        let k: T = tkind(p);
+        if k == T::KwRepr {
+            bump(p);
+            expect(p, T::LParen);
+            if at(p, T::Ident) {
+                if !rt_eq((*pk(p)).text, "C") && !rt_eq((*pk(p)).text, "c") {
+                    perr(p, "only repr(C) is supported");
+                }
+                bump(p);
+            }
+            expect(p, T::RParen);
+        } else if k == T::KwPacked {
+            bump(p);
+            (*is_packed) = true;
+        } else if k == T::KwAlign {
+            bump(p);
+            expect(p, T::LParen);
+            if at(p, T::Int) {
+                let v: i64 = (*pk(p)).ival;
+                if v <= 0 || (v & (v - 1)) != 0 {
+                    perr(p, "alignment must be a power of two");
+                }
+                (*explicit_align) = v as usize;
+                bump(p);
+            } else {
+                perr(p, "expected alignment value");
+            }
+            expect(p, T::RParen);
+        } else {
+            going = false;
+        }
+    }
+
+    }
+}
+
+fn parse_struct_with_attrs(p: *mut P, is_pub: bool) {
+    unsafe {
+    let mut is_packed: bool = false;
+    let mut explicit_align: usize = 0;
+    parse_layout_attrs(p, &mut is_packed, &mut explicit_align);
+    let k: T = tkind(p);
+    if k == T::KwUnion {
+        parse_struct(p, is_pub, true, is_packed, explicit_align);
+        return;
+    }
+    if k == T::KwStruct {
+        parse_struct(p, is_pub, false, is_packed, explicit_align);
+        return;
+    }
+    perr(p, "expected struct or union after layout attributes");
+    sync(p);
+
+    }
+}
+
+fn parse_struct(p: *mut P, is_pub: bool, is_union: bool, is_packed: bool, explicit_align: usize) {
     unsafe {
     bump(p);
     let name_tok: *mut Tok = pk(p);
@@ -363,6 +515,11 @@ fn parse_struct(p: *mut P, is_pub: bool) {
     }
     bump(p);
     let d: *mut Decl = decl_new((*p).a, D::Struct, (*name_tok).text, (*name_tok).file, (*name_tok).line, (*name_tok).col);
+    unsafe {
+        (*d).is_union = is_union;
+        (*d).is_packed = is_packed;
+        (*d).explicit_align = explicit_align;
+    }
     expect(p, T::LBrace);
     while !at(p, T::RBrace) && !at(p, T::Eof) {
         let ft: *mut Tok = pk(p);
@@ -374,6 +531,20 @@ fn parse_struct(p: *mut P, is_pub: bool) {
         bump(p);
         expect(p, T::Colon);
         let ty: *mut Type = parse_type(p);
+        let mut bit_width: i32 = 0;
+        if eat(p, T::Colon) {
+            if at(p, T::Int) {
+                let w: i64 = (*pk(p)).ival;
+                if w <= 0 || w > 64 {
+                    perr(p, "bitfield width must be between 1 and 64");
+                } else {
+                    bit_width = w as i32;
+                }
+                bump(p);
+            } else {
+                perr(p, "expected bitfield width");
+            }
+        }
         let f: *mut Field = rt_alloc((*p).a, sizeof(Field)) as *mut Field;
         unsafe {
             (*f).next = null;
@@ -383,6 +554,8 @@ fn parse_struct(p: *mut P, is_pub: bool) {
             (*f).size = 0;
             (*f).alignment = 1;
             (*f).index = 0;
+            (*f).bit_width = bit_width;
+            (*f).bit_offset = 0;
         }
         append_field(d, f);
         if !eat(p, T::Comma) {
@@ -602,10 +775,118 @@ fn parse_switch(p: *mut P) -> *mut Stmt {
     }
 }
 
+// A `for` initializer or step: an expression, assignment, or compound
+// assignment. The trailing `;`/`)` is left to the caller.
+fn parse_for_clause(p: *mut P) -> *mut Stmt {
+    unsafe {
+    let t: *mut Tok = pk(p);
+    let e: *mut Expr = parse_expr(p);
+    let op: T = tkind(p);
+    if is_assign_op(op) {
+        bump(p);
+        let s: *mut Stmt = stmt_new((*p).a, S::Assign, t);
+        unsafe {
+            (*s).expr = e;
+            (*s).op = op;
+            (*s).rhs = parse_expr(p);
+        }
+        return s;
+    }
+    let s: *mut Stmt = stmt_new((*p).a, S::Expr, t);
+    unsafe { (*s).expr = e; }
+    return s;
+
+    }
+}
+
+fn parse_for(p: *mut P) -> *mut Stmt {
+    unsafe {
+    let t: *mut Tok = pk(p);
+    bump(p);
+    let s: *mut Stmt = stmt_new((*p).a, S::For, t);
+    expect(p, T::LParen);
+    if at(p, T::Semi) {
+        bump(p);
+    } else if at(p, T::KwLet) {
+        unsafe { (*s).init = parse_stmt(p); }
+    } else {
+        // The oracle accepts only `let` or an expression here; assignments
+        // belong in the step clause.
+        let it: *mut Tok = pk(p);
+        let e: *mut Expr = parse_expr(p);
+        let is: *mut Stmt = stmt_new((*p).a, S::Expr, it);
+        unsafe {
+            (*is).expr = e;
+            (*s).init = is;
+        }
+        expect(p, T::Semi);
+    }
+    if !at(p, T::Semi) {
+        unsafe { (*s).expr = parse_expr(p); }
+    }
+    expect(p, T::Semi);
+    if !at(p, T::RParen) {
+        unsafe { (*s).step = parse_for_clause(p); }
+    }
+    expect(p, T::RParen);
+    unsafe { (*s).body = parse_block(p); }
+    return s;
+
+    }
+}
+
+fn parse_do(p: *mut P) -> *mut Stmt {
+    unsafe {
+    let t: *mut Tok = pk(p);
+    bump(p);
+    let s: *mut Stmt = stmt_new((*p).a, S::DoWhile, t);
+    unsafe { (*s).body = parse_block(p); }
+    expect(p, T::KwWhile);
+    unsafe { (*s).expr = parse_expr(p); }
+    expect(p, T::Semi);
+    return s;
+
+    }
+}
+
+fn parse_goto(p: *mut P) -> *mut Stmt {
+    unsafe {
+    let t: *mut Tok = pk(p);
+    bump(p);
+    if !at(p, T::Ident) {
+        perr(p, "expected `goto` target");
+        sync(p);
+        return null;
+    }
+    let s: *mut Stmt = stmt_new((*p).a, S::Goto, t);
+    unsafe { (*s).name = (*pk(p)).text; }
+    bump(p);
+    expect(p, T::Semi);
+    return s;
+
+    }
+}
+
+fn parse_label(p: *mut P) -> *mut Stmt {
+    unsafe {
+    let t: *mut Tok = pk(p);
+    let s: *mut Stmt = stmt_new((*p).a, S::Label, t);
+    unsafe { (*s).name = (*t).text; }
+    bump(p);
+    bump(p);
+    unsafe { (*s).body = parse_stmt(p); }
+    return s;
+
+    }
+}
+
 fn parse_stmt(p: *mut P) -> *mut Stmt {
     unsafe {
     let t: *mut Tok = pk(p);
     let k: T = (*t).kind;
+    if k == T::Ident && (*pk_n(p, 1)).kind == T::Colon {
+        return parse_label(p);
+    }
     if k == T::Semi {
         bump(p);
         return stmt_new((*p).a, S::Empty, t);
@@ -702,10 +983,14 @@ fn parse_stmt(p: *mut P) -> *mut Stmt {
     if k == T::KwSwitch {
         return parse_switch(p);
     }
-    if k == T::KwFor || k == T::KwDo || k == T::KwGoto {
-        perr(p, "for/do/goto are not supported by the bootstrap compiler");
-        sync(p);
-        return null;
+    if k == T::KwFor {
+        return parse_for(p);
+    }
+    if k == T::KwDo {
+        return parse_do(p);
+    }
+    if k == T::KwGoto {
+        return parse_goto(p);
     }
     let e: *mut Expr = parse_expr(p);
     let op: T = tkind(p);
@@ -793,7 +1078,7 @@ fn parse_struct_lit(p: *mut P, name: str, tok: *mut Tok) -> *mut Expr {
         bump(p);
         expect(p, T::Colon);
         let val: *mut Expr = parse_expr(p);
-        unsafe { (*val).field = (*ft).text; }
+        unsafe { (*val).sfield = (*ft).text; }
         if head == null {
             head = val;
         } else {
@@ -930,17 +1215,42 @@ fn parse_primary(p: *mut P) -> *mut Expr {
         let name: str = (*t).text;
         if eat(p, T::ColonColon) {
             let vt: *mut Tok = pk(p);
-            if at(p, T::Ident) {
+            if !at(p, T::Ident) {
+                perr(p, "expected an item name after `::`");
+                return null;
+            }
+            bump(p);
+            let second: str = (*vt).text;
+            if eat(p, T::ColonColon) {
+                let vv: *mut Tok = pk(p);
+                if !at(p, T::Ident) {
+                    perr(p, "expected enum variant");
+                    return null;
+                }
                 bump(p);
                 let e: *mut Expr = expr_new((*p).a, E::Path, t);
                 unsafe {
                     (*e).name = name;
-                    (*e).field = (*vt).text;
+                    (*e).field = second;
+                    (*e).text = (*vv).text;
                 }
                 return e;
             }
-            perr(p, "expected enum variant");
-            return null;
+            let mut b: Buf = rt_buf((*p).a);
+            let bp: *mut Buf = &mut b;
+            rt_s(bp, name);
+            rt_s(bp, "$");
+            rt_s(bp, second);
+            let qname: str = rt_view(bp);
+            if struct_lit_ahead(p) {
+                return parse_struct_lit(p, qname, t);
+            }
+            let e: *mut Expr = expr_new((*p).a, E::Path, t);
+            unsafe {
+                (*e).name = name;
+                (*e).field = second;
+            }
+            return e;
         }
         if struct_lit_ahead(p) {
             return parse_struct_lit(p, name, t);
@@ -966,6 +1276,14 @@ fn parse_postfix(p: *mut P) -> *mut Expr {
         let t: *mut Tok = pk(p);
         let k: T = (*t).kind;
         if k == T::LParen {
+            if (*e).kind == E::Ident {
+                let m: *mut Macro = macro_find(p, (*e).name);
+                if m != null {
+                    let args: *mut Expr = parse_args(p);
+                    e = expand_macro(p, m, args, t);
+                    continue;
+                }
+            }
             let call: *mut Expr = expr_new((*p).a, E::Call, t);
             unsafe {
                 (*call).lhs = e;
@@ -1399,7 +1717,257 @@ fn parse_file(p: *mut P, path: str) {
     }
 }
 
+fn macro_find(p: *mut P, name: str) -> *mut Macro {
+    unsafe {
+    let mut m: *mut Macro = (*p).macros;
+    while m != null {
+        if rt_eq((*m).name, name) {
+            return m;
+        }
+        m = (*m).next;
+    }
+    return null;
+
+    }
+}
+
+fn macro_add(p: *mut P, m: *mut Macro) {
+    unsafe {
+    (*m).next = (*p).macros;
+    (*p).macros = m;
+
+    }
+}
+
+fn expr_clone(p: *mut P, src: *mut Expr) -> *mut Expr {
+    unsafe {
+    if src == null {
+        return null;
+    }
+    let e: *mut Expr = rt_alloc((*p).a, sizeof(Expr)) as *mut Expr;
+    (*e) = (*src);
+    (*e).lhs = expr_clone(p, (*src).lhs);
+    (*e).rhs = expr_clone(p, (*src).rhs);
+    (*e).args = expr_clone(p, (*src).args);
+    (*e).next = expr_clone(p, (*src).next);
+    (*e).decl = null;
+    return e;
+
+    }
+}
+
+fn param_index(params: *mut PathList, name: str) -> i32 {
+    unsafe {
+    let mut i: i32 = 0;
+    let mut q: *mut PathList = params;
+    while q != null {
+        if rt_eq((*q).path, name) {
+            return i;
+        }
+        i = i + 1;
+        q = (*q).next;
+    }
+    return -1;
+
+    }
+}
+
+fn arg_at(args: *mut Expr, index: i32) -> *mut Expr {
+    unsafe {
+    let mut i: i32 = 0;
+    let mut q: *mut Expr = args;
+    while q != null {
+        if i == index {
+            return q;
+        }
+        i = i + 1;
+        q = (*q).next;
+    }
+    return null;
+
+    }
+}
+
+// Clone `src`, replacing identifiers that name macro parameters with a fresh
+// copy of the corresponding argument expression.
+fn subst_expr(p: *mut P, src: *mut Expr, params: *mut PathList, args: *mut Expr) -> *mut Expr {
+    unsafe {
+    if src == null {
+        return null;
+    }
+    if (*src).kind == E::Ident {
+        let idx: i32 = param_index(params, (*src).name);
+        if idx >= 0 {
+            let a: *mut Expr = arg_at(args, idx);
+            if a != null {
+                let c: *mut Expr = expr_clone(p, a);
+                (*c).next = null;
+                return c;
+            }
+        }
+    }
+    let e: *mut Expr = rt_alloc((*p).a, sizeof(Expr)) as *mut Expr;
+    (*e) = (*src);
+    (*e).lhs = subst_expr(p, (*src).lhs, params, args);
+    (*e).rhs = subst_expr(p, (*src).rhs, params, args);
+    (*e).args = subst_expr(p, (*src).args, params, args);
+    (*e).next = subst_expr(p, (*src).next, params, args);
+    (*e).decl = null;
+    return e;
+
+    }
+}
+
+fn expand_macro(p: *mut P, m: *mut Macro, args: *mut Expr, tok: *mut Tok) -> *mut Expr {
+    unsafe {
+    let mut np: i32 = 0;
+    let mut q: *mut PathList = (*m).params;
+    while q != null {
+        np = np + 1;
+        q = (*q).next;
+    }
+    let mut na: i32 = 0;
+    let mut a: *mut Expr = args;
+    while a != null {
+        na = na + 1;
+        a = (*a).next;
+    }
+    if np != na {
+        perr(p, "macro argument count mismatch");
+    }
+    if (*p).macro_depth >= 64 {
+        perr(p, "macro expansion depth exceeds 64");
+        return expr_new((*p).a, E::IntLit, tok);
+    }
+    (*p).macro_depth = (*p).macro_depth + 1;
+    let out: *mut Expr = subst_expr(p, (*m).body, (*m).params, args);
+    (*p).macro_depth = (*p).macro_depth - 1;
+    if out == null {
+        return expr_new((*p).a, E::IntLit, tok);
+    }
+    (*out).file = (*tok).file;
+    (*out).line = (*tok).line;
+    (*out).col = (*tok).col;
+    return out;
+
+    }
+}
+
+fn cfg_has(p: *mut P, key: str) -> bool {
+    unsafe {
+    let mut q: *mut PathList = (*p).cfg;
+    while q != null {
+        if rt_eq((*q).path, key) {
+            return true;
+        }
+        q = (*q).next;
+    }
+    return false;
+
+    }
+}
+
+fn parse_cfg_expr(p: *mut P) -> bool {
+    unsafe {
+    if !at(p, T::Ident) {
+        perr(p, "expected cfg key");
+        return false;
+    }
+    let name: str = (*pk(p)).text;
+    bump(p);
+    if rt_eq(name, "not") {
+        expect(p, T::LParen);
+        let v: bool = parse_cfg_expr(p);
+        expect(p, T::RParen);
+        return !v;
+    }
+    if rt_eq(name, "all") || rt_eq(name, "any") {
+        expect(p, T::LParen);
+        let mut allv: bool = true;
+        let mut anyv: bool = false;
+        while !at(p, T::RParen) && !at(p, T::Eof) {
+            let v: bool = parse_cfg_expr(p);
+            if v {
+                anyv = true;
+            } else {
+                allv = false;
+            }
+            if !eat(p, T::Comma) {
+                break;
+            }
+        }
+        expect(p, T::RParen);
+        if rt_eq(name, "all") {
+            return allv;
+        }
+        return anyv;
+    }
+    if !eat(p, T::Eq) {
+        return cfg_has(p, name);
+    }
+    if !at(p, T::Str) {
+        perr(p, "expected a string cfg value");
+        return false;
+    }
+    let val: str = (*pk(p)).text;
+    bump(p);
+    let mut b: Buf = rt_buf((*p).a);
+    let bp: *mut Buf = &mut b;
+    rt_s(bp, name);
+    rt_s(bp, "=");
+    rt_s(bp, val);
+    return cfg_has(p, rt_view(bp));
+
+    }
+}
+
+fn parse_cfg_attrs(p: *mut P) -> bool {
+    unsafe {
+    let mut enabled: bool = true;
+    while at(p, T::Hash) {
+        bump(p);
+        expect(p, T::LBracket);
+        if !at(p, T::Ident) {
+            perr(p, "expected attribute name");
+            return enabled;
+        }
+        let name: str = (*pk(p)).text;
+        bump(p);
+        if !rt_eq(name, "cfg") {
+            perr(p, "unknown attribute");
+            while !at(p, T::RBracket) && !at(p, T::Eof) {
+                bump(p);
+            }
+            expect(p, T::RBracket);
+            continue;
+        }
+        expect(p, T::LParen);
+        let v: bool = parse_cfg_expr(p);
+        expect(p, T::RParen);
+        expect(p, T::RBracket);
+        if !v {
+            enabled = false;
+        }
+    }
+    return enabled;
+
+    }
+}
+
 fn parse_item(p: *mut P) {
+    unsafe {
+    let enabled: bool = parse_cfg_attrs(p);
+    let save: bool = (*p).discard;
+    if !enabled {
+        (*p).discard = true;
+    }
+    parse_item_inner(p);
+    (*p).discard = save;
+
+    }
+}
+
+fn parse_item_inner(p: *mut P) {
     unsafe {
     let mut is_pub: bool = false;
     if eat(p, T::KwPub) {
@@ -1426,8 +1994,9 @@ fn parse_item(p: *mut P) {
         parse_fn(p, is_pub, false);
         return;
     }
-    if k == T::KwStruct {
-        parse_struct(p, is_pub);
+    if k == T::KwStruct || k == T::KwUnion || k == T::KwPacked
+        || k == T::KwAlign || k == T::KwRepr {
+        parse_struct_with_attrs(p, is_pub);
         return;
     }
     if k == T::KwEnum {
@@ -1462,13 +2031,90 @@ fn parse_item(p: *mut P) {
         let _ = c_name;
         return;
     }
-    if k == T::KwModule || k == T::KwMod {
-        perr(p, "module declarations are not supported by the bootstrap compiler");
-        sync(p);
+    if k == T::KwMacro {
+        if is_pub {
+            perr(p, "`pub` does not apply to `macro`");
+        }
+        bump(p);
+        if !at(p, T::Ident) {
+            perr(p, "expected macro name");
+            sync(p);
+            return;
+        }
+        let name: str = (*pk(p)).text;
+        bump(p);
+        expect(p, T::LParen);
+        let mut params: *mut PathList = null;
+        let mut ptail: *mut PathList = null;
+        while !at(p, T::RParen) && !at(p, T::Eof) {
+            if !at(p, T::Ident) {
+                perr(p, "expected macro parameter");
+                break;
+            }
+            let pl: *mut PathList = rt_alloc((*p).a, sizeof(PathList)) as *mut PathList;
+            (*pl).path = (*pk(p)).text;
+            (*pl).next = null;
+            if ptail == null {
+                params = pl;
+            } else {
+                (*ptail).next = pl;
+            }
+            ptail = pl;
+            bump(p);
+            if !eat(p, T::Comma) {
+                break;
+            }
+        }
+        expect(p, T::RParen);
+        expect(p, T::Eq);
+        let body: *mut Expr = parse_expr(p);
+        expect(p, T::Semi);
+        let m: *mut Macro = rt_alloc((*p).a, sizeof(Macro)) as *mut Macro;
+        (*m).next = null;
+        (*m).name = name;
+        (*m).params = params;
+        (*m).body = body;
+        macro_add(p, m);
+        return;
+    }
+    if k == T::KwModule {
+        bump(p);
+        if !at(p, T::Ident) {
+            perr(p, "expected module name");
+            sync(p);
+            return;
+        }
+        if !rt_eq((*p).module_name, "") {
+            perr(p, "a file may declare only one module");
+        }
+        (*p).module_name = (*pk(p)).text;
+        bump(p);
+        expect(p, T::Semi);
+        return;
+    }
+    if k == T::KwMod {
+        bump(p);
+        if !at(p, T::Ident) {
+            perr(p, "expected module dependency name");
+            sync(p);
+            return;
+        }
+        let dep: str = (*pk(p)).text;
+        bump(p);
+        if at(p, T::LBrace) {
+            perr(p, "inline modules are not supported; use `mod name;`");
+            sync(p);
+            return;
+        }
+        expect(p, T::Semi);
+        let pl: *mut PathList = rt_alloc((*p).a, sizeof(PathList)) as *mut PathList;
+        (*pl).path = dep;
+        (*pl).next = (*p).deps;
+        (*p).deps = pl;
         return;
     }
     if k == T::Hash {
-        perr(p, "attributes are not supported by the bootstrap compiler");
+        perr(p, "attribute is not attached to an item");
         sync(p);
         return;
     }
@@ -1478,7 +2124,8 @@ fn parse_item(p: *mut P) {
     }
 }
 
-fn parse_program(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, root: str) -> Program {
+fn parse_program_cfg(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, root: str,
+    cfg: *mut PathList, is_root: bool) -> Program {
     unsafe {
     let p: *mut P = rt_alloc(a, sizeof(P)) as *mut P;
     unsafe {
@@ -1496,14 +2143,27 @@ fn parse_program(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, root: str) ->
         (*p).depth = 0;
         (*p).vec_depth = 0;
         (*p).pending_gt = 0;
+        (*p).module_name = "";
+        (*p).deps = null;
+        (*p).cfg = cfg;
+        (*p).discard = false;
+        (*p).is_root = is_root;
+        (*p).macros = null;
+        (*p).macro_depth = 0;
     }
     parse_file(p, root);
     let mut prog: Program = prog_init();
     unsafe {
         prog.items = (*p).items;
         prog.items_tail = (*p).items_tail;
+        prog.module_name = (*p).module_name;
+        prog.deps = (*p).deps;
     }
     return prog;
 
     }
+}
+
+fn parse_program(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, root: str) -> Program {
+    return parse_program_cfg(a, d, srcs, root, null, true);
 }

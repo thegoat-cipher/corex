@@ -1,0 +1,2 @@
+union U { i: i32, f: u32 }
+fn main() -> i32 { let u: U = U { i: 1, f: 2 }; return 0; }

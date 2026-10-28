@@ -1,0 +1,2 @@
+pub macro m(a) = a;
+fn main() -> i32 { return m(1); }

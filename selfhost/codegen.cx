@@ -38,6 +38,7 @@ struct Cg {
     used_cstr_len: bool,
     used_cstr_str: bool,
     used_assert: bool,
+    no_entry: bool,
 }
 
 struct Fn {
@@ -49,6 +50,7 @@ struct Fn {
     lbl: i32,
     terminated: bool,
     loops: *mut LoopCtx,
+    labels: *mut Lbl,
 }
 
 fn v_ssa(ty: *mut Type, reg: str) -> Val {
@@ -264,6 +266,50 @@ fn var_name(f: *mut Fn, slot: i32) -> str {
     }
 }
 
+// A struct whose layout LLVM reproduces exactly: no union, no packed, no
+// explicit alignment, no bitfields, and every field type is itself plain.
+// Non-plain aggregates are lowered to `[size x i8]` and accessed through the
+// byte offsets computed by semantic analysis.
+fn struct_plain(d: *mut Decl) -> bool {
+    unsafe {
+    if d == null {
+        return true;
+    }
+    if (*d).is_union || (*d).is_packed || (*d).explicit_align > 0 {
+        return false;
+    }
+    let mut f: *mut Field = (*d).fields;
+    while f != null {
+        if (*f).bit_width > 0 {
+            return false;
+        }
+        if !type_plain((*f).ty) {
+            return false;
+        }
+        f = (*f).next;
+    }
+    return true;
+
+    }
+}
+
+fn type_plain(t: *mut Type) -> bool {
+    unsafe {
+    if t == null {
+        return true;
+    }
+    let k: K = (*t).kind;
+    if k == K::Struct {
+        return struct_plain((*t).decl);
+    }
+    if k == K::Array {
+        return type_plain((*t).elem);
+    }
+    return true;
+
+    }
+}
+
 fn llty(cg: *mut Cg, t: *mut Type) -> str {
     unsafe {
     unsafe {
@@ -279,7 +325,7 @@ fn llty(cg: *mut Cg, t: *mut Type) -> str {
     if k == K::I64 || k == K::U64 || k == K::Usize || k == K::Isize { return "i64"; }
     if k == K::F32 { return "float"; }
     if k == K::F64 { return "double"; }
-    if k == K::Ptr || k == K::CStr { return "ptr"; }
+    if k == K::Ptr || k == K::CStr || k == K::Fn { return "ptr"; }
     if k == K::Str || k == K::Slice { return "{ ptr, i64 }"; }
     if k == K::Vec { return "{ ptr, i64, i64 }"; }
     if k == K::Array {
@@ -295,12 +341,18 @@ fn llty(cg: *mut Cg, t: *mut Type) -> str {
     if k == K::Struct {
         let mut b: Buf = rt_buf((*cg).a);
         let bp: *mut Buf = &mut b;
-        rt_s(bp, "%struct.");
-        if (*t).decl != null {
-            rt_s(bp, (*((*t).decl)).name);
-        } else {
-            rt_s(bp, "unknown");
+        if (*t).decl == null || struct_plain((*t).decl) {
+            rt_s(bp, "%struct.");
+            if (*t).decl != null {
+                rt_s(bp, (*((*t).decl)).name);
+            } else {
+                rt_s(bp, "unknown");
+            }
+            return rt_view(bp);
         }
+        rt_b(bp, 91);
+        rt_i(bp, (*((*t).decl)).size as i64);
+        rt_s(bp, " x i8]");
         return rt_view(bp);
     }
     return "i64";
@@ -498,7 +550,7 @@ fn operand(f: *mut Fn, v: Val, ty: *mut Type) -> str {
     unsafe {
     unsafe {
     if v.is_const {
-        if ty != null && ((*ty).kind == K::Ptr || (*ty).kind == K::CStr) {
+        if ty != null && ((*ty).kind == K::Ptr || (*ty).kind == K::CStr || (*ty).kind == K::Fn) {
             return "null";
         }
         if ty != null && (*ty).kind == K::Bool {
@@ -694,11 +746,14 @@ fn gen_addr(f: *mut Fn, e: *mut Expr) -> Val {
         let p: str = str_id_ptr(f, id, n);
         return v_addr((*e).ty, p);
     }
-    if k == E::Ident {
+    if k == E::Ident || k == E::Path {
         if (*e).decl == null {
             return v_const((*e).ty, 0);
         }
         let d: *mut Decl = (*e).decl;
+        if (*d).kind == D::Func {
+            return fn_ptr_val(f, (*d).name, (*e).ty);
+        }
         if (*d).kind == D::Global {
             let mut b: Buf = rt_buf((*(*f).cg).a);
             let bp: *mut Buf = &mut b;
@@ -721,10 +776,15 @@ fn gen_addr(f: *mut Fn, e: *mut Expr) -> Val {
         }
         let id: i32 = fnewtmp(f);
         fs(f, "  %t"); fi(f, id as i64);
-        fs(f, " = getelementptr inbounds ");
-        fs(f, llty((*f).cg, bt));
-        fs(f, ", ptr "); fs(f, base.reg);
-        fs(f, ", i32 0, i32 "); fi(f, (*e).index as i64); fnewline(f);
+        if (*bt).decl != null && !struct_plain((*bt).decl) {
+            fs(f, " = getelementptr inbounds i8, ptr "); fs(f, base.reg);
+            fs(f, ", i64 "); fi(f, (*e).ival); fnewline(f);
+        } else {
+            fs(f, " = getelementptr inbounds ");
+            fs(f, llty((*f).cg, bt));
+            fs(f, ", ptr "); fs(f, base.reg);
+            fs(f, ", i32 0, i32 "); fi(f, (*e).index as i64); fnewline(f);
+        }
         return v_addr((*e).ty, reg_of(f, id));
     }
     if k == E::Index {
@@ -864,7 +924,7 @@ fn gen_cmp(f: *mut Fn, op: T, a: str, b: str, ty: *mut Type) -> str {
     fs(f, "  %t"); fi(f, id as i64);
     fs(f, " = icmp ");
     let k: K = (*ty).kind;
-    if k == K::Ptr || k == K::CStr {
+    if k == K::Ptr || k == K::CStr || k == K::Fn {
         if op == T::Ne { fs(f, "ne "); } else { fs(f, "eq "); }
     } else if op == T::EqEq {
         fs(f, "eq ");
@@ -897,8 +957,8 @@ fn gen_cast(f: *mut Fn, e: *mut Expr) -> Val {
     let v: Val = gen_expr(f, (*e).lhs);
     let fk: K = (*from).kind;
     let tk: K = (*to).kind;
-    if tk == K::Ptr || tk == K::CStr {
-        if fk == K::Ptr || fk == K::CStr {
+    if tk == K::Ptr || tk == K::CStr || tk == K::Fn {
+        if fk == K::Ptr || fk == K::CStr || fk == K::Fn {
             return v_ssa(to, operand(f, v, from));
         }
         let src: str = cast_operand_to_i64(f, v, from);
@@ -907,7 +967,7 @@ fn gen_cast(f: *mut Fn, e: *mut Expr) -> Val {
         fs(f, " = inttoptr i64 "); fs(f, src); fs(f, " to ptr\n");
         return v_ssa(to, reg_of(f, id));
     }
-    if fk == K::Ptr || fk == K::CStr {
+    if fk == K::Ptr || fk == K::CStr || fk == K::Fn {
         let id: i32 = fnewtmp(f);
         fs(f, "  %t"); fi(f, id as i64);
         fs(f, " = ptrtoint ptr "); fs(f, operand(f, v, from)); fs(f, " to i64\n");
@@ -1057,6 +1117,176 @@ fn gen_binary(f: *mut Fn, e: *mut Expr) -> Val {
     }
 }
 
+fn fn_ptr_val(f: *mut Fn, name: str, ty: *mut Type) -> Val {
+    unsafe {
+    let mut b: Buf = rt_buf((*(*f).cg).a);
+    let bp: *mut Buf = &mut b;
+    rt_b(bp, 64);
+    rt_s(bp, name);
+    return v_ssa(ty, rt_view(bp));
+
+    }
+}
+
+// Load/store with an optional explicit alignment. An alignment of 0 omits the
+// attribute (the LLVM default), which is what plain struct fields use.
+fn load_val_align(f: *mut Fn, ptr: str, ty: *mut Type, al: i64) -> Val {
+    unsafe {
+    if is_agg(ty) {
+        return v_addr(ty, ptr);
+    }
+    let id: i32 = fnewtmp(f);
+    fs(f, "  %t"); fi(f, id as i64);
+    fs(f, " = load "); fs(f, llty((*f).cg, ty));
+    fs(f, ", ptr "); fs(f, ptr);
+    if al > 0 {
+        fs(f, ", align "); fi(f, al);
+    }
+    fnewline(f);
+    return v_ssa(ty, reg_of(f, id));
+
+    }
+}
+
+fn store_val_align(f: *mut Fn, ptr: str, v: Val, ty: *mut Type, al: i64) {
+    unsafe {
+    if is_agg(ty) {
+        let op: str = materialize(f, v, ty);
+        fs(f, "  store "); fs(f, llty((*f).cg, ty));
+        fs(f, " "); fs(f, op);
+        fs(f, ", ptr "); fs(f, ptr);
+    } else {
+        fs(f, "  store "); fs(f, llty((*f).cg, ty));
+        fs(f, " "); fs(f, operand(f, v, ty));
+        fs(f, ", ptr "); fs(f, ptr);
+    }
+    if al > 0 {
+        fs(f, ", align "); fi(f, al);
+    }
+    fnewline(f);
+
+    }
+}
+
+fn field_of(e: *mut Expr) -> *mut Field {
+    unsafe {
+    let bt: *mut Type = (*e).opty;
+    if bt == null || (*bt).decl == null {
+        return null;
+    }
+    return find_field((*bt).decl, (*e).field);
+
+    }
+}
+
+// Non-plain aggregates are byte arrays whose fields may be unaligned.
+fn field_access_align(e: *mut Expr) -> i64 {
+    unsafe {
+    let bt: *mut Type = (*e).opty;
+    if bt != null && (*bt).decl != null && !struct_plain((*bt).decl) {
+        return 1;
+    }
+    return 0;
+
+    }
+}
+
+fn mask_low(width: i32) -> i64 {
+    unsafe {
+    let mut m: i64 = 1;
+    let mut i: i32 = 0;
+    while i < width {
+        m = m * 2;
+        i = i + 1;
+    }
+    return m - 1;
+
+    }
+}
+
+fn load_bitfield(f: *mut Fn, ptr: str, fld: *mut Field) -> Val {
+    unsafe {
+    let unit: *mut Type = (*fld).ty;
+    let ty: str = llty((*f).cg, unit);
+    let raw: Val = load_val_align(f, ptr, unit, 1);
+    let mut cur: str = operand(f, raw, unit);
+    if (*fld).bit_offset > 0 {
+        let id: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, id as i64);
+        fs(f, " = lshr "); fs(f, ty); fs(f, " "); fs(f, cur);
+        fs(f, ", "); fi(f, (*fld).bit_offset as i64); fnewline(f);
+        cur = reg_of(f, id);
+    }
+    let bits: i32 = type_bits(unit);
+    if (*fld).bit_width < bits {
+        let id: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, id as i64);
+        fs(f, " = and "); fs(f, ty); fs(f, " "); fs(f, cur);
+        fs(f, ", "); fi(f, mask_low((*fld).bit_width)); fnewline(f);
+        cur = reg_of(f, id);
+        if type_is_signed(unit) {
+            let shift: i32 = bits - (*fld).bit_width;
+            let wide: i32 = fnewtmp(f);
+            fs(f, "  %t"); fi(f, wide as i64);
+            fs(f, " = shl "); fs(f, ty); fs(f, " "); fs(f, cur);
+            fs(f, ", "); fi(f, shift as i64); fnewline(f);
+            let back: i32 = fnewtmp(f);
+            fs(f, "  %t"); fi(f, back as i64);
+            fs(f, " = ashr "); fs(f, ty); fs(f, " "); fs(f, reg_of(f, wide));
+            fs(f, ", "); fi(f, shift as i64); fnewline(f);
+            cur = reg_of(f, back);
+        }
+    }
+    return v_ssa(unit, cur);
+
+    }
+}
+
+fn store_bitfield(f: *mut Fn, ptr: str, fld: *mut Field, v: Val) {
+    unsafe {
+    let unit: *mut Type = (*fld).ty;
+    let ty: str = llty((*f).cg, unit);
+    let bits: i32 = type_bits(unit);
+    let width: i32 = (*fld).bit_width;
+    let off: i32 = (*fld).bit_offset;
+    if width >= bits && off == 0 {
+        store_val_align(f, ptr, v, unit, 1);
+        return;
+    }
+    let raw: Val = load_val_align(f, ptr, unit, 1);
+    let low: i64 = mask_low(width);
+    let mut shifted_mask: i64 = low;
+    let mut i: i32 = 0;
+    while i < off {
+        shifted_mask = shifted_mask * 2;
+        i = i + 1;
+    }
+    let keep_inv: i64 = 0 - (shifted_mask + 1);
+    let keep: i32 = fnewtmp(f);
+    fs(f, "  %t"); fi(f, keep as i64);
+    fs(f, " = and "); fs(f, ty); fs(f, " "); fs(f, operand(f, raw, unit));
+    fs(f, ", "); fi(f, keep_inv); fnewline(f);
+    let masked: i32 = fnewtmp(f);
+    fs(f, "  %t"); fi(f, masked as i64);
+    fs(f, " = and "); fs(f, ty); fs(f, " "); fs(f, operand(f, v, unit));
+    fs(f, ", "); fi(f, low); fnewline(f);
+    let mut placed: str = reg_of(f, masked);
+    if off > 0 {
+        let sh: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, sh as i64);
+        fs(f, " = shl "); fs(f, ty); fs(f, " "); fs(f, placed);
+        fs(f, ", "); fi(f, off as i64); fnewline(f);
+        placed = reg_of(f, sh);
+    }
+    let res: i32 = fnewtmp(f);
+    fs(f, "  %t"); fi(f, res as i64);
+    fs(f, " = or "); fs(f, ty); fs(f, " "); fs(f, reg_of(f, keep));
+    fs(f, ", "); fs(f, placed); fnewline(f);
+    store_val_align(f, ptr, v_ssa(unit, reg_of(f, res)), unit, 1);
+
+    }
+}
+
 fn gen_expr(f: *mut Fn, e: *mut Expr) -> Val {
     unsafe {
     unsafe {
@@ -1097,6 +1327,9 @@ fn gen_expr(f: *mut Fn, e: *mut Expr) -> Val {
         if d == null {
             return v_const((*e).ty, 0);
         }
+        if (*d).kind == D::Func {
+            return fn_ptr_val(f, (*d).name, (*e).ty);
+        }
         if (*d).kind == D::Const {
             if (*d).cval_kind == 2 {
                 return make_str_val(f, (*d).cval_s);
@@ -1107,6 +1340,20 @@ fn gen_expr(f: *mut Fn, e: *mut Expr) -> Val {
         return load_val(f, a.reg, (*e).ty);
     }
     if k == E::Path {
+        let d: *mut Decl = (*e).decl;
+        if d != null && (*d).kind == D::Func {
+            return fn_ptr_val(f, (*d).name, (*e).ty);
+        }
+        if d != null && (*d).kind == D::Const {
+            if (*d).cval_kind == 2 {
+                return make_str_val(f, (*d).cval_s);
+            }
+            return v_const((*d).ty, (*d).cval);
+        }
+        if d != null && (*d).kind == D::Global {
+            let a: Val = gen_addr(f, e);
+            return load_val(f, a.reg, (*e).ty);
+        }
         return v_const((*e).ty, (*e).index as i64);
     }
     if k == E::Call {
@@ -1175,6 +1422,13 @@ fn gen_expr(f: *mut Fn, e: *mut Expr) -> Val {
     }
     if k == E::Index || k == E::Field {
         let a: Val = gen_addr(f, e);
+        if k == E::Field {
+            let fld: *mut Field = field_of(e);
+            if fld != null && (*fld).bit_width > 0 {
+                return load_bitfield(f, a.reg, fld);
+            }
+            return load_val_align(f, a.reg, (*e).ty, field_access_align(e));
+        }
         return load_val(f, a.reg, (*e).ty);
     }
     if k == E::Unary {
@@ -1223,18 +1477,34 @@ fn gen_expr(f: *mut Fn, e: *mut Expr) -> Val {
         let ty: *mut Type = (*e).ty;
         let slot: str = ftemp(f, ty);
         let d: *mut Decl = (*ty).decl;
+        let plain: bool = struct_plain(d);
+        if !plain {
+            fs(f, "  store "); fs(f, llty((*f).cg, ty));
+            fs(f, " zeroinitializer, ptr "); fs(f, slot); fs(f, ", align 1\n");
+        }
         let mut arg: *mut Expr = (*e).args;
         while arg != null {
-            let fld: *mut Field = find_field(d, (*arg).field);
+            let fld: *mut Field = find_field(d, (*arg).sfield);
             if fld != null {
                 let id: i32 = fnewtmp(f);
                 fs(f, "  %t"); fi(f, id as i64);
-                fs(f, " = getelementptr inbounds "); fs(f, llty((*f).cg, ty));
-                fs(f, ", ptr "); fs(f, slot);
-                fs(f, ", i32 0, i32 "); fi(f, (*fld).index as i64); fnewline(f);
+                if plain {
+                    fs(f, " = getelementptr inbounds "); fs(f, llty((*f).cg, ty));
+                    fs(f, ", ptr "); fs(f, slot);
+                    fs(f, ", i32 0, i32 "); fi(f, (*fld).index as i64); fnewline(f);
+                } else {
+                    fs(f, " = getelementptr inbounds i8, ptr "); fs(f, slot);
+                    fs(f, ", i64 "); fi(f, (*fld).offset as i64); fnewline(f);
+                }
                 let faddr: str = reg_of(f, id);
                 let v: Val = gen_expr(f, arg);
-                store_val(f, faddr, v, (*fld).ty);
+                if (*fld).bit_width > 0 {
+                    store_bitfield(f, faddr, fld, v);
+                } else if plain {
+                    store_val(f, faddr, v, (*fld).ty);
+                } else {
+                    store_val_align(f, faddr, v, (*fld).ty, 1);
+                }
             }
             arg = (*arg).next;
         }
@@ -1281,11 +1551,65 @@ fn gen_expr(f: *mut Fn, e: *mut Expr) -> Val {
     }
 }
 
+fn gen_indirect_call(f: *mut Fn, e: *mut Expr) -> Val {
+    unsafe {
+    let cty: *mut Type = (*((*e).lhs)).ty;
+    let cv: Val = gen_expr(f, (*e).lhs);
+    let cp: str = operand(f, cv, cty);
+    let ret: *mut Type = (*cty).ret;
+    let args: *mut Buf = rt_alloc((*(*f).cg).a, sizeof(Buf)) as *mut Buf;
+    let mut ab: Buf = rt_buf((*(*f).cg).a);
+    (*args) = ab;
+    let mut arg: *mut Expr = (*e).args;
+    let mut par: *mut Type = (*cty).params;
+    while par != null && arg != null {
+        let v: Val = gen_expr(f, arg);
+        if (*args).len > 0 {
+            rt_s(args, ", ");
+        }
+        rt_s(args, llty((*f).cg, par));
+        rt_s(args, " ");
+        rt_s(args, materialize(f, v, par));
+        arg = (*arg).next;
+        par = (*par).next;
+    }
+    if (*ret).kind == K::Void {
+        fs(f, "  call void ");
+        fs(f, cp);
+        fs(f, "(");
+        fs(f, rt_view(args));
+        fs(f, ")\n");
+        return v_void();
+    }
+    let id: i32 = fnewtmp(f);
+    fs(f, "  %t"); fi(f, id as i64);
+    fs(f, " = call ");
+    fs(f, llty((*f).cg, ret));
+    fs(f, " ");
+    fs(f, cp);
+    fs(f, "(");
+    fs(f, rt_view(args));
+    fs(f, ")\n");
+    if is_agg(ret) {
+        let slot: str = ftemp(f, ret);
+        fs(f, "  store "); fs(f, llty((*f).cg, ret));
+        fs(f, " %t"); fi(f, id as i64);
+        fs(f, ", ptr "); fs(f, slot); fnewline(f);
+        return v_addr(ret, slot);
+    }
+    return v_ssa(ret, reg_of(f, id));
+
+    }
+}
+
 fn gen_call(f: *mut Fn, e: *mut Expr) -> Val {
     unsafe {
     unsafe {
     let bid: i32 = (*e).index;
     if bid == 0 {
+        if (*e).decl == null {
+            return gen_indirect_call(f, e);
+        }
         return gen_user_call(f, e);
     }
     if bid == 1 {
@@ -1632,6 +1956,16 @@ fn gen_user_call(f: *mut Fn, e: *mut Expr) -> Val {
         arg = (*arg).next;
         par = (*par).next;
     }
+    while arg != null {
+        let v: Val = gen_expr(f, arg);
+        if (*args).len > 0 {
+            rt_s(args, ", ");
+        }
+        rt_s(args, llty((*f).cg, (*arg).ty));
+        rt_s(args, " ");
+        rt_s(args, materialize(f, v, (*arg).ty));
+        arg = (*arg).next;
+    }
     let ret: *mut Type = (*d).ty;
     if (*ret).kind == K::Void {
         fs(f, "  call void @");
@@ -1784,6 +2118,71 @@ fn assign_base(op: T) -> T {
     return op;
 }
 
+fn gen_for(f: *mut Fn, st: *mut Stmt) {
+    unsafe {
+    if (*st).init != null {
+        gen_stmt(f, (*st).init);
+    }
+    let lc: i32 = fnewlbl(f);
+    let lb: i32 = fnewlbl(f);
+    let ls: i32 = fnewlbl(f);
+    let lend: i32 = fnewlbl(f);
+    fbrlbl(f, lc);
+    flabel(f, lc);
+    if (*st).expr != null {
+        let cv: Val = gen_expr(f, (*st).expr);
+        fs(f, "  br i1 "); fs(f, operand(f, cv, (*(*st).expr).ty));
+        fs(f, ", label %L"); fi(f, lb as i64);
+        fs(f, ", label %L"); fi(f, lend as i64); fnewline(f);
+    } else {
+        fbrlbl(f, lb);
+    }
+    flabel(f, lb);
+    (*f).terminated = false;
+    let ctx: *mut LoopCtx = rt_alloc((*(*f).cg).a, sizeof(LoopCtx)) as *mut LoopCtx;
+    (*ctx).next = (*f).loops; (*ctx).break_lbl = lend; (*ctx).cont_lbl = ls;
+    (*f).loops = ctx;
+    let _ = gen_block(f, (*st).body);
+    if !(*f).terminated { fbrlbl(f, ls); }
+    flabel(f, ls);
+    (*f).terminated = false;
+    if (*st).step != null {
+        gen_stmt(f, (*st).step);
+    }
+    fbrlbl(f, lc);
+    flabel(f, lend);
+    (*f).loops = (*ctx).next;
+    (*f).terminated = false;
+
+    }
+}
+
+fn gen_do_while(f: *mut Fn, st: *mut Stmt) {
+    unsafe {
+    let lb: i32 = fnewlbl(f);
+    let lc: i32 = fnewlbl(f);
+    let lend: i32 = fnewlbl(f);
+    fbrlbl(f, lb);
+    flabel(f, lb);
+    (*f).terminated = false;
+    let ctx: *mut LoopCtx = rt_alloc((*(*f).cg).a, sizeof(LoopCtx)) as *mut LoopCtx;
+    (*ctx).next = (*f).loops; (*ctx).break_lbl = lend; (*ctx).cont_lbl = lc;
+    (*f).loops = ctx;
+    let _ = gen_block(f, (*st).body);
+    if !(*f).terminated { fbrlbl(f, lc); }
+    flabel(f, lc);
+    (*f).terminated = false;
+    let cv: Val = gen_expr(f, (*st).expr);
+    fs(f, "  br i1 "); fs(f, operand(f, cv, (*(*st).expr).ty));
+    fs(f, ", label %L"); fi(f, lb as i64);
+    fs(f, ", label %L"); fi(f, lend as i64); fnewline(f);
+    flabel(f, lend);
+    (*f).loops = (*ctx).next;
+    (*f).terminated = false;
+
+    }
+}
+
 fn gen_stmt(f: *mut Fn, st: *mut Stmt) {
     unsafe {
     unsafe {
@@ -1796,20 +2195,45 @@ fn gen_stmt(f: *mut Fn, st: *mut Stmt) {
         return;
     }
     if k == S::Assign {
-        let addr: Val = gen_addr(f, (*st).expr);
-        let ty: *mut Type = (*(*st).expr).ty;
-        if (*st).op == T::Eq {
-            let v: Val = gen_expr(f, (*st).rhs);
-            store_val(f, addr.reg, v, ty);
-            return;
+        let target: *mut Expr = (*st).expr;
+        let addr: Val = gen_addr(f, target);
+        let ty: *mut Type = (*target).ty;
+        let is_field: bool = (*target).kind == E::Field;
+        let mut fld: *mut Field = null;
+        let mut al: i64 = 0;
+        if is_field {
+            fld = field_of(target);
+            al = field_access_align(target);
         }
-        let old: Val = load_val(f, addr.reg, ty);
-        let rv: Val = gen_expr(f, (*st).rhs);
-        let a: str = operand(f, old, ty);
-        let b: str = operand(f, rv, ty);
-        let res: str = gen_simple_bin(f, assign_base((*st).op), a, b, ty);
-        fs(f, "  store "); fs(f, llty((*f).cg, ty)); fs(f, " "); fs(f, res);
-        fs(f, ", ptr "); fs(f, addr.reg); fnewline(f);
+        let mut bits: bool = false;
+        if fld != null && (*fld).bit_width > 0 {
+            bits = true;
+        }
+        let mut out: Val = null_val();
+        if (*st).op == T::Eq {
+            out = gen_expr(f, (*st).rhs);
+        } else {
+            let mut old: Val = null_val();
+            if bits {
+                old = load_bitfield(f, addr.reg, fld);
+            } else if is_field {
+                old = load_val_align(f, addr.reg, ty, al);
+            } else {
+                old = load_val(f, addr.reg, ty);
+            }
+            let rv: Val = gen_expr(f, (*st).rhs);
+            let a: str = operand(f, old, ty);
+            let b: str = operand(f, rv, ty);
+            let res: str = gen_simple_bin(f, assign_base((*st).op), a, b, ty);
+            out = v_ssa(ty, res);
+        }
+        if bits {
+            store_bitfield(f, addr.reg, fld, out);
+        } else if is_field {
+            store_val_align(f, addr.reg, out, ty, al);
+        } else {
+            store_val(f, addr.reg, out, ty);
+        }
         return;
     }
     if k == S::Expr {
@@ -1917,6 +2341,31 @@ fn gen_stmt(f: *mut Fn, st: *mut Stmt) {
         let _ = gen_block(f, (*st).body);
         return;
     }
+    if k == S::For {
+        gen_for(f, st);
+        return;
+    }
+    if k == S::DoWhile {
+        gen_do_while(f, st);
+        return;
+    }
+    if k == S::Label {
+        let id: i32 = lbl_id(f, (*st).name);
+        if !(*f).terminated { fbrlbl(f, id); }
+        flabel(f, id);
+        (*f).terminated = false;
+        let mut q: *mut Stmt = (*st).body;
+        while q != null {
+            gen_stmt(f, q);
+            q = (*q).next;
+        }
+        return;
+    }
+    if k == S::Goto {
+        fbrlbl(f, lbl_id(f, (*st).name));
+        (*f).terminated = true;
+        return;
+    }
     if k == S::Switch {
         gen_switch(f, st);
         return;
@@ -1991,8 +2440,10 @@ fn gen_block(f: *mut Fn, head: *mut Stmt) -> bool {
     unsafe {
     unsafe {
     let mut s: *mut Stmt = head;
-    while s != null && !(*f).terminated {
-        gen_stmt(f, s);
+    while s != null {
+        if !(*f).terminated || (*s).kind == S::Label {
+            gen_stmt(f, s);
+        }
         s = (*s).next;
     }
     return (*f).terminated;
@@ -2017,7 +2468,7 @@ fn gen_types(cg: *mut Cg) {
     unsafe {
     let mut d: *mut Decl = (*((*cg).sem)).globals;
     while d != null {
-        if (*d).kind == D::Struct {
+        if (*d).kind == D::Struct && struct_plain(d) {
             rt_s((*cg).types, "%struct.");
             rt_s((*cg).types, (*d).name);
             rt_s((*cg).types, " = type { ");
@@ -2095,18 +2546,92 @@ fn gen_globals(cg: *mut Cg) {
     }
 }
 
+fn lbl_id(f: *mut Fn, name: str) -> i32 {
+    unsafe {
+    let mut l: *mut Lbl = (*f).labels;
+    while l != null {
+        if rt_eq((*l).name, name) {
+            return (*l).id;
+        }
+        l = (*l).next;
+    }
+    return 0;
+
+    }
+}
+
+fn cg_collect_labels(f: *mut Fn, head: *mut Stmt) {
+    unsafe {
+    let mut p: *mut Stmt = head;
+    while p != null {
+        cg_collect_label_stmt(f, p);
+        p = (*p).next;
+    }
+
+    }
+}
+
+// Assign one LLVM label per distinct `name:` in the function. Semantic
+// analysis has already rejected duplicates, so first wins.
+fn cg_collect_label_stmt(f: *mut Fn, st: *mut Stmt) {
+    unsafe {
+    let k: S = (*st).kind;
+    if k == S::Label {
+        let mut l: *mut Lbl = (*f).labels;
+        let mut found: bool = false;
+        while l != null {
+            if rt_eq((*l).name, (*st).name) {
+                found = true;
+            }
+            l = (*l).next;
+        }
+        if !found {
+            let nl: *mut Lbl = rt_alloc((*(*f).cg).a, sizeof(Lbl)) as *mut Lbl;
+            (*nl).next = (*f).labels;
+            (*nl).name = (*st).name;
+            (*nl).id = fnewlbl(f);
+            (*f).labels = nl;
+        }
+        cg_collect_label_stmt(f, (*st).body);
+        return;
+    }
+    if k == S::If {
+        cg_collect_labels(f, (*st).body);
+        if (*st).els != null {
+            cg_collect_label_stmt(f, (*st).els);
+        }
+        return;
+    }
+    if k == S::While || k == S::Loop || k == S::For || k == S::DoWhile
+        || k == S::Unsafe || k == S::Block {
+        cg_collect_labels(f, (*st).body);
+        return;
+    }
+    if k == S::Switch {
+        let mut c: *mut Case = (*st).cases;
+        while c != null {
+            cg_collect_labels(f, (*c).body);
+            c = (*c).next;
+        }
+        return;
+    }
+
+    }
+}
+
 fn gen_fn(cg: *mut Cg, d: *mut Decl) {
     unsafe {
     unsafe {
     let ret: *mut Type = (*d).ty;
-    let mut f: Fn = Fn { cg: cg, d: d, entry: null, body: null, tmp: 0, lbl: 1, terminated: false, loops: null };
+    let mut f: Fn = Fn { cg: cg, d: d, entry: null, body: null, tmp: 0, lbl: 1, terminated: false, loops: null, labels: null };
     let fp: *mut Fn = &mut f;
     (*fp).entry = cg_buf(cg);
     (*fp).body = cg_buf(cg);
+    cg_collect_labels(fp, (*d).body);
     // Header.
     let mut hb: Buf = rt_buf((*cg).a);
     let hp: *mut Buf = &mut hb;
-    if (*d).body == null || (*d).is_extern {
+    if !(*d).has_body {
         rt_s(hp, "declare ");
         rt_s(hp, llty(cg, ret));
         rt_s(hp, " @");
@@ -2119,6 +2644,10 @@ fn gen_fn(cg: *mut Cg, d: *mut Decl) {
             rt_s(hp, llty(cg, (*p).ty));
             first = false;
             p = (*p).next;
+        }
+        if (*d).variadic {
+            if !first { rt_s(hp, ", "); }
+            rt_s(hp, "...");
         }
         rt_s(hp, ")\n\n");
         rt_s((*cg).decls, rt_view(hp));
@@ -2318,7 +2847,8 @@ fn gen_entry(cg: *mut Cg, out: *mut Buf) {
     }
 }
 
-fn cg_run(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program, sem: *mut Sem) -> str {
+fn cg_run(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program,
+    sem: *mut Sem, emit_entry: bool) -> str {
     unsafe {
     unsafe {
     let cg: *mut Cg = rt_alloc(a, sizeof(Cg)) as *mut Cg;
@@ -2343,6 +2873,7 @@ fn cg_run(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program, 
     (*cg).used_cstr_len = false;
     (*cg).used_cstr_str = false;
     (*cg).used_assert = false;
+    (*cg).no_entry = !emit_entry;
     gen_types(cg);
     gen_globals(cg);
     let mut g: *mut Decl = (*sem).globals;
@@ -2354,7 +2885,9 @@ fn cg_run(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program, 
     }
     let mut entry: Buf = rt_buf(a);
     let ep: *mut Buf = &mut entry;
-    gen_entry(cg, ep);
+    if emit_entry {
+        gen_entry(cg, ep);
+    }
     gen_helpers(cg);
     let mut out: Buf = rt_buf(a);
     let op: *mut Buf = &mut out;

@@ -21,7 +21,9 @@ fn dr_usage() {
     dr_errln("usage:");
     dr_errln("  corexc check   <file.cx>");
     dr_errln("  corexc emit-ir <file.cx> [-o <out.ll>]");
-    dr_errln("  corexc build   <file.cx> [-o <out>] [--opt 0]");
+    dr_errln("  corexc build   <file.cx | dir> [-o <out>] [--opt 0..3]");
+    dr_errln("                 [--cfg key=value]... [--hosted] [--shared]");
+    dr_errln("                 [--emit obj|shared] [--link <obj|a>]... [-L <dir>]... [-l <name>]...");
 }
 
 fn dr_diags(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList) {
@@ -52,9 +54,245 @@ fn dr_diags(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList) {
     }
 }
 
-fn dr_front(a: *mut Arena, path: cstr, d: *mut Diags, srcs: *mut SrcList) -> Program {
+struct ModList {
+    head: *mut PathList,
+}
+
+fn mod_seen(ml: *mut ModList, name: str) -> bool {
     unsafe {
-        return parse_program(a, d, srcs, rt_cstr_str(path as *u8));
+    let mut q: *mut PathList = (*ml).head;
+    while q != null {
+        if rt_eq((*q).path, name) {
+            return true;
+        }
+        q = (*q).next;
+    }
+    return false;
+
+    }
+}
+
+fn mod_note(a: *mut Arena, ml: *mut ModList, name: str) {
+    unsafe {
+    let pl: *mut PathList = rt_alloc(a, sizeof(PathList)) as *mut PathList;
+    (*pl).path = name;
+    (*pl).next = (*ml).head;
+    (*ml).head = pl;
+
+    }
+}
+
+fn module_file(a: *mut Arena, dir: str, name: str) -> str {
+    unsafe {
+    let mut b: Buf = rt_buf(a);
+    let bp: *mut Buf = &mut b;
+    rt_s(bp, name);
+    rt_s(bp, ".cx");
+    if rt_eq(dir, "") {
+        return rt_view(bp);
+    }
+    return rt_join2(a, dir, rt_view(bp));
+
+    }
+}
+
+// Load `mod name;` dependencies of a parsed unit, recursively, appending their
+// items to `prog`. Each unit is parsed separately so its own module prefix and
+// dependency list are respected.
+fn dr_load_modules(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program,
+    dir: str, deps: *mut PathList, ml: *mut ModList, cfg: *mut PathList) {
+    unsafe {
+    let mut q: *mut PathList = deps;
+    while q != null {
+        let name: str = (*q).path;
+        if !mod_seen(ml, name) {
+            mod_note(a, ml, name);
+            let file: str = module_file(a, dir, name);
+            let mut sub: Program = parse_program_cfg(a, d, srcs, file, cfg, false);
+            if (*d).count > 0 {
+                return;
+            }
+            let sp: *mut Program = &mut sub;
+            if !rt_eq((*sp).module_name, name) {
+                diag_add(d, a, 0, 0, 0, "module file must start with `module <name>;`");
+                return;
+            }
+            prog_append(prog, sp);
+            dr_load_modules(a, d, srcs, prog, rt_dirname(file), (*sp).deps, ml, cfg);
+        }
+        q = (*q).next;
+    }
+
+    }
+}
+
+fn path_ends_cx(p: cstr) -> bool {
+    let s: str = rt_cstr_str(p as *u8);
+    let n: usize = len(s);
+    if n < 3 {
+        return false;
+    }
+    return s[n - 3] == 46 && s[n - 2] == 99 && s[n - 1] == 120;
+}
+
+fn toml_sources(a: *mut Arena, text: str) -> *mut PathList {
+    return toml_list(a, text, "sources");
+}
+
+fn toml_list(a: *mut Arena, text: str, key: str) -> *mut PathList {
+    unsafe {
+    let n: usize = len(text);
+    let kl: usize = len(key);
+    let mut i: usize = 0;
+    while i < n {
+        let mut ok: bool = i + kl <= n;
+        let mut j: usize = 0;
+        while ok && j < kl {
+            if text[i + j] != key[j] {
+                ok = false;
+            }
+            j = j + 1;
+        }
+        if ok {
+            let mut k: usize = i + kl;
+            while k < n && (text[k] == 32 || text[k] == 9) {
+                k = k + 1;
+            }
+            if k < n && text[k] == 61 {
+                k = k + 1;
+                while k < n && text[k] != 91 && text[k] != 10 {
+                    k = k + 1;
+                }
+                if k < n && text[k] == 91 {
+                    k = k + 1;
+                    let mut head: *mut PathList = null;
+                    let mut tail: *mut PathList = null;
+                    while k < n && text[k] != 93 {
+                        if text[k] == 34 {
+                            let start: usize = k + 1;
+                            let mut e: usize = start;
+                            while e < n && text[e] != 34 {
+                                e = e + 1;
+                            }
+                            let pl: *mut PathList = rt_alloc(a, sizeof(PathList)) as *mut PathList;
+                            (*pl).path = rt_slice(text, start, e);
+                            (*pl).next = null;
+                            if tail == null {
+                                head = pl;
+                            } else {
+                                (*tail).next = pl;
+                            }
+                            tail = pl;
+                            k = e + 1;
+                        } else {
+                            k = k + 1;
+                        }
+                    }
+                    return head;
+                }
+            }
+        }
+        while i < n && text[i] != 10 {
+            i = i + 1;
+        }
+        i = i + 1;
+    }
+    return null;
+
+    }
+}
+
+fn manifest_read(a: *mut Arena, dir: str) -> FileData {
+    unsafe {
+    let mut b: Buf = rt_buf(a);
+    let bp: *mut Buf = &mut b;
+    rt_s(bp, dir);
+    rt_s(bp, "/corex.toml");
+    return rt_read_file(a, rt_to_cstr(a, rt_view(bp)));
+
+    }
+}
+
+fn manifest_sources(a: *mut Arena, dir: str) -> *mut PathList {
+    unsafe {
+    let fd: FileData = manifest_read(a, dir);
+    if !fd.ok {
+        return null;
+    }
+    return toml_sources(a, fd.data);
+
+    }
+}
+
+// Build every source listed in `<dir>/corex.toml` as one program. Each source
+// keeps its own `module` prefix.
+fn dr_manifest(a: *mut Arena, dir: str, d: *mut Diags, srcs: *mut SrcList,
+    cfg: *mut PathList) -> Program {
+    unsafe {
+    let mut prog: Program = prog_init();
+    let pp: *mut Program = &mut prog;
+    let mut ml: ModList = ModList { head: null };
+    let mlp: *mut ModList = &mut ml;
+    let fd: FileData = manifest_read(a, dir);
+    if !fd.ok {
+        diag_add(d, a, 0, 0, 0, "cannot read corex.toml");
+        return prog;
+    }
+    let mut cf: *mut PathList = cfg;
+    let mut feats: *mut PathList = toml_list(a, fd.data, "features");
+    while feats != null {
+        let mut b: Buf = rt_buf(a);
+        let bp: *mut Buf = &mut b;
+        rt_s(bp, "feature=");
+        rt_s(bp, (*feats).path);
+        let pl: *mut PathList = rt_alloc(a, sizeof(PathList)) as *mut PathList;
+        (*pl).path = rt_view(bp);
+        (*pl).next = cf;
+        cf = pl;
+        feats = (*feats).next;
+    }
+    let list: *mut PathList = toml_sources(a, fd.data);
+    if list == null {
+        diag_add(d, a, 0, 0, 0, "cannot read `sources` from corex.toml");
+        return prog;
+    }
+    let mut q: *mut PathList = list;
+    while q != null {
+        let rel: str = (*q).path;
+        let mut file: str = rel;
+        if !rt_is_abs(rel) {
+            file = rt_join2(a, dir, rel);
+        }
+        let mut sub: Program = parse_program_cfg(a, d, srcs, file, cf, true);
+        if (*d).count > 0 {
+            return prog;
+        }
+        let sp: *mut Program = &mut sub;
+        if !rt_eq((*sp).module_name, "") {
+            mod_note(a, mlp, (*sp).module_name);
+        }
+        prog_append(pp, sp);
+        dr_load_modules(a, d, srcs, pp, rt_dirname(file), (*sp).deps, mlp, cf);
+        q = (*q).next;
+    }
+    return prog;
+
+    }
+}
+
+fn dr_front(a: *mut Arena, path: cstr, d: *mut Diags, srcs: *mut SrcList,
+    cfg: *mut PathList) -> Program {
+    unsafe {
+        let root: str = rt_cstr_str(path as *u8);
+        let mut prog: Program = parse_program_cfg(a, d, srcs, root, cfg, true);
+        let pp: *mut Program = &mut prog;
+        let mut ml: ModList = ModList { head: null };
+        let mlp: *mut ModList = &mut ml;
+        if !rt_eq((*pp).module_name, "") {
+            mod_note(a, mlp, (*pp).module_name);
+        }
+        dr_load_modules(a, d, srcs, pp, rt_dirname(root), (*pp).deps, mlp, cfg);
+        return prog;
     }
 }
 
@@ -90,10 +328,35 @@ fn dr_exec(a: *mut Arena, envp: **u8, argv: *mut *u8, count: i32, what: str) -> 
     }
 }
 
-fn dr_build(a: *mut Arena, envp: **u8, ll: cstr, out: cstr, opt: i32) -> i32 {
+struct BuildOpts {
+    links: *mut PathList,
+    libdirs: *mut PathList,
+    libs: *mut PathList,
+    hosted: bool,
+    shared: bool,
+    emit_obj: bool,
+}
+
+fn list_len(q: *mut PathList) -> i32 {
+    unsafe {
+    let mut n: i32 = 0;
+    let mut p: *mut PathList = q;
+    while p != null {
+        n = n + 1;
+        p = (*p).next;
+    }
+    return n;
+
+    }
+}
+
+fn dr_build(a: *mut Arena, envp: **u8, ll: cstr, out: cstr, opt: i32, o: *mut BuildOpts) -> i32 {
     unsafe {
         let bc: cstr = rt_temp_path(a, ".bc");
-        let obj: cstr = rt_temp_path(a, ".o");
+        let mut obj: cstr = rt_temp_path(a, ".o");
+        if (*o).emit_obj {
+            obj = out;
+        }
         let asm_tool: cstr = rt_find_tool(a, envp, "llvm-as");
         if cstr_len(asm_tool) == 0 {
             dr_errln("corexc: llvm-as not found");
@@ -153,16 +416,67 @@ fn dr_build(a: *mut Arena, envp: **u8, ll: cstr, out: cstr, opt: i32) -> i32 {
         if dr_exec(a, envp, lv, 7, "llc") != 0 {
             return 1;
         }
+        if (*o).emit_obj {
+            rt_unlink(ll);
+            rt_unlink(bc);
+            return 0;
+        }
         let cc: cstr = rt_cc(a, envp);
-        let cv: *mut *u8 = rt_argv(a, 7);
-        rt_arg_set(cv, 0, cc);
-        rt_arg_set(cv, 1, c"-nostdlib");
-        rt_arg_set(cv, 2, c"-static");
-        rt_arg_set(cv, 3, c"-no-pie");
-        rt_arg_set(cv, 4, obj);
-        rt_arg_set(cv, 5, c"-o");
-        rt_arg_set(cv, 6, out);
-        if dr_exec(a, envp, cv, 7, "cc") != 0 {
+        let nl: i32 = list_len((*o).links);
+        let nd: i32 = list_len((*o).libdirs);
+        let nb: i32 = list_len((*o).libs);
+        let mut n: i32 = 4 + nl + nd * 2 + nb * 2;
+        if !(*o).hosted && !(*o).shared {
+            n = n + 3;
+        }
+        if (*o).shared {
+            n = n + 1;
+        }
+        let cv: *mut *u8 = rt_argv(a, n);
+        let mut i: i32 = 0;
+        rt_arg_set(cv, i, cc);
+        i = i + 1;
+        if !(*o).hosted && !(*o).shared {
+            rt_arg_set(cv, i, c"-nostdlib");
+            i = i + 1;
+            rt_arg_set(cv, i, c"-static");
+            i = i + 1;
+            rt_arg_set(cv, i, c"-no-pie");
+            i = i + 1;
+        }
+        if (*o).shared {
+            rt_arg_set(cv, i, c"-shared");
+            i = i + 1;
+        }
+        rt_arg_set(cv, i, obj);
+        i = i + 1;
+        let mut q: *mut PathList = (*o).links;
+        while q != null {
+            rt_arg_set(cv, i, rt_to_cstr(a, (*q).path));
+            i = i + 1;
+            q = (*q).next;
+        }
+        q = (*o).libdirs;
+        while q != null {
+            rt_arg_set(cv, i, c"-L");
+            i = i + 1;
+            rt_arg_set(cv, i, rt_to_cstr(a, (*q).path));
+            i = i + 1;
+            q = (*q).next;
+        }
+        q = (*o).libs;
+        while q != null {
+            rt_arg_set(cv, i, c"-l");
+            i = i + 1;
+            rt_arg_set(cv, i, rt_to_cstr(a, (*q).path));
+            i = i + 1;
+            q = (*q).next;
+        }
+        rt_arg_set(cv, i, c"-o");
+        i = i + 1;
+        rt_arg_set(cv, i, out);
+        i = i + 1;
+        if dr_exec(a, envp, cv, n, "cc") != 0 {
             return 1;
         }
         rt_unlink(ll);
@@ -171,6 +485,7 @@ fn dr_build(a: *mut Arena, envp: **u8, ll: cstr, out: cstr, opt: i32) -> i32 {
         return 0;
     }
 }
+
 
 fn main(argc: i32, argv: **u8, envp: **u8) -> i32 {
     unsafe {
@@ -187,6 +502,13 @@ fn main(argc: i32, argv: **u8, envp: **u8) -> i32 {
         let mut check_only: bool = false;
         let mut emit_only: bool = false;
         let mut is_build: bool = false;
+        let mut cfg: *mut PathList = null;
+        let mut links: *mut PathList = null;
+        let mut libdirs: *mut PathList = null;
+        let mut libs: *mut PathList = null;
+        let mut hosted: bool = false;
+        let mut shared: bool = false;
+        let mut emit_obj: bool = false;
         if rt_cstr_eq(cmd, "check") {
             check_only = true;
         } else if rt_cstr_eq(cmd, "emit-ir") {
@@ -206,6 +528,68 @@ fn main(argc: i32, argv: **u8, envp: **u8) -> i32 {
                     return 2;
                 }
                 out = *(argv + (i + 1) as usize) as cstr;
+                i = i + 2;
+                continue;
+            }
+            if rt_cstr_eq(arg, "--cfg") {
+                if i + 1 >= argc {
+                    dr_errln("corexc: --cfg requires key=value");
+                    return 2;
+                }
+                let cv: cstr = *(argv + (i + 1) as usize) as cstr;
+                let pl: *mut PathList = rt_alloc(a, sizeof(PathList)) as *mut PathList;
+                (*pl).path = rt_cstr_str(cv as *u8);
+                (*pl).next = cfg;
+                cfg = pl;
+                i = i + 2;
+                continue;
+            }
+            if rt_cstr_eq(arg, "--link") || rt_cstr_eq(arg, "-L") || rt_cstr_eq(arg, "-l") {
+                if i + 1 >= argc {
+                    dr_errln("corexc: --link/-L/-l require a value");
+                    return 2;
+                }
+                let v: cstr = *(argv + (i + 1) as usize) as cstr;
+                let pl: *mut PathList = rt_alloc(a, sizeof(PathList)) as *mut PathList;
+                (*pl).path = rt_cstr_str(v as *u8);
+                (*pl).next = null;
+                if rt_cstr_eq(arg, "--link") {
+                    (*pl).next = links;
+                    links = pl;
+                } else if rt_cstr_eq(arg, "-L") {
+                    (*pl).next = libdirs;
+                    libdirs = pl;
+                } else {
+                    (*pl).next = libs;
+                    libs = pl;
+                }
+                i = i + 2;
+                continue;
+            }
+            if rt_cstr_eq(arg, "--hosted") {
+                hosted = true;
+                i = i + 1;
+                continue;
+            }
+            if rt_cstr_eq(arg, "--shared") {
+                shared = true;
+                i = i + 1;
+                continue;
+            }
+            if rt_cstr_eq(arg, "--emit") {
+                if i + 1 >= argc {
+                    dr_errln("corexc: --emit requires obj or shared");
+                    return 2;
+                }
+                let ev: cstr = *(argv + (i + 1) as usize) as cstr;
+                if rt_cstr_eq(ev, "obj") {
+                    emit_obj = true;
+                } else if rt_cstr_eq(ev, "shared") {
+                    shared = true;
+                } else {
+                    dr_errln("corexc: --emit expects obj or shared");
+                    return 2;
+                }
                 i = i + 2;
                 continue;
             }
@@ -231,8 +615,15 @@ fn main(argc: i32, argv: **u8, envp: **u8) -> i32 {
         }
         let mut d: Diags = diags_new();
         let mut srcs: SrcList = srcs_new();
-        let mut prog: Program = dr_front(a, file, &mut d, &mut srcs);
-        let sem: *mut Sem = sem_run(a, &mut d, &mut srcs, &mut prog);
+        let mut prog: Program = prog_init();
+        if path_ends_cx(file) {
+            prog = dr_front(a, file, &mut d, &mut srcs, cfg);
+        } else {
+            prog = dr_manifest(a, rt_cstr_str(file as *u8), &mut d, &mut srcs, cfg);
+        }
+        let require_entry: bool = !shared && !emit_obj;
+        let emit_entry: bool = !hosted && !shared && !emit_obj;
+        let sem: *mut Sem = sem_run(a, &mut d, &mut srcs, &mut prog, require_entry);
         if d.count > 0 {
             dr_diags(a, &mut d, &mut srcs);
             return 1;
@@ -240,7 +631,7 @@ fn main(argc: i32, argv: **u8, envp: **u8) -> i32 {
         if check_only {
             return 0;
         }
-        let ir: str = cg_run(a, &mut d, &mut srcs, &mut prog, sem);
+        let ir: str = cg_run(a, &mut d, &mut srcs, &mut prog, sem, emit_entry);
         if d.count > 0 {
             dr_diags(a, &mut d, &mut srcs);
             return 1;
@@ -257,8 +648,18 @@ fn main(argc: i32, argv: **u8, envp: **u8) -> i32 {
             return 1;
         }
         if cstr_len(out) == 0 {
-            out = c"a.out";
+            if emit_obj {
+                out = c"a.o";
+            } else if shared {
+                out = c"liba.so";
+            } else {
+                out = c"a.out";
+            }
         }
-        return dr_build(a, envp, ll, out, opt);
+        let mut opts: BuildOpts = BuildOpts {
+            links: links, libdirs: libdirs, libs: libs,
+            hosted: hosted, shared: shared, emit_obj: emit_obj };
+        let op: *mut BuildOpts = &mut opts;
+        return dr_build(a, envp, ll, out, opt, op);
     }
 }

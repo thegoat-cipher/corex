@@ -1,0 +1,6 @@
+[package]
+name = "cfg_features"
+
+[build]
+sources = ["main.cx"]
+features = ["fast"]

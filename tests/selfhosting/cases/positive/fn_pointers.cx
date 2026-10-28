@@ -1,0 +1,32 @@
+fn inc(x: i32) -> i32 { return x + 1; }
+fn dbl(x: i32) -> i32 { return x * 2; }
+fn neg(x: i32) -> i32 { return -x; }
+
+fn apply(f: fn(i32) -> i32, x: i32) -> i32 { return f(x); }
+
+fn pick(which: i32) -> fn(i32) -> i32 {
+    if which == 0 { return &inc; }
+    if which == 1 { return &dbl; }
+    return neg;
+}
+
+fn main() -> i32 {
+    let a: fn(i32) -> i32 = &inc;
+    let b: fn(i32) -> i32 = dbl;
+    print(a(41));
+    print(b(21));
+    print(apply(&neg, 7));
+    let table: [fn(i32) -> i32; 3] = [&inc, &dbl, &neg];
+    let mut i: usize = 0;
+    while i < 3 {
+        print(table[i](5));
+        i += 1;
+    }
+    let empty: fn(i32) -> i32 = null;
+    if empty == null { print(1); }
+    if a != null { print(2); }
+    print(pick(0)(10));
+    print(pick(1)(10));
+    print(pick(2)(10));
+    return 0;
+}
