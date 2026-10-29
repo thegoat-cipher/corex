@@ -509,16 +509,60 @@ fn mod_note(a: *mut Arena, ml: *mut ModList, name: str) {
     }
 }
 
-fn module_file(a: *mut Arena, dir: str, name: str) -> str {
+// Resolve `mod name;` to `<dir>/name.cx`, `<dir>/name/mod.cx`, then the same
+// two shapes under every `-I` directory, matching the Rust reference compiler.
+fn module_candidate(a: *mut Arena, dir: str, rel: str) -> str {
     unsafe {
-    let mut b: Buf = rt_buf(a);
-    let bp: *mut Buf = &mut b;
-    rt_s(bp, name);
-    rt_s(bp, ".cx");
     if rt_eq(dir, "") {
-        return rt_view(bp);
+        return rel;
     }
-    return rt_join2(a, dir, rt_view(bp));
+    return rt_join2(a, dir, rel);
+
+    }
+}
+
+fn module_exists(a: *mut Arena, path: str) -> bool {
+    unsafe {
+    let c: cstr = rt_to_cstr(a, path);
+    return rt_exists(c);
+
+    }
+}
+
+fn module_file(a: *mut Arena, dir: str, name: str, incs: *mut *u8, nincs: i32) -> str {
+    unsafe {
+    let mut rb: Buf = rt_buf(a);
+    let rbp: *mut Buf = &mut rb;
+    rt_s(rbp, name);
+    rt_s(rbp, ".cx");
+    let rel: str = rt_view(rbp);
+    let first: str = module_candidate(a, dir, rel);
+    if module_exists(a, first) {
+        return first;
+    }
+    let mut mb: Buf = rt_buf(a);
+    let mbp: *mut Buf = &mut mb;
+    rt_s(mbp, name);
+    rt_s(mbp, "/mod.cx");
+    let mrel: str = rt_view(mbp);
+    let mfirst: str = module_candidate(a, dir, mrel);
+    if module_exists(a, mfirst) {
+        return mfirst;
+    }
+    let mut k: i32 = 0;
+    while k < nincs {
+        let inc: str = rt_cstr_str(*((incs + k as usize)) as *u8);
+        let cand: str = rt_join2(a, inc, rel);
+        if module_exists(a, cand) {
+            return cand;
+        }
+        let mcand: str = rt_join2(a, inc, mrel);
+        if module_exists(a, mcand) {
+            return mcand;
+        }
+        k = k + 1;
+    }
+    return first;
 
     }
 }
@@ -535,7 +579,7 @@ fn dr_load_modules(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut 
         let name: str = (*q).path;
         if !mod_seen(ml, name) {
             mod_note(a, ml, name);
-            let file: str = module_file(a, dir, name);
+            let file: str = module_file(a, dir, name, incs, nincs);
             let mut sub: Program = parse_program_all(a, d, srcs, file, incs, nincs, cfg, false);
             if (*d).count > 0 {
                 return;

@@ -1,0 +1,11 @@
+struct S {
+    a: u32,
+}
+
+fn main() -> i32 {
+    unsafe {
+        let mut s: S = S { a: 0 };
+        print(atomic_load(&s));
+    }
+    return 0;
+}

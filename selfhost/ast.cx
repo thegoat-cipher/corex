@@ -43,6 +43,7 @@ struct Expr {
     decl: *mut Decl,
     op: T,
     is_mut: bool,
+    is_volatile: bool,
     index: i32,
     file: i32,
     line: i32,
@@ -138,6 +139,7 @@ struct Decl {
     cval_kind: i32,
     cval_s: str,
     is_mut: bool,
+    is_volatile: bool,
     is_extern: bool,
     has_body: bool,
     variadic: bool,
@@ -211,6 +213,7 @@ fn expr_new(a: *mut Arena, kind: E, tok: *mut Tok) -> *mut Expr {
         (*e).decl = null;
         (*e).op = T::Eof;
         (*e).is_mut = false;
+        (*e).is_volatile = false;
         (*e).index = 0;
         (*e).file = (*tok).file;
         (*e).line = (*tok).line;
@@ -263,6 +266,7 @@ fn decl_new(a: *mut Arena, kind: D, name: str, file: i32, line: i32, col: i32) -
         (*d).cval_kind = 0;
         (*d).cval_s = "";
         (*d).is_mut = false;
+        (*d).is_volatile = false;
         (*d).is_extern = false;
         (*d).has_body = false;
         (*d).variadic = false;

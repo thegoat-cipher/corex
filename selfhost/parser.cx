@@ -677,6 +677,10 @@ fn parse_static(p: *mut P, is_pub: bool) {
     if eat(p, T::KwMut) {
         mutable = true;
     }
+    let mut is_volatile: bool = false;
+    if eat(p, T::KwVolatile) {
+        is_volatile = true;
+    }
     let name_tok: *mut Tok = pk(p);
     if !at(p, T::Ident) {
         perr(p, "expected global name");
@@ -686,6 +690,7 @@ fn parse_static(p: *mut P, is_pub: bool) {
     bump(p);
     let d: *mut Decl = decl_new((*p).a, D::Global, (*name_tok).text, (*name_tok).file, (*name_tok).line, (*name_tok).col);
     unsafe { (*d).is_mut = mutable; }
+    unsafe { (*d).is_volatile = is_volatile; }
     expect(p, T::Colon);
     unsafe { (*d).ty = parse_type(p); }
     expect(p, T::Eq);

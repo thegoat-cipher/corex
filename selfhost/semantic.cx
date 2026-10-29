@@ -409,6 +409,13 @@ fn lookup_raw(s: *mut Sem, name: str) -> *mut Decl {
 // names first, then against the flat namespace.
 fn lookup(s: *mut Sem, name: str) -> *mut Decl {
     unsafe {
+    // Locals and parameters shadow module items and root functions.
+    if !has_dollar(name) {
+        let local: *mut Decl = lookup_local(s, name);
+        if local != null {
+            return local;
+        }
+    }
     if !rt_eq((*s).cur_module, "") && !has_dollar(name) {
         let mut b: Buf = rt_buf((*s).a);
         let bp: *mut Buf = &mut b;
@@ -445,6 +452,9 @@ fn visible(s: *mut Sem, d: *mut Decl) -> bool {
 fn decl_value_type(s: *mut Sem, e: *mut Expr, d: *mut Decl) -> *mut Type {
     unsafe {
     (*e).decl = d;
+    if (*d).kind == D::Global && (*d).is_volatile {
+        (*e).is_volatile = true;
+    }
     if !visible(s, d) {
         sdiag(s, (*e).file, (*e).line, (*e).col, "item is private to its module");
     }
@@ -1866,6 +1876,21 @@ fn builtin_id(name: str) -> i32 {
     if rt_eq(name, "vec_slice") { return 16; }
     if rt_eq(name, "read_file") { return 17; }
     if rt_eq(name, "write_file") { return 18; }
+    if rt_eq(name, "asm") { return 19; }
+    if rt_eq(name, "atomic_load") { return 20; }
+    if rt_eq(name, "atomic_load_relaxed") { return 21; }
+    if rt_eq(name, "atomic_store") { return 22; }
+    if rt_eq(name, "atomic_store_relaxed") { return 23; }
+    if rt_eq(name, "atomic_fetch_add") { return 24; }
+    if rt_eq(name, "atomic_fetch_sub") { return 25; }
+    if rt_eq(name, "atomic_fetch_and") { return 26; }
+    if rt_eq(name, "atomic_fetch_or") { return 27; }
+    if rt_eq(name, "atomic_fetch_xor") { return 28; }
+    if rt_eq(name, "atomic_xchg") { return 29; }
+    if rt_eq(name, "atomic_cas") { return 30; }
+    if rt_eq(name, "atomic_fence") { return 31; }
+    if rt_eq(name, "volatile_load") { return 32; }
+    if rt_eq(name, "volatile_store") { return 33; }
     return 0;
 
     }
@@ -1906,6 +1931,185 @@ fn check_indirect_call(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut T
     (*e).opty = ct;
     (*e).ty = rt;
     return rt;
+
+    }
+}
+
+// True when an inline-asm constraint list declares an output (`=...`).
+// LLVM passes the constraint string through verbatim; only the leading `=`
+// matters to the CoreX type checker, matching the Rust reference compiler.
+fn asm_has_output(constraints: str) -> bool {
+    unsafe {
+    let n: usize = len(constraints);
+    let mut i: usize = 0;
+    let mut at_start: bool = true;
+    while i < n {
+        let c: u8 = constraints[i];
+        if c == 44 {
+            at_start = true;
+        } else if c == 32 || c == 9 {
+            // leading whitespace in a constraint segment
+        } else {
+            if at_start && c == 61 {
+                return true;
+            }
+            at_start = false;
+        }
+        i = i + 1;
+    }
+    return false;
+
+    }
+}
+
+fn check_asm(s: *mut Sem, e: *mut Expr) -> *mut Type {
+    unsafe {
+    let arg0: *mut Expr = (*e).args;
+    if arg0 == null {
+        sdiagc(s, "E0204", (*e).file, (*e).line, (*e).col, "`asm` requires a template string");
+        let vt0: *mut Type = type_new((*s).a, K::Void);
+        (*e).ty = vt0;
+        return vt0;
+    }
+    if (*s).unsafe_depth == 0 {
+        sdiagc(s, "E0209", (*e).file, (*e).line, (*e).col, "`asm` is only allowed inside an `unsafe` block");
+    }
+    let k0: E = (*arg0).kind;
+    let mut template: str = "";
+    if k0 == E::StrLit || k0 == E::CStrLit {
+        template = (*arg0).text;
+    } else {
+        sdiagc(s, "E0203", (*arg0).file, (*arg0).line, (*arg0).col, "`asm` template must be a string literal");
+    }
+    let second: *mut Expr = (*arg0).next;
+    let mut constraints: str = "";
+    let mut first_operand: *mut Expr = second;
+    if second != null {
+        let k1: E = (*second).kind;
+        if k1 == E::StrLit || k1 == E::CStrLit {
+            constraints = (*second).text;
+            first_operand = (*second).next;
+        }
+    }
+    let mut arg: *mut Expr = first_operand;
+    while arg != null {
+        let t: *mut Type = resolve_type(s, check_expr(s, arg, null));
+        if !type_is_int(t) && !type_is_ptr_like(t) {
+            sdiagc(s, "E0216", (*arg).file, (*arg).line, (*arg).col,
+                "inline assembly operands must be integers or pointers");
+        }
+        arg = (*arg).next;
+    }
+    (*e).text = template;
+    (*e).sfield = constraints;
+    (*e).index = 19;
+    let mut ret: *mut Type = type_new((*s).a, K::Void);
+    if asm_has_output(constraints) {
+        ret = type_new((*s).a, K::Usize);
+    }
+    (*e).ty = ret;
+    return ret;
+
+    }
+}
+
+fn atomic_argc(bid: i32) -> i32 {
+    unsafe {
+    if bid == 20 || bid == 21 || bid == 32 {
+        return 1;
+    }
+    if bid == 30 {
+        return 3;
+    }
+    if bid == 31 {
+        return 0;
+    }
+    return 2;
+
+    }
+}
+
+fn atomic_is_load(bid: i32) -> bool {
+    unsafe {
+    return bid == 20 || bid == 21 || bid == 32;
+
+    }
+}
+
+fn atomic_is_store(bid: i32) -> bool {
+    unsafe {
+    return bid == 22 || bid == 23 || bid == 33;
+
+    }
+}
+
+fn check_atomic(s: *mut Sem, e: *mut Expr, name: str, bid: i32) -> *mut Type {
+    unsafe {
+    if (*s).unsafe_depth == 0 {
+        sdiagc(s, "E0209", (*e).file, (*e).line, (*e).col, "atomic and volatile builtins require unsafe");
+    }
+    let mut nargs: i32 = 0;
+    let mut arg: *mut Expr = (*e).args;
+    while arg != null {
+        nargs = nargs + 1;
+        arg = (*arg).next;
+    }
+    let want: i32 = atomic_argc(bid);
+    if nargs != want {
+        sdiagc(s, "E0204", (*e).file, (*e).line, (*e).col, "atomic/volatile builtin argument count mismatch");
+        let bad0: *mut Type = type_new((*s).a, K::I32);
+        (*e).ty = bad0;
+        return bad0;
+    }
+    if bid == 31 {
+        let vt0: *mut Type = type_new((*s).a, K::Void);
+        (*e).ty = vt0;
+        return vt0;
+    }
+    let arg0: *mut Expr = (*e).args;
+    let pt: *mut Type = resolve_type(s, check_expr(s, arg0, null));
+    if (*pt).kind != K::Ptr || (*pt).elem == null {
+        sdiagc(s, "E0203", (*arg0).file, (*arg0).line, (*arg0).col, "atomic/volatile builtin expects a pointer");
+        let bad1: *mut Type = type_new((*s).a, K::I32);
+        (*e).ty = bad1;
+        return bad1;
+    }
+    let pointee: *mut Type = (*pt).elem;
+    if type_is_aggregate(pointee) || (*pointee).kind == K::Void {
+        sdiagc(s, "E0203", (*arg0).file, (*arg0).line, (*arg0).col,
+            "atomic/volatile builtin requires an integer or pointer pointee");
+    }
+    if !atomic_is_load(bid) {
+        let arg1: *mut Expr = (*arg0).next;
+        if arg1 != null {
+            let t1: *mut Type = resolve_type(s, check_expr(s, arg1, pointee));
+            if !type_compat(pointee, t1) {
+                sdiagc(s, "E0203", (*arg1).file, (*arg1).line, (*arg1).col, "atomic operand type mismatch");
+            }
+            if bid == 30 {
+                let arg2: *mut Expr = (*arg1).next;
+                if arg2 != null {
+                    let t2: *mut Type = resolve_type(s, check_expr(s, arg2, pointee));
+                    if !type_compat(pointee, t2) {
+                        sdiagc(s, "E0203", (*arg2).file, (*arg2).line, (*arg2).col, "atomic operand type mismatch");
+                    }
+                }
+            }
+        }
+    }
+    let _ = name;
+    if atomic_is_store(bid) || bid == 31 {
+        let vt: *mut Type = type_new((*s).a, K::Void);
+        (*e).ty = vt;
+        return vt;
+    }
+    if bid == 30 {
+        let bt2: *mut Type = type_new((*s).a, K::Bool);
+        (*e).ty = bt2;
+        return bt2;
+    }
+    (*e).ty = pointee;
+    return pointee;
 
     }
 }
@@ -2325,6 +2529,12 @@ fn check_call(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
         (*e).ty = rt2;
         return rt2;
     }
+    if bid == 19 {
+        return check_asm(s, e);
+    }
+    if bid >= 20 && bid <= 33 {
+        return check_atomic(s, e, name, bid);
+    }
     let u8t: *mut Type = type_new((*s).a, K::U8);
     let pm: *mut Type = type_ptr((*s).a, u8t, true);
     let st: *mut Type = type_new((*s).a, K::Str);
@@ -2383,7 +2593,7 @@ fn check_stmt(s: *mut Sem, st: *mut Stmt) {
             }
             sdiagc(s, "E0203", ef, el, ec, "initializer type mismatch");
         }
-        if (*t).kind == K::Void {
+        if (*t).kind == K::Void && !rt_eq((*st).name, "_") {
             sdiag(s, (*st).file, (*st).line, (*st).col, "cannot bind a void value");
         }
         let d: *mut Decl = decl_new((*s).a, D::Var, (*st).name, (*st).file, (*st).line, (*st).col);

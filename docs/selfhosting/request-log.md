@@ -28,10 +28,10 @@ command. Timestamps are UTC on the working date.
 | REQ-SH-019 | 2026-10-28 | Integrate P0–P3 workstreams and verify the final gates | User "make agents to handle each section" | Master orchestrator | SH-019…045 | Stage 2/3/4 `d270cd67…`; 241 checks × Stage 1/2/3; CLI 62; dumps 73; fuzz 326; `cargo test` 205; `repro-opt` opt1 `a5a09716…`, opt2 `e076f652…`, opt3 `76445b56…` |
 | REQ-SH-020 | 2026-10-28 | Spawn a master auditor for all P0–P3 claims | User "create a master auditor to audit all P0-P3" | Master orchestrator | SH-046 | Independent audit worktree; report in `worklogs/master-audit.md` |
 | REQ-SH-021 | 2026-10-28 | Fix all master-audit findings (F-01…F-15), including F-07 labels that follow other statements in dead blocks/ifs/loops/switch arms, then reconcile current-state docs and CI | Audit verification follow-up | Audit fixer | SH-001…046 | Stage 1 `f4192f40…`; Stage 2/3/4 `c33aff55…`; 249 checks × Stage 1/2/3; CLI 80; dumps 75; fuzz/ASan 327; examples 8/8; `lib/corex` 13/16; `repro-opt` opt1 `0f6bd235…`, opt2 `eda405ad…`, opt3 `58067778…` |
+| REQ-SH-022 | 2026-10-29 | Implement the remaining concurrency surface (SH-033) and build all 16 `lib/corex` modules (SH-034), with permanent tests and docs | Concurrency workstream | Concurrency workstream | SH-033, SH-034 | Stage 1 `926ecdec…`; Stage 2/3/4 `dcccb0e0…`; 266 checks × Stage 1/2/3; CLI 80; dumps 79; fuzz/ASan 329; concurrency 33; `lib/corex` 16/16; see `worklogs/sh033-034.md` |
 
 ## Open items
 
-Outstanding after integration: SH-033 (threads/atomics/volatile/TLS/asm),
-SH-034 (`lib/corex` blocked), SH-037 (LSP/editor), SH-039 (full 205-test port),
+Outstanding after integration: SH-037 (LSP/editor), SH-039 (full 205-test port),
 SH-043 (remote push/CI), SH-044 (P3 cleanup not merged), SH-046 (full
 acceptance). Details and evidence are in `tasks.md`.

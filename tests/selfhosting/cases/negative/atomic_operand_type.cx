@@ -1,0 +1,7 @@
+fn main() -> i32 {
+    unsafe {
+        let mut x: u32 = 0;
+        atomic_store(&mut x, 1 as u8);
+    }
+    return 0;
+}

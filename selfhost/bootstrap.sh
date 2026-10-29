@@ -98,6 +98,14 @@ echo "== Malformed input / ASan =="
 tests/selfhosting/fuzz.sh "$STAGE2"
 
 echo
+echo "== Concurrency parity =="
+tests/selfhosting/concurrency.sh "$STAGE2"
+
+echo
+echo "== lib/corex matrix =="
+tests/selfhosting/lib.sh "$STAGE2"
+
+echo
 echo "== Performance baseline =="
 tests/selfhosting/perf.sh "$STAGE2"
 
