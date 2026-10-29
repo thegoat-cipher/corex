@@ -111,6 +111,7 @@ jobs:
           grep -F "reproducible: stage2 == stage3 == stage4" "$RUNNER_TEMP/bootstrap.log"
           grep -F "selfhosting tests: 266 passed, 0 failed" "$RUNNER_TEMP/bootstrap.log"
           grep -F "cli tests: 80 passed, 0 failed" "$RUNNER_TEMP/bootstrap.log"
+          grep -F "lsp tests: 35 passed, 0 failed" "$RUNNER_TEMP/bootstrap.log"
           grep -F "dump tests: 79 passed, 0 failed" "$RUNNER_TEMP/bootstrap.log"
           grep -F "fuzz tests: 329 passed, 0 failed" "$RUNNER_TEMP/bootstrap.log"
           grep -F "concurrency tests: 33 passed, 0 failed" "$RUNNER_TEMP/bootstrap.log"

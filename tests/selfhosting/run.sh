@@ -13,6 +13,10 @@ COMPILER="${1:-$ROOT/build/stage2/corexc}"
 CASES="$ROOT/tests/selfhosting/cases"
 TMP="$(mktemp -d /tmp/corexc-selfhost.XXXXXX)"
 trap 'rm -rf "$TMP"' EXIT
+# A frontend regression must fail the gate, not hang it: a case that exceeds
+# this bound is reported as a timeout. `pointer_chain.cx` is the canary for
+# the once-exponential left-deep `+`/`-` check.
+CASE_TIMEOUT="${COREX_CASE_TIMEOUT:-30}"
 
 if [ ! -x "$COMPILER" ]; then
   echo "missing compiler: $COMPILER" >&2
@@ -35,13 +39,27 @@ for src in "$CASES"/positive/*.cx; do
     continue
   fi
   want_rc="$(cat "$expected_rc")"
-  if ! "$COMPILER" check "$src" >"$TMP/check.out" 2>"$TMP/check.err"; then
+  set +e
+  timeout "$CASE_TIMEOUT" "$COMPILER" check "$src" >"$TMP/check.out" 2>"$TMP/check.err"
+  rc=$?
+  set -e
+  if [ "$rc" -eq 124 ]; then
+    report_fail "$name: check timed out after ${CASE_TIMEOUT}s"
+    continue
+  elif [ "$rc" -ne 0 ]; then
     report_fail "$name: check rejected valid input: $(head -1 "$TMP/check.err")"
     continue
   fi
   for opt in 0 1 2 3; do
     bin="$TMP/$name.$opt"
-    if ! "$COMPILER" build "$src" -o "$bin" --opt "$opt" >"$TMP/build.out" 2>"$TMP/build.err"; then
+    set +e
+    timeout "$CASE_TIMEOUT" "$COMPILER" build "$src" -o "$bin" --opt "$opt" >"$TMP/build.out" 2>"$TMP/build.err"
+    rc=$?
+    set -e
+    if [ "$rc" -eq 124 ]; then
+      report_fail "$name --opt $opt: build timed out after ${CASE_TIMEOUT}s"
+      continue
+    elif [ "$rc" -ne 0 ]; then
       report_fail "$name --opt $opt: build failed: $(head -1 "$TMP/build.err")"
       continue
     fi
@@ -65,10 +83,12 @@ done
 for src in "$CASES"/negative/*.cx; do
   name="$(basename "$src" .cx)"
   set +e
-  "$COMPILER" check "$src" >"$TMP/neg.out" 2>"$TMP/neg.err"
+  timeout "$CASE_TIMEOUT" "$COMPILER" check "$src" >"$TMP/neg.out" 2>"$TMP/neg.err"
   rc=$?
   set -e
-  if [ "$rc" -eq 0 ]; then
+  if [ "$rc" -eq 124 ]; then
+    report_fail "negative/$name: timed out after ${CASE_TIMEOUT}s"
+  elif [ "$rc" -eq 0 ]; then
     report_fail "negative/$name: accepted invalid input"
   elif [ ! -s "$TMP/neg.err" ]; then
     report_fail "negative/$name: rejected without a diagnostic"

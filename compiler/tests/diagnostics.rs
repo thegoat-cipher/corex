@@ -2,7 +2,8 @@
 //! a specific diagnostic code, before any IR is generated.
 
 use corex::diagnostics::SourceFile;
-use corex::driver;
+mod common;
+use common::driver;
 
 fn codes(src: &str) -> Vec<&'static str> {
     let file = SourceFile::new("case.cx", src);

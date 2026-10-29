@@ -1,0 +1,1581 @@
+// CoreX language server over stdio, ported from `compiler/src/lsp.rs`.
+//
+// Surface (same methods as the Rust `corex-lsp`): initialize, initialized,
+// shutdown, exit, didOpen/didChange/didClose with publishDiagnostics,
+// completion, definition, references, rename, hover, and whole-document
+// formatting. Frames use the LSP `Content-Length` header format and JSON-RPC
+// 2.0. The server is byte-oriented: positions are byte columns (the Rust
+// oracle counts Unicode scalar values), which is identical for ASCII sources.
+//
+// Objects serialize in insertion order; the Rust server sorts keys because it
+// uses a BTreeMap. Clients parse JSON, so order is not part of the protocol.
+//
+// Diagnostics come from the same frontend as `corexc check`/`lint`: parse
+// errors, then lint warnings, then semantic analysis. The bootstrap stores a
+// diagnostic position as a single point, so the reported range spans the
+// identifier (or one character) at that point.
+
+enum JK { Null, Bool, Num, Str, Arr, Obj }
+
+struct JEnt {
+    key: str,
+    val: *mut J,
+    next: *mut JEnt,
+}
+
+struct JItem {
+    val: *mut J,
+    next: *mut JItem,
+}
+
+struct J {
+    kind: JK,
+    b: bool,
+    num: i64,
+    s: str,
+    first: *mut JItem,
+    last: *mut JItem,
+    ofirst: *mut JEnt,
+    olast: *mut JEnt,
+    count: i32,
+}
+
+fn j_new(a: *mut Arena, kind: JK) -> *mut J {
+    let v: *mut J = rt_alloc(a, sizeof(J)) as *mut J;
+    unsafe {
+        (*v).kind = kind;
+        (*v).b = false;
+        (*v).num = 0;
+        (*v).s = "";
+        (*v).first = null;
+        (*v).last = null;
+        (*v).ofirst = null;
+        (*v).olast = null;
+        (*v).count = 0;
+    }
+    return v;
+}
+
+fn j_null(a: *mut Arena) -> *mut J {
+    return j_new(a, JK::Null);
+}
+
+fn j_bool(a: *mut Arena, value: bool) -> *mut J {
+    let v: *mut J = j_new(a, JK::Bool);
+    unsafe { (*v).b = value; }
+    return v;
+}
+
+fn j_num(a: *mut Arena, value: i64) -> *mut J {
+    let v: *mut J = j_new(a, JK::Num);
+    unsafe { (*v).num = value; }
+    return v;
+}
+
+fn j_str(a: *mut Arena, value: str) -> *mut J {
+    let v: *mut J = j_new(a, JK::Str);
+    unsafe { (*v).s = value; }
+    return v;
+}
+
+fn j_arr(a: *mut Arena) -> *mut J {
+    return j_new(a, JK::Arr);
+}
+
+fn j_obj(a: *mut Arena) -> *mut J {
+    return j_new(a, JK::Obj);
+}
+
+fn j_push(a: *mut Arena, arr: *mut J, item: *mut J) {
+    let it: *mut JItem = rt_alloc(a, sizeof(JItem)) as *mut JItem;
+    unsafe {
+        (*it).val = item;
+        (*it).next = null;
+        if (*arr).last == null {
+            (*arr).first = it;
+        } else {
+            (*(*arr).last).next = it;
+        }
+        (*arr).last = it;
+        (*arr).count = (*arr).count + 1;
+    }
+}
+
+fn j_set(a: *mut Arena, obj: *mut J, key: str, val: *mut J) {
+    let e: *mut JEnt = rt_alloc(a, sizeof(JEnt)) as *mut JEnt;
+    unsafe {
+        (*e).key = key;
+        (*e).val = val;
+        (*e).next = null;
+        if (*obj).olast == null {
+            (*obj).ofirst = e;
+        } else {
+            (*(*obj).olast).next = e;
+        }
+        (*obj).olast = e;
+        (*obj).count = (*obj).count + 1;
+    }
+}
+
+fn j_get(obj: *mut J, key: str) -> *mut J {
+    unsafe {
+        if obj == null {
+            return null;
+        }
+        let mut e: *mut JEnt = (*obj).ofirst;
+        while e != null {
+            if rt_eq((*e).key, key) {
+                return (*e).val;
+            }
+            e = (*e).next;
+        }
+    }
+    return null;
+}
+
+fn j_str_at(obj: *mut J, key: str) -> str {
+    let v: *mut J = j_get(obj, key);
+    unsafe {
+        if v == null || (*v).kind != JK::Str {
+            return "";
+        }
+        return (*v).s;
+    }
+}
+
+fn j_last(arr: *mut J) -> *mut J {
+    unsafe {
+        if arr == null || (*arr).kind != JK::Arr || (*arr).last == null {
+            return null;
+        }
+        return (*(*arr).last).val;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// JSON writer
+
+fn jw_hex(b: *mut Buf, c: u8) {
+    unsafe {
+    let digits: str = "0123456789abcdef";
+    let hi: u8 = *((data_ptr(digits)) + ((c >> 4) as usize));
+    let lo: u8 = *((data_ptr(digits)) + ((c & 15) as usize));
+    rt_b(b, 92);
+    rt_b(b, 117);
+    rt_b(b, 48);
+    rt_b(b, 48);
+    rt_b(b, hi);
+    rt_b(b, lo);
+    }
+}
+
+fn jw_string(b: *mut Buf, s: str) {
+    rt_b(b, 34);
+    let n: usize = len(s);
+    let mut i: usize = 0;
+    while i < n {
+        let c: u8 = s[i];
+        if c == 34 {
+            rt_b(b, 92);
+            rt_b(b, 34);
+        } else if c == 92 {
+            rt_b(b, 92);
+            rt_b(b, 92);
+        } else if c == 10 {
+            rt_b(b, 92);
+            rt_b(b, 110);
+        } else if c == 13 {
+            rt_b(b, 92);
+            rt_b(b, 114);
+        } else if c == 9 {
+            rt_b(b, 92);
+            rt_b(b, 116);
+        } else if c == 8 {
+            rt_b(b, 92);
+            rt_b(b, 98);
+        } else if c == 12 {
+            rt_b(b, 92);
+            rt_b(b, 102);
+        } else if c < 32 {
+            jw_hex(b, c);
+        } else {
+            rt_b(b, c);
+        }
+        i = i + 1;
+    }
+    rt_b(b, 34);
+}
+
+fn jw(b: *mut Buf, v: *mut J) {
+    unsafe {
+        if v == null {
+            rt_s(b, "null");
+            return;
+        }
+        if (*v).kind == JK::Null {
+            rt_s(b, "null");
+        } else if (*v).kind == JK::Bool {
+            if (*v).b {
+                rt_s(b, "true");
+            } else {
+                rt_s(b, "false");
+            }
+        } else if (*v).kind == JK::Num {
+            rt_i(b, (*v).num);
+        } else if (*v).kind == JK::Str {
+            jw_string(b, (*v).s);
+        } else if (*v).kind == JK::Arr {
+            rt_b(b, 91);
+            let mut it: *mut JItem = (*v).first;
+            let mut first: bool = true;
+            while it != null {
+                if !first {
+                    rt_b(b, 44);
+                }
+                jw(b, (*it).val);
+                first = false;
+                it = (*it).next;
+            }
+            rt_b(b, 93);
+        } else {
+            rt_b(b, 123);
+            let mut e: *mut JEnt = (*v).ofirst;
+            let mut first: bool = true;
+            while e != null {
+                if !first {
+                    rt_b(b, 44);
+                }
+                jw_string(b, (*e).key);
+                rt_b(b, 58);
+                jw(b, (*e).val);
+                first = false;
+                e = (*e).next;
+            }
+            rt_b(b, 125);
+        }
+    }
+}
+
+fn lsp_write_all(fd: i32, s: str) {
+    unsafe {
+    let n: usize = len(s);
+    let base: *mut u8 = data_ptr(s) as *mut u8;
+    let mut off: usize = 0;
+    while off < n {
+        let w: isize = syscall(1, fd as usize, (base + off) as usize, n - off, 0, 0, 0) as isize;
+        if w == -4 {
+            continue;
+        }
+        if w <= 0 {
+            return;
+        }
+        off = off + w as usize;
+    }
+    }
+}
+
+fn lsp_send(a: *mut Arena, msg: *mut J) {
+    let mut body: Buf = rt_buf(a);
+    let bodyp: *mut Buf = &mut body;
+    jw(bodyp, msg);
+    let mut frame: Buf = rt_buf(a);
+    let fp: *mut Buf = &mut frame;
+    rt_s(fp, "Content-Length: ");
+    unsafe {
+        rt_i(fp, (*bodyp).len as i64);
+    }
+    rt_s(fp, "\r\n\r\n");
+    rt_s(fp, rt_view(bodyp));
+    lsp_write_all(1, rt_view(fp));
+}
+
+fn lsp_respond(a: *mut Arena, id: *mut J, result: *mut J) {
+    let msg: *mut J = j_obj(a);
+    j_set(a, msg, "jsonrpc", j_str(a, "2.0"));
+    j_set(a, msg, "id", id);
+    j_set(a, msg, "result", result);
+    lsp_send(a, msg);
+}
+
+fn lsp_notify(a: *mut Arena, method: str, params: *mut J) {
+    let msg: *mut J = j_obj(a);
+    j_set(a, msg, "jsonrpc", j_str(a, "2.0"));
+    j_set(a, msg, "method", j_str(a, method));
+    j_set(a, msg, "params", params);
+    lsp_send(a, msg);
+}
+
+// ---------------------------------------------------------------------------
+// JSON parser
+
+struct JP {
+    a: *mut Arena,
+    text: str,
+    pos: usize,
+    err: bool,
+}
+
+fn jp_new(a: *mut Arena, text: str) -> JP {
+    return JP { a: a, text: text, pos: 0, err: false };
+}
+
+fn jp_peek(jp: *mut JP) -> i32 {
+    unsafe {
+        if (*jp).pos >= len((*jp).text) {
+            return -1;
+        }
+        return (*jp).text[(*jp).pos] as i32;
+    }
+}
+
+fn jp_ws(jp: *mut JP) {
+    unsafe {
+        while (*jp).pos < len((*jp).text) {
+            let c: u8 = (*jp).text[(*jp).pos];
+            if c == 32 || c == 9 || c == 10 || c == 13 {
+                (*jp).pos = (*jp).pos + 1;
+            } else {
+                break;
+            }
+        }
+    }
+}
+
+fn jp_fail(jp: *mut JP) -> *mut J {
+    unsafe { (*jp).err = true; }
+    return null;
+}
+
+fn jp_put_utf8(b: *mut Buf, cp: i64) {
+    if cp < 128 {
+        rt_b(b, cp as u8);
+    } else if cp < 2048 {
+        rt_b(b, (192 + (cp >> 6)) as u8);
+        rt_b(b, (128 + (cp & 63)) as u8);
+    } else {
+        rt_b(b, (224 + (cp >> 12)) as u8);
+        rt_b(b, (128 + ((cp >> 6) & 63)) as u8);
+        rt_b(b, (128 + (cp & 63)) as u8);
+    }
+}
+
+fn jp_hex4(jp: *mut JP) -> i64 {
+    let mut v: i64 = 0;
+    let mut i: i32 = 0;
+    while i < 4 {
+        let c: i32 = jp_peek(jp);
+        if c < 0 {
+            return -1;
+        }
+        let mut d: i32 = -1;
+        if c >= 48 && c <= 57 {
+            d = c - 48;
+        } else if c >= 97 && c <= 102 {
+            d = c - 87;
+        } else if c >= 65 && c <= 70 {
+            d = c - 55;
+        }
+        if d < 0 {
+            return -1;
+        }
+        v = v * 16 + d as i64;
+        unsafe { (*jp).pos = (*jp).pos + 1; }
+        i = i + 1;
+    }
+    return v;
+}
+
+fn jp_string(jp: *mut JP) -> str {
+    jp_ws(jp);
+    if jp_peek(jp) != 34 {
+        return "";
+    }
+    unsafe { (*jp).pos = (*jp).pos + 1; }
+    let mut jpa: *mut Arena = null;
+    unsafe { jpa = (*jp).a; }
+    let mut b: Buf = rt_buf(jpa);
+    let bp: *mut Buf = &mut b;
+    while true {
+        let c: i32 = jp_peek(jp);
+        if c < 0 {
+            jp_fail(jp);
+            return rt_view(bp);
+        }
+        unsafe { (*jp).pos = (*jp).pos + 1; }
+        if c == 34 {
+            return rt_view(bp);
+        }
+        if c != 92 {
+            rt_b(bp, c as u8);
+            continue;
+        }
+        let e: i32 = jp_peek(jp);
+        if e < 0 {
+            jp_fail(jp);
+            return rt_view(bp);
+        }
+        unsafe { (*jp).pos = (*jp).pos + 1; }
+        if e == 34 {
+            rt_b(bp, 34);
+        } else if e == 92 {
+            rt_b(bp, 92);
+        } else if e == 47 {
+            rt_b(bp, 47);
+        } else if e == 98 {
+            rt_b(bp, 8);
+        } else if e == 102 {
+            rt_b(bp, 12);
+        } else if e == 110 {
+            rt_b(bp, 10);
+        } else if e == 114 {
+            rt_b(bp, 13);
+        } else if e == 116 {
+            rt_b(bp, 9);
+        } else if e == 117 {
+            let cp: i64 = jp_hex4(jp);
+            if cp < 0 {
+                jp_fail(jp);
+                return rt_view(bp);
+            }
+            if cp >= 55296 && cp <= 57343 {
+                // Lone surrogates are invalid scalar values; the Rust server
+                // emits U+FFFD for them, so do the same.
+                jp_put_utf8(bp, 65533);
+            } else {
+                jp_put_utf8(bp, cp);
+            }
+        } else {
+            jp_fail(jp);
+            return rt_view(bp);
+        }
+    }
+    return rt_view(bp);
+}
+
+fn jp_number(jp: *mut JP) -> *mut J {
+    let mut neg: bool = false;
+    let mut c: i32 = jp_peek(jp);
+    if c == 45 {
+        neg = true;
+        unsafe { (*jp).pos = (*jp).pos + 1; }
+        c = jp_peek(jp);
+    }
+    let mut v: i64 = 0;
+    while c >= 48 && c <= 57 {
+        v = v * 10 + (c - 48) as i64;
+        unsafe { (*jp).pos = (*jp).pos + 1; }
+        c = jp_peek(jp);
+    }
+    if c == 46 {
+        unsafe { (*jp).pos = (*jp).pos + 1; }
+        c = jp_peek(jp);
+        while c >= 48 && c <= 57 {
+            unsafe { (*jp).pos = (*jp).pos + 1; }
+            c = jp_peek(jp);
+        }
+    }
+    if c == 101 || c == 69 {
+        unsafe { (*jp).pos = (*jp).pos + 1; }
+        c = jp_peek(jp);
+        if c == 43 || c == 45 {
+            unsafe { (*jp).pos = (*jp).pos + 1; }
+        }
+        c = jp_peek(jp);
+        while c >= 48 && c <= 57 {
+            unsafe { (*jp).pos = (*jp).pos + 1; }
+            c = jp_peek(jp);
+        }
+    }
+    if neg {
+        v = 0 - v;
+    }
+    let mut jpa: *mut Arena = null;
+    unsafe { jpa = (*jp).a; }
+    return j_num(jpa, v);
+}
+
+fn jp_value(jp: *mut JP) -> *mut J {
+    unsafe {
+    jp_ws(jp);
+    let c: i32 = jp_peek(jp);
+    if c < 0 {
+        return jp_fail(jp);
+    }
+    if c == 110 {
+        unsafe { (*jp).pos = (*jp).pos + 4; }
+        return j_null((*jp).a);
+    }
+    if c == 116 {
+        unsafe { (*jp).pos = (*jp).pos + 4; }
+        return j_bool((*jp).a, true);
+    }
+    if c == 102 {
+        unsafe { (*jp).pos = (*jp).pos + 5; }
+        return j_bool((*jp).a, false);
+    }
+    if c == 34 {
+        return j_str((*jp).a, jp_string(jp));
+    }
+    if c == 91 {
+        unsafe { (*jp).pos = (*jp).pos + 1; }
+        let arr: *mut J = j_arr((*jp).a);
+        while true {
+            jp_ws(jp);
+            if jp_peek(jp) == 93 {
+                unsafe { (*jp).pos = (*jp).pos + 1; }
+                return arr;
+            }
+            let item: *mut J = jp_value(jp);
+            if (*jp).err {
+                return null;
+            }
+            j_push((*jp).a, arr, item);
+            jp_ws(jp);
+            let d: i32 = jp_peek(jp);
+            // Separate `if`s, not `if/else if/else`: the bootstrap emits an
+            // empty merge label when every arm of an if diverges, which is
+            // invalid IR when the merge sits directly before a loop label.
+            if d == 44 {
+                unsafe { (*jp).pos = (*jp).pos + 1; }
+                continue;
+            }
+            if d == 93 {
+                unsafe { (*jp).pos = (*jp).pos + 1; }
+                return arr;
+            }
+            return jp_fail(jp);
+        }
+    }
+    if c == 123 {
+        unsafe { (*jp).pos = (*jp).pos + 1; }
+        let obj: *mut J = j_obj((*jp).a);
+        while true {
+            jp_ws(jp);
+            if jp_peek(jp) == 125 {
+                unsafe { (*jp).pos = (*jp).pos + 1; }
+                return obj;
+            }
+            let key: str = jp_string(jp);
+            if (*jp).err {
+                return null;
+            }
+            jp_ws(jp);
+            if jp_peek(jp) != 58 {
+                return jp_fail(jp);
+            }
+            unsafe { (*jp).pos = (*jp).pos + 1; }
+            let val: *mut J = jp_value(jp);
+            if (*jp).err {
+                return null;
+            }
+            j_set((*jp).a, obj, key, val);
+            jp_ws(jp);
+            let d: i32 = jp_peek(jp);
+            if d == 44 {
+                unsafe { (*jp).pos = (*jp).pos + 1; }
+                continue;
+            }
+            if d == 125 {
+                unsafe { (*jp).pos = (*jp).pos + 1; }
+                return obj;
+            }
+            return jp_fail(jp);
+        }
+    }
+    if c == 45 || (c >= 48 && c <= 57) {
+        return jp_number(jp);
+    }
+    return jp_fail(jp);
+    }
+}
+
+fn lsp_parse_json(a: *mut Arena, text: str) -> *mut J {
+    let mut p: JP = jp_new(a, text);
+    let pp: *mut JP = &mut p;
+    let v: *mut J = jp_value(pp);
+    unsafe {
+        if (*pp).err {
+            return null;
+        }
+        jp_ws(pp);
+        if (*pp).pos != len((*pp).text) {
+            return null;
+        }
+    }
+    return v;
+}
+
+// ---------------------------------------------------------------------------
+// Framed transport
+
+struct LSPRd {
+    fd: i32,
+    buf: *mut u8,
+    cap: usize,
+    pos: usize,
+    len: usize,
+}
+
+fn lsp_rd_new(a: *mut Arena, fd: i32) -> LSPRd {
+    let cap: usize = 8192;
+    return LSPRd { fd: fd, buf: rt_alloc(a, cap), cap: cap, pos: 0, len: 0 };
+}
+
+fn lsp_rd_fill(r: *mut LSPRd) -> bool {
+    unsafe {
+        while true {
+            let n: isize = syscall(0, (*r).fd as usize, (*r).buf as usize, (*r).cap, 0, 0, 0) as isize;
+            if n == -4 {
+                continue;
+            }
+            if n <= 0 {
+                return false;
+            }
+            (*r).pos = 0;
+            (*r).len = n as usize;
+            return true;
+        }
+    }
+}
+
+fn lsp_rd_byte(r: *mut LSPRd) -> i32 {
+    unsafe {
+        if (*r).pos >= (*r).len {
+            if !lsp_rd_fill(r) {
+                return -1;
+            }
+        }
+        let c: u8 = *((*r).buf + (*r).pos);
+        (*r).pos = (*r).pos + 1;
+        return c as i32;
+    }
+}
+
+fn lsp_rd_line(a: *mut Arena, r: *mut LSPRd, eof: *mut bool) -> str {
+    let mut b: Buf = rt_buf(a);
+    let bp: *mut Buf = &mut b;
+    while true {
+        let c: i32 = lsp_rd_byte(r);
+        if c < 0 {
+            unsafe { *eof = true; }
+            return "";
+        }
+        if c == 10 {
+            return rt_view(bp);
+        }
+        if c == 13 {
+            continue;
+        }
+        rt_b(bp, c as u8);
+    }
+    return rt_view(bp);
+}
+
+fn lsp_rd_exact(a: *mut Arena, r: *mut LSPRd, n: usize) -> str {
+    let mut b: Buf = rt_buf_cap(a, n + 16);
+    let bp: *mut Buf = &mut b;
+    let mut i: usize = 0;
+    while i < n {
+        let c: i32 = lsp_rd_byte(r);
+        if c < 0 {
+            break;
+        }
+        rt_b(bp, c as u8);
+        i = i + 1;
+    }
+    return rt_view(bp);
+}
+
+fn lsp_header_length(line: str) -> i64 {
+    let mut v: i64 = 0;
+    let mut i: usize = 0;
+    while i < len(line) && line[i] != 58 {
+        i = i + 1;
+    }
+    i = i + 1;
+    while i < len(line) {
+        let c: u8 = line[i];
+        if c >= 48 && c <= 57 {
+            v = v * 10 + (c - 48) as i64;
+        }
+        i = i + 1;
+    }
+    return v;
+}
+
+fn lsp_read_message(a: *mut Arena, r: *mut LSPRd) -> *mut J {
+    let mut length: i64 = -1;
+    while true {
+        let mut eof: bool = false;
+        let line: str = lsp_rd_line(a, r, &mut eof);
+        if eof {
+            return null;
+        }
+        if len(line) == 0 {
+            break;
+        }
+        if rt_starts(line, "Content-Length:") {
+            length = lsp_header_length(line);
+        }
+    }
+    if length < 0 {
+        return null;
+    }
+    let body: str = lsp_rd_exact(a, r, length as usize);
+    if len(body) != length as usize {
+        return null;
+    }
+    return lsp_parse_json(a, body);
+}
+
+// ---------------------------------------------------------------------------
+// Source positions (byte columns, matching the bootstrap lexer)
+
+fn lsp_is_word(c: u8) -> bool {
+    return c == 95 || (c >= 48 && c <= 57) || (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+}
+
+fn lsp_is_alpha(c: u8) -> bool {
+    return c == 95 || (c >= 65 && c <= 90) || (c >= 97 && c <= 122);
+}
+
+fn lsp_valid_ident(s: str) -> bool {
+    if len(s) == 0 {
+        return false;
+    }
+    if !lsp_is_alpha(s[0]) {
+        return false;
+    }
+    let mut i: usize = 1;
+    while i < len(s) {
+        if !lsp_is_word(s[i]) {
+            return false;
+        }
+        i = i + 1;
+    }
+    return true;
+}
+
+// Offset of the start of `line`, clamped to the end of the text.
+fn lsp_line_start(text: str, line: i32) -> usize {
+    let mut l: i32 = 0;
+    let mut i: usize = 0;
+    let n: usize = len(text);
+    while i < n && l < line {
+        if text[i] == 10 {
+            l = l + 1;
+        }
+        i = i + 1;
+    }
+    return i;
+}
+
+// Byte offset of a 0-based line/character position, clamped.
+fn lsp_offset_of(text: str, line: i32, ch: i32) -> usize {
+    let n: usize = len(text);
+    let mut i: usize = lsp_line_start(text, line);
+    let mut c: i32 = 0;
+    while i < n && c < ch && text[i] != 10 {
+        i = i + 1;
+        c = c + 1;
+    }
+    return i;
+}
+
+fn lsp_pos_line(text: str, off: usize) -> i32 {
+    let n: usize = len(text);
+    let end: usize = off;
+    let mut line: i32 = 0;
+    let mut i: usize = 0;
+    while i < n && i < end {
+        if text[i] == 10 {
+            line = line + 1;
+        }
+        i = i + 1;
+    }
+    return line;
+}
+
+fn lsp_pos_col(text: str, off: usize) -> i32 {
+    let end: usize = off;
+    let mut line_start: usize = 0;
+    let mut i: usize = 0;
+    let n: usize = len(text);
+    while i < n && i < end {
+        if text[i] == 10 {
+            line_start = i + 1;
+        }
+        i = i + 1;
+    }
+    return (end - line_start) as i32;
+}
+
+fn lsp_pos_json(a: *mut Arena, line: i32, ch: i32) -> *mut J {
+    let p: *mut J = j_obj(a);
+    j_set(a, p, "line", j_num(a, line as i64));
+    j_set(a, p, "character", j_num(a, ch as i64));
+    return p;
+}
+
+fn lsp_range_json(a: *mut Arena, sl: i32, sc: i32, el: i32, ec: i32) -> *mut J {
+    let r: *mut J = j_obj(a);
+    j_set(a, r, "start", lsp_pos_json(a, sl, sc));
+    j_set(a, r, "end", lsp_pos_json(a, el, ec));
+    return r;
+}
+
+fn lsp_location_json(a: *mut Arena, uri: str, sl: i32, sc: i32, el: i32, ec: i32) -> *mut J {
+    let loc: *mut J = j_obj(a);
+    j_set(a, loc, "uri", j_str(a, uri));
+    j_set(a, loc, "range", lsp_range_json(a, sl, sc, el, ec));
+    return loc;
+}
+
+// Word (identifier or number run) around a position; empty when none.
+fn lsp_word_at(text: str, line: i32, ch: i32) -> str {
+    let n: usize = len(text);
+    let mut start: usize = lsp_offset_of(text, line, ch);
+    if start > n {
+        start = n;
+    }
+    while start > 0 && lsp_is_word(text[start - 1]) {
+        start = start - 1;
+    }
+    let mut end: usize = lsp_offset_of(text, line, ch);
+    if end > n {
+        end = n;
+    }
+    while end < n && lsp_is_word(text[end]) {
+        end = end + 1;
+    }
+    if end < start {
+        end = start;
+    }
+    return rt_slice(text, start, end);
+}
+
+// ---------------------------------------------------------------------------
+// Frontend
+
+fn lsp_diag_json(a: *mut Arena, text: str, dg: *mut Diag) -> *mut J {
+    let mut line0: i32 = 0;
+    let mut col0: i32 = 0;
+    unsafe {
+        line0 = (*dg).line - 1;
+        col0 = (*dg).col - 1;
+    }
+    if line0 < 0 {
+        line0 = 0;
+    }
+    if col0 < 0 {
+        col0 = 0;
+    }
+    let ls: usize = lsp_line_start(text, line0);
+    let s: usize = lsp_offset_of(text, line0, col0);
+    let n: usize = len(text);
+    let mut e: usize = s;
+    while e < n && text[e] != 10 && lsp_is_word(text[e]) {
+        e = e + 1;
+    }
+    if e == s && s < n && text[s] != 10 {
+        e = s + 1;
+    }
+    let mut ec: i32 = 0;
+    if e >= ls {
+        ec = (e - ls) as i32;
+    }
+    let item: *mut J = j_obj(a);
+    j_set(a, item, "range", lsp_range_json(a, line0, col0, line0, ec));
+    unsafe {
+        if (*dg).warn {
+            j_set(a, item, "severity", j_num(a, 2));
+        } else {
+            j_set(a, item, "severity", j_num(a, 1));
+        }
+        if len((*dg).code) > 0 {
+            j_set(a, item, "code", j_str(a, (*dg).code));
+        } else if rt_starts((*dg).msg, "undefined ") {
+            // `corexc check` renders uncoded undefined-name errors as E0201;
+            // keep the LSP code in sync with that contract.
+            j_set(a, item, "code", j_str(a, "E0201"));
+        }
+        j_set(a, item, "source", j_str(a, "corex"));
+        j_set(a, item, "message", j_str(a, (*dg).msg));
+    }
+    return item;
+}
+
+fn lsp_push_diags(a: *mut Arena, arr: *mut J, text: str, head: *mut Diag) {
+    let mut dg: *mut Diag = head;
+    let mut shown: i32 = 0;
+    while dg != null && shown < 100 {
+        j_push(a, arr, lsp_diag_json(a, text, dg));
+        unsafe { dg = (*dg).next; }
+        shown = shown + 1;
+    }
+}
+
+// Same pipeline as the Rust server: parse, then lint, then semantic analysis.
+// Lint and semantic diagnostics are collected separately because the bootstrap
+// analyzer stops when the shared diagnostic list is already non-empty.
+fn lsp_diagnostics(a: *mut Arena, uri: str, text: str) -> *mut J {
+    let arr: *mut J = j_arr(a);
+    let mut d: Diags = diags_new();
+    let mut srcs: SrcList = srcs_new();
+    let dp: *mut Diags = &mut d;
+    let sp: *mut SrcList = &mut srcs;
+    let mut prog: Program = parse_program_text(a, dp, sp, uri, text);
+    unsafe {
+        if (*dp).count > 0 {
+            lsp_push_diags(a, arr, text, (*dp).head);
+            return arr;
+        }
+    }
+    let mut ld: Diags = diags_new();
+    let mut sd: Diags = diags_new();
+    let ldp: *mut Diags = &mut ld;
+    let sdp: *mut Diags = &mut sd;
+    let progp: *mut Program = &mut prog;
+    lint_program(a, ldp, progp);
+    let _sem: *mut Sem = sem_run(a, sdp, sp, progp);
+    unsafe {
+        lsp_push_diags(a, arr, text, (*ldp).head);
+        lsp_push_diags(a, arr, text, (*sdp).head);
+    }
+    return arr;
+}
+
+fn lsp_publish(a: *mut Arena, uri: str, text: str) {
+    let params: *mut J = j_obj(a);
+    j_set(a, params, "uri", j_str(a, uri));
+    j_set(a, params, "diagnostics", lsp_diagnostics(a, uri, text));
+    lsp_notify(a, "textDocument/publishDiagnostics", params);
+}
+
+// ---------------------------------------------------------------------------
+// Symbols
+
+fn lsp_sig(a: *mut Arena, d: *mut Decl) -> str {
+    unsafe {
+        if (*d).kind == D::Func {
+            return doc_sig(a, d);
+        }
+        let mut b: Buf = rt_buf(a);
+        let bp: *mut Buf = &mut b;
+        if (*d).kind == D::Struct {
+            if (*d).is_union {
+                rt_s(bp, "union ");
+            } else {
+                rt_s(bp, "struct ");
+            }
+            rt_s(bp, (*d).name);
+        } else if (*d).kind == D::Enum {
+            rt_s(bp, "enum ");
+            rt_s(bp, (*d).name);
+        } else if (*d).kind == D::Const {
+            rt_s(bp, "const ");
+            rt_s(bp, (*d).name);
+            rt_s(bp, ": ");
+            doc_type(bp, (*d).ty);
+        } else if (*d).kind == D::Global {
+            rt_s(bp, "static ");
+            rt_s(bp, (*d).name);
+            rt_s(bp, ": ");
+            doc_type(bp, (*d).ty);
+        } else if (*d).kind == D::Typedef {
+            rt_s(bp, "typedef ");
+            rt_s(bp, (*d).name);
+            rt_s(bp, " = ");
+            doc_type(bp, (*d).ty);
+        } else {
+            rt_s(bp, (*d).name);
+        }
+        return rt_view(bp);
+    }
+}
+
+fn lsp_find_item(prog: *mut Program, word: str) -> *mut Decl {
+    unsafe {
+        let mut it: *mut Item = (*prog).items;
+        while it != null {
+            let d: *mut Decl = (*it).decl;
+            if d != null && rt_eq((*d).name, word) {
+                return d;
+            }
+            it = (*it).next;
+        }
+    }
+    return null;
+}
+
+fn lsp_find_local(block: *mut Stmt, word: str) -> *mut Stmt {
+    unsafe {
+        let mut s: *mut Stmt = block;
+        while s != null {
+            if (*s).kind == S::Let && rt_eq((*s).name, word) {
+                return s;
+            }
+            if (*s).kind == S::If {
+                let f: *mut Stmt = lsp_find_local((*s).body, word);
+                if f != null {
+                    return f;
+                }
+                if (*s).els != null {
+                    let f2: *mut Stmt = lsp_find_local((*s).els, word);
+                    if f2 != null {
+                        return f2;
+                    }
+                }
+            } else if (*s).kind == S::While || (*s).kind == S::Loop || (*s).kind == S::For
+                || (*s).kind == S::DoWhile || (*s).kind == S::Unsafe || (*s).kind == S::Block
+                || (*s).kind == S::Label {
+                let f: *mut Stmt = lsp_find_local((*s).body, word);
+                if f != null {
+                    return f;
+                }
+            } else if (*s).kind == S::Switch {
+                let mut c: *mut Case = (*s).cases;
+                while c != null {
+                    let f: *mut Stmt = lsp_find_local((*c).body, word);
+                    if f != null {
+                        return f;
+                    }
+                    c = (*c).next;
+                }
+            }
+            s = (*s).next;
+        }
+    }
+    return null;
+}
+
+fn lsp_find_local_in_prog(prog: *mut Program, word: str) -> *mut Stmt {
+    unsafe {
+        let mut it: *mut Item = (*prog).items;
+        while it != null {
+            let d: *mut Decl = (*it).decl;
+            if d != null && (*d).body != null {
+                let f: *mut Stmt = lsp_find_local((*d).body, word);
+                if f != null {
+                    return f;
+                }
+            }
+            it = (*it).next;
+        }
+    }
+    return null;
+}
+
+// JSON array of identifier locations used by references and rename.
+fn lsp_ident_locations(a: *mut Arena, uri: str, text: str, word: str) -> *mut J {
+    let arr: *mut J = j_arr(a);
+    if len(word) == 0 {
+        return arr;
+    }
+    let mut d: Diags = diags_new();
+    let mut srcs: SrcList = srcs_new();
+    let src: *mut Src = srcs_add(&mut srcs, a, uri, text);
+    let ta: TokArr = lx_run(a, src, &mut d);
+    let mut i: usize = 0;
+    while i < ta.len {
+        unsafe {
+            let t: *mut Tok = ta.data + i;
+            if (*t).kind == T::Ident && rt_eq((*t).text, word) {
+                let l: i32 = (*t).line - 1;
+                let c: i32 = (*t).col - 1;
+                let n: i32 = len(word) as i32;
+                j_push(a, arr, lsp_location_json(a, uri, l, c, l, c + n));
+            }
+        }
+        i = i + 1;
+    }
+    return arr;
+}
+
+fn lsp_push_local_items(a: *mut Arena, items: *mut J, block: *mut Stmt) {
+    unsafe {
+        let mut s: *mut Stmt = block;
+        while s != null {
+            if (*s).kind == S::Let {
+                let item: *mut J = j_obj(a);
+                j_set(a, item, "label", j_str(a, (*s).name));
+                j_set(a, item, "kind", j_num(a, 3));
+                let mut b: Buf = rt_buf(a);
+                let bp: *mut Buf = &mut b;
+                rt_s(bp, "let ");
+                rt_s(bp, (*s).name);
+                j_set(a, item, "detail", j_str(a, rt_view(bp)));
+                j_push(a, items, item);
+            }
+            if (*s).kind == S::If {
+                lsp_push_local_items(a, items, (*s).body);
+                if (*s).els != null {
+                    lsp_push_local_items(a, items, (*s).els);
+                }
+            } else if (*s).kind == S::While || (*s).kind == S::Loop || (*s).kind == S::For
+                || (*s).kind == S::DoWhile || (*s).kind == S::Unsafe || (*s).kind == S::Block
+                || (*s).kind == S::Label {
+                lsp_push_local_items(a, items, (*s).body);
+            } else if (*s).kind == S::Switch {
+                let mut c: *mut Case = (*s).cases;
+                while c != null {
+                    lsp_push_local_items(a, items, (*c).body);
+                    c = (*c).next;
+                }
+            }
+            s = (*s).next;
+        }
+    }
+}
+
+fn lsp_completion(a: *mut Arena, uri: str, text: str) -> *mut J {
+    let items: *mut J = j_arr(a);
+    let kwtext: str = "fn let mut if else while loop for do switch case default break continue return unsafe struct union enum typedef static const extern pub mod module as true false null sizeof alignof offsetof goto cstr str vec i8 i16 i32 i64 u8 u16 u32 u64 usize isize bool char f32 f64";
+    let mut start: usize = 0;
+    let mut i: usize = 0;
+    while i <= len(kwtext) {
+        let at_end: bool = i == len(kwtext);
+        if at_end || kwtext[i] == 32 {
+            if i > start {
+                let it: *mut J = j_obj(a);
+                j_set(a, it, "label", j_str(a, rt_slice(kwtext, start, i)));
+                j_set(a, it, "kind", j_num(a, 14));
+                j_push(a, items, it);
+            }
+            start = i + 1;
+        }
+        i = i + 1;
+    }
+    let mut d: Diags = diags_new();
+    let mut srcs: SrcList = srcs_new();
+    let dp: *mut Diags = &mut d;
+    let sp: *mut SrcList = &mut srcs;
+    let mut prog: Program = parse_program_text(a, dp, sp, uri, text);
+    unsafe {
+        if (*dp).count == 0 {
+            let progp: *mut Program = &mut prog;
+            let mut it: *mut Item = (*progp).items;
+            while it != null {
+                let decl: *mut Decl = (*it).decl;
+                if decl != null {
+                    let item: *mut J = j_obj(a);
+                    j_set(a, item, "label", j_str(a, (*decl).name));
+                    j_set(a, item, "kind", j_num(a, 3));
+                    j_set(a, item, "detail", j_str(a, lsp_sig(a, decl)));
+                    j_push(a, items, item);
+                    if (*decl).body != null {
+                        lsp_push_local_items(a, items, (*decl).body);
+                    }
+                }
+                it = (*it).next;
+            }
+        }
+    }
+    return items;
+}
+
+// ---------------------------------------------------------------------------
+// Server state and dispatch
+
+struct LSPDoc {
+    uri: str,
+    text: str,
+    next: *mut LSPDoc,
+}
+
+struct LSPState {
+    docs: *mut LSPDoc,
+    shutdown: bool,
+}
+
+fn lsp_doc_find(st: *mut LSPState, uri: str) -> *mut LSPDoc {
+    unsafe {
+        let mut d: *mut LSPDoc = (*st).docs;
+        while d != null {
+            if rt_eq((*d).uri, uri) {
+                return d;
+            }
+            d = (*d).next;
+        }
+    }
+    return null;
+}
+
+fn lsp_doc_put(a: *mut Arena, st: *mut LSPState, uri: str, text: str) {
+    let found: *mut LSPDoc = lsp_doc_find(st, uri);
+    if found != null {
+        unsafe { (*found).text = text; }
+        return;
+    }
+    let d: *mut LSPDoc = rt_alloc(a, sizeof(LSPDoc)) as *mut LSPDoc;
+    unsafe {
+        (*d).uri = uri;
+        (*d).text = text;
+        (*d).next = (*st).docs;
+        (*st).docs = d;
+    }
+}
+
+fn lsp_doc_drop(st: *mut LSPState, uri: str) {
+    unsafe {
+        let mut prev: *mut LSPDoc = null;
+        let mut d: *mut LSPDoc = (*st).docs;
+        while d != null {
+            if rt_eq((*d).uri, uri) {
+                if prev == null {
+                    (*st).docs = (*d).next;
+                } else {
+                    (*prev).next = (*d).next;
+                }
+                return;
+            }
+            prev = d;
+            d = (*d).next;
+        }
+    }
+}
+
+fn lsp_uri_of(params: *mut J) -> str {
+    let td: *mut J = j_get(params, "textDocument");
+    if td == null {
+        return "";
+    }
+    return j_str_at(td, "uri");
+}
+
+fn lsp_position(params: *mut J, key: str) -> i32 {
+    let p: *mut J = j_get(params, key);
+    if p == null {
+        return 0;
+    }
+    let v: *mut J = j_get(p, "line");
+    unsafe {
+        if v == null || (*v).kind != JK::Num {
+            return 0;
+        }
+        return (*v).num as i32;
+    }
+}
+
+fn lsp_position_char(params: *mut J) -> i32 {
+    let p: *mut J = j_get(params, "position");
+    if p == null {
+        return 0;
+    }
+    let v: *mut J = j_get(p, "character");
+    unsafe {
+        if v == null || (*v).kind != JK::Num {
+            return 0;
+        }
+        return (*v).num as i32;
+    }
+}
+
+// Returns true when the server must exit.
+fn lsp_handle(a: *mut Arena, st: *mut LSPState, msg: *mut J) -> bool {
+    let method: str = j_str_at(msg, "method");
+    let mut id: *mut J = j_get(msg, "id");
+    let mut params: *mut J = j_get(msg, "params");
+    unsafe {
+        if id != null && (*id).kind == JK::Null {
+            id = null;
+        }
+    }
+    if params == null {
+        params = j_null(a);
+    }
+
+    if rt_eq(method, "initialize") {
+        let caps: *mut J = j_obj(a);
+        j_set(a, caps, "textDocumentSync", j_num(a, 1));
+        let comp: *mut J = j_obj(a);
+        let trig: *mut J = j_arr(a);
+        j_push(a, trig, j_str(a, "."));
+        j_push(a, trig, j_str(a, ":"));
+        j_set(a, comp, "triggerCharacters", trig);
+        j_set(a, caps, "completionProvider", comp);
+        j_set(a, caps, "definitionProvider", j_bool(a, true));
+        j_set(a, caps, "referencesProvider", j_bool(a, true));
+        j_set(a, caps, "renameProvider", j_bool(a, true));
+        j_set(a, caps, "documentFormattingProvider", j_bool(a, true));
+        j_set(a, caps, "hoverProvider", j_bool(a, true));
+        let info: *mut J = j_obj(a);
+        j_set(a, info, "name", j_str(a, "corexc-lsp"));
+        j_set(a, info, "version", j_str(a, "0.3.0"));
+        let result: *mut J = j_obj(a);
+        j_set(a, result, "capabilities", caps);
+        j_set(a, result, "serverInfo", info);
+        if id != null {
+            lsp_respond(a, id, result);
+        }
+        return false;
+    }
+    if rt_eq(method, "initialized") {
+        return false;
+    }
+    if rt_eq(method, "shutdown") {
+        unsafe { (*st).shutdown = true; }
+        if id != null {
+            lsp_respond(a, id, j_null(a));
+        }
+        return false;
+    }
+    if rt_eq(method, "exit") {
+        return true;
+    }
+    if rt_eq(method, "textDocument/didOpen") || rt_eq(method, "textDocument/didChange") {
+        let uri: str = lsp_uri_of(params);
+        if len(uri) == 0 {
+            return false;
+        }
+        let doc: *mut J = j_get(params, "textDocument");
+        let mut text: str = "";
+        if rt_eq(method, "textDocument/didOpen") {
+            text = j_str_at(doc, "text");
+        } else {
+            let changes: *mut J = j_get(params, "contentChanges");
+            let last: *mut J = j_last(changes);
+            if last != null {
+                text = j_str_at(last, "text");
+            }
+        }
+        lsp_doc_put(a, st, uri, text);
+        lsp_publish(a, uri, text);
+        return false;
+    }
+    if rt_eq(method, "textDocument/didClose") {
+        let uri: str = lsp_uri_of(params);
+        if len(uri) == 0 {
+            return false;
+        }
+        lsp_doc_drop(st, uri);
+        let p: *mut J = j_obj(a);
+        j_set(a, p, "uri", j_str(a, uri));
+        j_set(a, p, "diagnostics", j_arr(a));
+        lsp_notify(a, "textDocument/publishDiagnostics", p);
+        return false;
+    }
+    if rt_eq(method, "textDocument/completion") {
+        let uri: str = lsp_uri_of(params);
+        if len(uri) == 0 {
+            if id != null {
+                lsp_respond(a, id, j_arr(a));
+            }
+            return false;
+        }
+        let doc: *mut LSPDoc = lsp_doc_find(st, uri);
+        let mut text: str = "";
+        if doc != null {
+            unsafe { text = (*doc).text; }
+        }
+        if id != null {
+            lsp_respond(a, id, lsp_completion(a, uri, text));
+        }
+        return false;
+    }
+    if rt_eq(method, "textDocument/definition") {
+        let uri: str = lsp_uri_of(params);
+        if len(uri) == 0 {
+            if id != null {
+                lsp_respond(a, id, j_null(a));
+            }
+            return false;
+        }
+        let doc: *mut LSPDoc = lsp_doc_find(st, uri);
+        let mut text: str = "";
+        if doc != null {
+            unsafe { text = (*doc).text; }
+        }
+        let word: str = lsp_word_at(text, lsp_position(params, "position"), lsp_position_char(params));
+        let mut result: *mut J = j_null(a);
+        let mut d: Diags = diags_new();
+        let mut srcs: SrcList = srcs_new();
+        let dp: *mut Diags = &mut d;
+        let sp: *mut SrcList = &mut srcs;
+        let mut prog: Program = parse_program_text(a, dp, sp, uri, text);
+        unsafe {
+            if (*dp).count == 0 && len(word) > 0 {
+                let progp: *mut Program = &mut prog;
+                let decl: *mut Decl = lsp_find_item(progp, word);
+                if decl != null {
+                    let l: i32 = (*decl).line - 1;
+                    let c: i32 = (*decl).col - 1;
+                    result = lsp_location_json(a, uri, l, c, l, c + len(word) as i32);
+                } else {
+                    let local: *mut Stmt = lsp_find_local_in_prog(progp, word);
+                    if local != null {
+                        let l: i32 = (*local).line - 1;
+                        let c: i32 = (*local).col - 1;
+                        result = lsp_location_json(a, uri, l, c, l, c + len(word) as i32);
+                    }
+                }
+            }
+        }
+        if id != null {
+            lsp_respond(a, id, result);
+        }
+        return false;
+    }
+    if rt_eq(method, "textDocument/references") {
+        let uri: str = lsp_uri_of(params);
+        if len(uri) == 0 {
+            if id != null {
+                lsp_respond(a, id, j_arr(a));
+            }
+            return false;
+        }
+        let doc: *mut LSPDoc = lsp_doc_find(st, uri);
+        let mut text: str = "";
+        if doc != null {
+            unsafe { text = (*doc).text; }
+        }
+        let word: str = lsp_word_at(text, lsp_position(params, "position"), lsp_position_char(params));
+        if id != null {
+            lsp_respond(a, id, lsp_ident_locations(a, uri, text, word));
+        }
+        return false;
+    }
+    if rt_eq(method, "textDocument/rename") {
+        let uri: str = lsp_uri_of(params);
+        let new_name: str = j_str_at(params, "newName");
+        if len(uri) == 0 || !lsp_valid_ident(new_name) {
+            if id != null {
+                lsp_respond(a, id, j_null(a));
+            }
+            return false;
+        }
+        let doc: *mut LSPDoc = lsp_doc_find(st, uri);
+        let mut text: str = "";
+        if doc != null {
+            unsafe { text = (*doc).text; }
+        }
+        let word: str = lsp_word_at(text, lsp_position(params, "position"), lsp_position_char(params));
+        let locs: *mut J = lsp_ident_locations(a, uri, text, word);
+        let edits: *mut J = j_arr(a);
+        unsafe {
+            let mut it: *mut JItem = (*locs).first;
+            while it != null {
+                let loc: *mut J = (*it).val;
+                let ed: *mut J = j_obj(a);
+                j_set(a, ed, "range", j_get(loc, "range"));
+                j_set(a, ed, "newText", j_str(a, new_name));
+                j_push(a, edits, ed);
+                it = (*it).next;
+            }
+        }
+        let changes: *mut J = j_obj(a);
+        j_set(a, changes, uri, edits);
+        let result: *mut J = j_obj(a);
+        j_set(a, result, "changes", changes);
+        if id != null {
+            lsp_respond(a, id, result);
+        }
+        return false;
+    }
+    if rt_eq(method, "textDocument/formatting") {
+        let uri: str = lsp_uri_of(params);
+        if len(uri) == 0 {
+            if id != null {
+                lsp_respond(a, id, j_null(a));
+            }
+            return false;
+        }
+        let doc: *mut LSPDoc = lsp_doc_find(st, uri);
+        let mut text: str = "";
+        if doc != null {
+            unsafe { text = (*doc).text; }
+        }
+        let formatted: str = fmt_source(a, text);
+        let edit: *mut J = j_obj(a);
+        let endl: i32 = lsp_pos_line(text, len(text));
+        let endc: i32 = lsp_pos_col(text, len(text));
+        j_set(a, edit, "range", lsp_range_json(a, 0, 0, endl, endc));
+        j_set(a, edit, "newText", j_str(a, formatted));
+        let edits: *mut J = j_arr(a);
+        j_push(a, edits, edit);
+        if id != null {
+            lsp_respond(a, id, edits);
+        }
+        return false;
+    }
+    if rt_eq(method, "textDocument/hover") {
+        let uri: str = lsp_uri_of(params);
+        if len(uri) == 0 {
+            if id != null {
+                lsp_respond(a, id, j_null(a));
+            }
+            return false;
+        }
+        let doc: *mut LSPDoc = lsp_doc_find(st, uri);
+        let mut text: str = "";
+        if doc != null {
+            unsafe { text = (*doc).text; }
+        }
+        let word: str = lsp_word_at(text, lsp_position(params, "position"), lsp_position_char(params));
+        let mut detail: str = "";
+        let mut d: Diags = diags_new();
+        let mut srcs: SrcList = srcs_new();
+        let dp: *mut Diags = &mut d;
+        let sp: *mut SrcList = &mut srcs;
+        let mut prog: Program = parse_program_text(a, dp, sp, uri, text);
+        unsafe {
+            if (*dp).count == 0 && len(word) > 0 {
+                let progp: *mut Program = &mut prog;
+                let decl: *mut Decl = lsp_find_item(progp, word);
+                if decl != null {
+                    detail = lsp_sig(a, decl);
+                } else {
+                    let local: *mut Stmt = lsp_find_local_in_prog(progp, word);
+                    if local != null {
+                        let mut b: Buf = rt_buf(a);
+                        let bp: *mut Buf = &mut b;
+                        rt_s(bp, "let ");
+                        rt_s(bp, (*local).name);
+                        detail = rt_view(bp);
+                    }
+                }
+            }
+        }
+        if len(detail) == 0 {
+            if id != null {
+                lsp_respond(a, id, j_null(a));
+            }
+            return false;
+        }
+        let mut md: Buf = rt_buf(a);
+        let mdp: *mut Buf = &mut md;
+        rt_s(mdp, "```corex\n");
+        rt_s(mdp, detail);
+        rt_s(mdp, "\n```");
+        let contents: *mut J = j_obj(a);
+        j_set(a, contents, "kind", j_str(a, "markdown"));
+        j_set(a, contents, "value", j_str(a, rt_view(mdp)));
+        let result: *mut J = j_obj(a);
+        j_set(a, result, "contents", contents);
+        if id != null {
+            lsp_respond(a, id, result);
+        }
+        return false;
+    }
+    if id != null {
+        lsp_respond(a, id, j_null(a));
+    }
+    return false;
+}
+
+fn lsp_run(a: *mut Arena) -> i32 {
+    let mut rd: LSPRd = lsp_rd_new(a, 0);
+    let rp: *mut LSPRd = &mut rd;
+    let mut st: LSPState = LSPState { docs: null, shutdown: false };
+    let stp: *mut LSPState = &mut st;
+    while true {
+        let msg: *mut J = lsp_read_message(a, rp);
+        if msg == null {
+            break;
+        }
+        if lsp_handle(a, stp, msg) {
+            break;
+        }
+    }
+    return 0;
+}

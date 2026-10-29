@@ -1126,6 +1126,16 @@ fn gen_cast(f: *mut Fn, e: *mut Expr) -> Val {
         fs(f, " to "); fs(f, llty((*f).cg, to)); fnewline(f);
         return v_ssa(to, reg_of(f, idt));
     }
+    if fk == K::CStr && tk == K::Str {
+        let id: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, id as i64);
+        fs(f, " = call { ptr, i64 } @_cx_cstr_str(ptr "); fs(f, operand(f, v, from)); fs(f, ")\n");
+        (*(*f).cg).used_cstr_str = true;
+        let slot: str = ftemp(f, to);
+        fs(f, "  store { ptr, i64 } %t"); fi(f, id as i64);
+        fs(f, ", ptr "); fs(f, slot); fnewline(f);
+        return v_addr(to, slot);
+    }
     if tk == K::Ptr || tk == K::CStr || tk == K::Fn {
         if fk == K::Ptr || fk == K::CStr || fk == K::Fn {
             return v_ssa(to, operand(f, v, from));
@@ -1506,6 +1516,9 @@ fn gen_expr(f: *mut Fn, e: *mut Expr) -> Val {
             if (*d).cval_kind == 2 {
                 return make_str_val(f, (*d).cval_s);
             }
+            if (*d).cval_kind == 5 {
+                return global_addr_val((*(*f).cg).a, (*d).ty, (*d).cval_s);
+            }
             return v_const((*d).ty, (*d).cval);
         }
         let a: Val = gen_addr(f, e);
@@ -1522,6 +1535,9 @@ fn gen_expr(f: *mut Fn, e: *mut Expr) -> Val {
         if d != null && (*d).kind == D::Const {
             if (*d).cval_kind == 2 {
                 return make_str_val(f, (*d).cval_s);
+            }
+            if (*d).cval_kind == 5 {
+                return global_addr_val((*(*f).cg).a, (*d).ty, (*d).cval_s);
             }
             return v_const((*d).ty, (*d).cval);
         }
@@ -2477,9 +2493,38 @@ fn gen_user_call(f: *mut Fn, e: *mut Expr) -> Val {
         if (*args).len > 0 {
             rt_s(args, ", ");
         }
-        rt_s(args, llty((*f).cg, (*arg).ty));
-        rt_s(args, " ");
-        rt_s(args, materialize(f, v, (*arg).ty));
+        let aty: *mut Type = (*arg).ty;
+        let ak: K = (*aty).kind;
+        if (*d).variadic && ak == K::F32 {
+            // C default argument promotions: float through `...` is double.
+            let id: i32 = fnewtmp(f);
+            fs(f, "  %t"); fi(f, id as i64);
+            fs(f, " = fpext float "); fs(f, operand(f, v, aty)); fs(f, " to double\n");
+            rt_s(args, "double %t");
+            rt_i(args, id as i64);
+        } else if (*d).variadic && ak == K::Bool {
+            let id: i32 = fnewtmp(f);
+            fs(f, "  %t"); fi(f, id as i64);
+            fs(f, " = zext i1 "); fs(f, operand(f, v, aty)); fs(f, " to i32\n");
+            rt_s(args, "i32 %t");
+            rt_i(args, id as i64);
+        } else if (*d).variadic && (ak == K::I8 || ak == K::U8 || ak == K::Char
+            || ak == K::I16 || ak == K::U16) {
+            let id: i32 = fnewtmp(f);
+            fs(f, "  %t"); fi(f, id as i64);
+            if ak == K::I8 || ak == K::I16 {
+                fs(f, " = sext "); fs(f, llty((*f).cg, aty));
+            } else {
+                fs(f, " = zext "); fs(f, llty((*f).cg, aty));
+            }
+            fs(f, " "); fs(f, operand(f, v, aty)); fs(f, " to i32\n");
+            rt_s(args, "i32 %t");
+            rt_i(args, id as i64);
+        } else {
+            rt_s(args, llty((*f).cg, aty));
+            rt_s(args, " ");
+            rt_s(args, materialize(f, v, aty));
+        }
         arg = (*arg).next;
     }
     let ret: *mut Type = (*d).ty;
@@ -2524,6 +2569,15 @@ fn rt_buf_len(b: *mut Buf) -> usize {
     }
 }
 
+// `@name` as a value: only valid for a global's address (const pointers).
+fn global_addr_val(a: *mut Arena, ty: *mut Type, name: str) -> Val {
+    let mut b: Buf = rt_buf(a);
+    let bp: *mut Buf = &mut b;
+    rt_s(bp, "@");
+    rt_s(bp, name);
+    return v_ssa(ty, rt_view(bp));
+}
+
 fn gen_print(f: *mut Fn, e: *mut Expr) {
     unsafe {
     let arg: *mut Expr = (*e).args;
@@ -2564,6 +2618,16 @@ fn gen_print(f: *mut Fn, e: *mut Expr) {
         }
         fs(f, "  call void @_cx_print_f64(double "); fs(f, wide); fs(f, ")\n");
         (*(*f).cg).used_print_f64 = true;
+        return;
+    }
+    if k == K::CStr {
+        let id: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, id as i64);
+        fs(f, " = call i64 @_cx_cstr_len(ptr "); fs(f, operand(f, v, ty)); fs(f, ")\n");
+        fs(f, "  call void @_cx_print_str(ptr "); fs(f, operand(f, v, ty));
+        fs(f, ", i64 %t"); fi(f, id as i64); fs(f, ")\n");
+        (*(*f).cg).used_cstr_len = true;
+        (*(*f).cg).used_print_str = true;
         return;
     }
     if k == K::Bool {
@@ -2799,8 +2863,15 @@ fn gen_stmt(f: *mut Fn, st: *mut Stmt) {
         } else {
             fbrlbl(f, lend);
         }
-        flabel(f, lend);
-        (*f).terminated = tterm && (*st).els != null && eterm;
+        let both: bool = tterm && (*st).els != null && eterm;
+        // When both arms diverge nothing branches to the merge block. Emitting
+        // its label anyway leaves an empty block that llvm-as rejects, e.g.
+        // `done: if c { return 1; } else { return 2; }` at the end of a
+        // function (see worklogs/semantic-hang).
+        if !both {
+            flabel(f, lend);
+        }
+        (*f).terminated = both;
         return;
     }
     if k == S::While {
@@ -3458,7 +3529,15 @@ fn gen_fn(cg: *mut Cg, d: *mut Decl) {
     let _ = gen_block(fp, (*d).body);
     if !(*fp).terminated {
         if (*ret).kind == K::Void {
-            fs(fp, "  ret void\n");
+            if (*cg).make_entry && !(*cg).hosted && rt_eq((*d).name, "_start") {
+                // Process entry: returning would pop a nonexistent frame, so
+                // fall through to exit(0) exactly like the oracle.
+                fs(fp, "  %e = call i64 @_cx_syscall(i64 60, i64 0, i64 0, i64 0, i64 0, i64 0, i64 0)\n");
+                fs(fp, "  unreachable\n");
+                (*cg).used_syscall = true;
+            } else {
+                fs(fp, "  ret void\n");
+            }
         } else {
             fs(fp, "  unreachable\n");
         }

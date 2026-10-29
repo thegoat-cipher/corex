@@ -8,7 +8,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use corex::diagnostics::SourceFile;
-use corex::driver::{self, BuildConfig, LinkInputs};
+mod common;
+use common::driver::{self, BuildConfig, LinkInputs};
 
 fn lib_dir() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("../lib/corex")

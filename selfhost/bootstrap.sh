@@ -90,6 +90,10 @@ tests/selfhosting/cli.sh "$STAGE1"
 tests/selfhosting/cli.sh "$STAGE2"
 
 echo
+echo "== Language server =="
+python3 tests/selfhosting/lsp.py "$STAGE2"
+
+echo
 echo "== Differential dumps =="
 tests/selfhosting/dump.sh "$STAGE2"
 

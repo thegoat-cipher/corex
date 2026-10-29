@@ -41,6 +41,7 @@ Usage:
   corexc exec    '<source>' [-I <dir>] [--cfg <key>] [--opt <0-3>]
                  [-- <program args>...]
   corexc repl    [--opt <0-3>]
+  corexc lsp     (stdio JSON-RPC language server)
   corexc emit-ir <file.cx | -> [-o <out.ll>] [--verify] [-I <dir>] [--cfg <key>]
   corexc check   <file.cx | -> [-I <dir>] [--cfg <key>]
   corexc fmt     <file.cx | -> [-w | --check]
@@ -55,6 +56,7 @@ Commands:
   run      Compile, then run; exits with the program's status.
   exec     Run source given directly on the command line (no file).
   repl     Interactive session: type code, finish a block with a blank line.
+  lsp      Language server on stdin/stdout (diagnostics, hover, edits).
   emit-ir  Print the generated LLVM 20 IR (--verify assembles it).
   check    Run the frontend only (lex, parse, semantic).
   fmt      Format whitespace; `-w` writes in place, `--check` fails if unformatted.
@@ -617,16 +619,23 @@ fn toml_list(a: *mut Arena, text: str, key: str) -> *mut PathList {
     let kl: usize = len(key);
     let mut i: usize = 0;
     while i < n {
-        let mut ok: bool = i + kl <= n;
+        // Keys may be indented (the oracle parses standard TOML). Skip the
+        // leading blanks before matching; the newline scan below still uses
+        // the unindented line start.
+        let mut l: usize = i;
+        while l < n && (text[l] == 32 || text[l] == 9) {
+            l = l + 1;
+        }
+        let mut ok: bool = l + kl <= n;
         let mut j: usize = 0;
         while ok && j < kl {
-            if text[i + j] != key[j] {
+            if text[l + j] != key[j] {
                 ok = false;
             }
             j = j + 1;
         }
         if ok {
-            let mut k: usize = i + kl;
+            let mut k: usize = l + kl;
             while k < n && (text[k] == 32 || text[k] == 9) {
                 k = k + 1;
             }
@@ -1659,6 +1668,8 @@ fn main(argc: i32, argv: **u8, envp: **u8) -> i32 {
                 return 2;
             }
             return dr_cmd_dump_ast(a, &mut o);
+        } else if rt_cstr_eq(cmd, "lsp") {
+            return lsp_run(a);
         } else if rt_cstr_eq(cmd, "repl") {
             rc = dr_parse(a, argv, argc, 2, false, true, false, false, false, false, true, &mut o);
             if rc != 0 {

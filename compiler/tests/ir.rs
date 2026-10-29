@@ -7,7 +7,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use corex::diagnostics::SourceFile;
-use corex::driver;
+mod common;
+use common::driver;
 
 fn examples() -> Vec<PathBuf> {
     let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("../examples");

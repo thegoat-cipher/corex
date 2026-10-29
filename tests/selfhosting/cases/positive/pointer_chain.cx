@@ -1,0 +1,20 @@
+// Regression: a left-deep `+`/`-` chain must be type-checked once per node.
+//
+// `check_binary` used to pre-check the left operand for pointer arithmetic and
+// then check it again, so every level walked its left subtree twice. 24 terms
+// took 1.6 s and 32 terms did not finish in 20 s; the 64-term chain below must
+// stay linear. `tests/selfhosting/run.sh` wraps `check`/`build` in
+// `timeout 30`, so a return of the exponential shape fails instead of hanging.
+fn main() -> i32 {
+    let sum: i32 = 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1 + 1;
+    let diff: i32 = 100 - 1 - 1 - 1 - 1 - 1 - 1 - 1 - 1 - 1 - 1 - 1 - 1 - 1 - 1 - 1 - 1 - 1 - 1 - 1 - 1 - 1 - 1 - 1 - 1 - 1 - 1 - 1 - 1 - 1 - 1 - 1 - 1;
+    let mut slot: i32 = 7;
+    let p: *mut i32 = &mut slot;
+    unsafe {
+        let ahead: *mut i32 = p + 1;
+        let behind: *mut i32 = p - 1;
+        *p = sum + diff;
+    }
+    print(slot);
+    return 0;
+}
