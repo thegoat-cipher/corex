@@ -712,17 +712,6 @@ fn is_assign_op(k: T) -> bool {
     }
 }
 
-fn stmt_append(head: *mut Stmt, tail: *mut Stmt, s: *mut Stmt) -> *mut Stmt {
-    unsafe {
-    if tail == null {
-        return s;
-    }
-    unsafe { (*tail).next = s; }
-    return tail;
-
-    }
-}
-
 fn parse_block(p: *mut P) -> *mut Stmt {
     unsafe {
     expect(p, T::LBrace);
@@ -1044,16 +1033,6 @@ fn parse_stmt_inner(p: *mut P) -> *mut Stmt {
     unsafe { (*s).expr = e; }
     expect(p, T::Semi);
     return s;
-
-    }
-}
-
-fn expr_append(head: *mut Expr, tail: *mut Expr, e: *mut Expr) -> *mut Expr {
-    unsafe {
-    if tail != null {
-        unsafe { (*tail).next = e; }
-    }
-    return e;
 
     }
 }
@@ -2324,11 +2303,6 @@ fn parse_program_all(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, root: str
 fn parse_program_cfg(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, root: str,
     cfg: *mut PathList, is_root: bool) -> Program {
     return parse_program_all(a, d, srcs, root, null, 0, cfg, is_root);
-}
-
-fn parse_program_opts(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, root: str,
-                      incs: *mut *u8, nincs: i32) -> Program {
-    return parse_program_all(a, d, srcs, root, incs, nincs, null, true);
 }
 
 fn parse_program(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, root: str) -> Program {

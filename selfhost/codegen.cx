@@ -103,13 +103,6 @@ fn fi(f: *mut Fn, v: i64) {
     }
 }
 
-fn fc(f: *mut Fn, c: u8) {
-    unsafe {
-    rt_b((*f).body, c);
-
-    }
-}
-
 fn fnewline(f: *mut Fn) {
     unsafe {
     rt_b((*f).body, 10);
@@ -135,15 +128,6 @@ fn fnewtmp(f: *mut Fn) -> i32 {
     }
 }
 
-fn freg(f: *mut Fn, id: i32) {
-    unsafe {
-    rt_b((*f).body, 37);
-    rt_b((*f).body, 116);
-    rt_i((*f).body, id as i64);
-
-    }
-}
-
 fn flabel(f: *mut Fn, id: i32) {
     unsafe {
     rt_b((*f).body, 76);
@@ -163,23 +147,10 @@ fn fbrlbl(f: *mut Fn, id: i32) {
     }
 }
 
-fn fbrcond(f: *mut Fn, cond: str, tid: i32, fid: i32) {
-    unsafe {
-    fs(f, "  br i1 ");
-    fs(f, cond);
-    fs(f, ", label %L");
-    fi(f, tid as i64);
-    fs(f, ", label %L");
-    fi(f, fid as i64);
-    fnewline(f);
-
-    }
-}
-
 fn ftemp(f: *mut Fn, ty: *mut Type) -> str {
     unsafe {
     let id: i32 = fnewtmp(f);
-    let name: str = ir_name(f, id);
+    let name: str = reg_of(f, id);
     fs_entry(f, name);
     fs_entry(f, " = alloca ");
     fs_entry(f, llty((*f).cg, ty));
@@ -192,18 +163,6 @@ fn ftemp(f: *mut Fn, ty: *mut Type) -> str {
 fn fs_entry(f: *mut Fn, s: str) {
     unsafe {
     rt_s((*f).entry, s);
-
-    }
-}
-
-fn ir_name(f: *mut Fn, id: i32) -> str {
-    unsafe {
-    let mut b: Buf = rt_buf((*(*f).cg).a);
-    let bp: *mut Buf = &mut b;
-    rt_b(bp, 37);
-    rt_b(bp, 116);
-    rt_i(bp, id as i64);
-    return rt_view(bp);
 
     }
 }
@@ -619,7 +578,7 @@ fn gen_vec_field(f: *mut Fn, hdr: str, idx: i32) -> str {
 // aggregates, so `gen_expr` yields a slot address; `gen_addr` covers places.
 fn vec_hdr(f: *mut Fn, e: *mut Expr) -> str {
     unsafe {
-    let mut h: Val = null_val();
+    let mut h: Val = v_void();
     if is_place(e) {
         h = gen_addr(f, e);
     } else {
@@ -670,7 +629,7 @@ fn gen_addr(f: *mut Fn, e: *mut Expr) -> Val {
         return v_addr((*e).ty, var_name(f, (*d).slot));
     }
     if k == E::Field {
-        let mut base: Val = null_val();
+        let mut base: Val = v_void();
         let bt: *mut Type = (*e).opty;
         if is_place((*e).lhs) {
             base = gen_addr(f, (*e).lhs);
@@ -695,7 +654,7 @@ fn gen_addr(f: *mut Fn, e: *mut Expr) -> Val {
         let iv: Val = gen_expr(f, (*e).rhs);
         let idx: str = operand(f, iv, type_new((*(*f).cg).a, K::Usize));
         if (*bt).kind == K::Array {
-            let mut base: Val = null_val();
+            let mut base: Val = v_void();
             if is_place((*e).lhs) {
                 base = gen_addr(f, (*e).lhs);
             } else {
@@ -766,13 +725,6 @@ fn gen_addr(f: *mut Fn, e: *mut Expr) -> Val {
         return v_addr((*e).ty, operand(f, p, (*e).opty));
     }
     return v_const((*e).ty, 0);
-
-    }
-}
-
-fn null_val() -> Val {
-    unsafe {
-    return Val { kind: 2, ty: null, reg: "", is_const: false, ival: 0 };
 
     }
 }
@@ -1413,7 +1365,7 @@ fn gen_expr(f: *mut Fn, e: *mut Expr) -> Val {
         let mut data: str = "";
         let mut blen: str = "";
         if (*bty).kind == K::Array {
-            let mut base: Val = null_val();
+            let mut base: Val = v_void();
             if is_place((*e).lhs) {
                 base = gen_addr(f, (*e).lhs);
             } else {
@@ -2406,13 +2358,6 @@ fn gen_user_call(f: *mut Fn, e: *mut Expr) -> Val {
     }
 }
 
-fn rt_buf_len(b: *mut Buf) -> usize {
-    unsafe {
-    return (*b).len;
-
-    }
-}
-
 // `@name` as a value: only valid for a global's address (const pointers).
 fn global_addr_val(a: *mut Arena, ty: *mut Type, name: str) -> Val {
     let mut b: Buf = rt_buf(a);
@@ -2645,11 +2590,11 @@ fn gen_stmt(f: *mut Fn, st: *mut Stmt) {
         if fld != null && (*fld).bit_width > 0 {
             bits = true;
         }
-        let mut out: Val = null_val();
+        let mut out: Val = v_void();
         if (*st).op == T::Eq {
             out = gen_expr(f, (*st).rhs);
         } else {
-            let mut old: Val = null_val();
+            let mut old: Val = v_void();
             if bits {
                 old = load_bitfield(f, addr.reg, fld);
             } else if is_field {

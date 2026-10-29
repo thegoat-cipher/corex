@@ -191,13 +191,6 @@ fn doc_type(out: *mut Buf, ty: *mut Type) {
     }
 }
 
-fn doc_ty_str(a: *mut Arena, ty: *mut Type) -> str {
-    let mut b: Buf = rt_buf(a);
-    let bp: *mut Buf = &mut b;
-    doc_type(bp, ty);
-    return rt_view(bp);
-}
-
 fn doc_sig(a: *mut Arena, d: *mut Decl) -> str {
     unsafe {
         let mut b: Buf = rt_buf(a);

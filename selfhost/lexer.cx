@@ -161,12 +161,6 @@ fn lx_bump(l: *mut Lex) {
     }
 }
 
-fn lx_error(l: *mut Lex, msg: str) {
-    unsafe {
-        diag_add((*l).d, (*l).a, (*l).file, (*l).line, (*l).col, msg);
-    }
-}
-
 fn lx_errorc(l: *mut Lex, code: str, msg: str) {
     unsafe {
         diag_addc((*l).d, (*l).a, (*l).file, (*l).line, (*l).col, code, msg);

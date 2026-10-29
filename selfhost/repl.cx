@@ -128,14 +128,6 @@ fn repl_is_ident(c: u8) -> bool {
     return (c >= 97 && c <= 122) || (c >= 65 && c <= 90) || (c >= 48 && c <= 57) || c == 95;
 }
 
-fn rs_line_start(src: str, at: usize) -> usize {
-    let mut i: usize = at;
-    while i > 0 && src[i - 1] != 10 {
-        i = i - 1;
-    }
-    return i;
-}
-
 fn rs_item_key(a: *mut Arena, line: str) -> str {
     // Skip `pub`; take the keyword and the following identifier.
     let mut i: usize = 0;

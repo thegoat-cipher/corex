@@ -146,26 +146,6 @@ fn rt_i(b: *mut Buf, value: i64) {
     rt_u(b, value as u64);
 }
 
-fn rt_hex(b: *mut Buf, value: u64) {
-    let mut digits: [u8; 18] = [0; 18];
-    let hexes: [u8; 16] = [48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 97, 98, 99, 100, 101, 102];
-    let mut pos: usize = 16;
-    let mut cur: u64 = value;
-    loop {
-        pos = pos - 1;
-        let nib: usize = (cur & 15) as usize;
-        digits[pos] = hexes[nib];
-        cur = cur >> 4;
-        if cur == 0 {
-            break;
-        }
-    }
-    while pos < 16 {
-        rt_b(b, digits[pos]);
-        pos = pos + 1;
-    }
-}
-
 fn rt_view(b: *mut Buf) -> str {
     unsafe {
         return str_from_raw((*b).data, (*b).len);
@@ -471,14 +451,6 @@ fn rt_env(envp: **u8, key: str) -> cstr {
     return c"";
 }
 
-fn rt_env_or(envp: **u8, key: str, fallback: cstr) -> cstr {
-    let v: cstr = rt_env(envp, key);
-    if cstr_len(v) == 0 {
-        return fallback;
-    }
-    return v;
-}
-
 fn rt_argv(a: *mut Arena, n: i32) -> *mut *u8 {
     let p: *mut u8 = rt_alloc(a, (n as usize + 1) * 8);
     rt_memzero(p, (n as usize + 1) * 8);
@@ -540,18 +512,6 @@ fn rt_read_stdin(a: *mut Arena) -> FileData {
             rt_s(bp, str_from_raw(chunk, r as usize));
         }
         return FileData { data: rt_view(bp), ok: true };
-    }
-}
-
-fn rt_mkdir(path: cstr, mode: i32) -> i32 {
-    unsafe {
-        return syscall(83, path as usize, mode as usize, 0, 0, 0, 0) as i32;
-    }
-}
-
-fn rt_rmdir(path: cstr) -> i32 {
-    unsafe {
-        return syscall(84, path as usize, 0, 0, 0, 0, 0) as i32;
     }
 }
 
@@ -652,17 +612,6 @@ const F64_MAXDIG: i32 = 1024;
 struct Big {
     n: i32,
     v: [u32; 192],
-}
-
-fn bn_zero(b: *mut Big) {
-    unsafe {
-        (*b).n = 0;
-        let mut i: i32 = 0;
-        while i < 192 {
-            (*b).v[i as usize] = 0;
-            i = i + 1;
-        }
-    }
 }
 
 fn bn_mul_add(b: *mut Big, m: u32, add: u32) {

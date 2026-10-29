@@ -307,17 +307,6 @@ fn prog_init() -> Program {
         module_name: "", deps: null };
 }
 
-fn prog_add(p: *mut Program, it: *mut Item) {
-    unsafe {
-        if (*p).items_tail == null {
-            (*p).items = it;
-        } else {
-            (*(*p).items_tail).next = it;
-        }
-        (*p).items_tail = it;
-    }
-}
-
 fn srcs_new() -> SrcList {
     return SrcList { head: null, tail: null, count: 0 };
 }

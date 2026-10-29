@@ -39,13 +39,6 @@ fn sdiagc(s: *mut Sem, code: str, file: i32, line: i32, col: i32, msg: str) {
     }
 }
 
-fn tkind_of(t: *mut Type) -> K {
-    unsafe {
-    return (*t).kind;
-
-    }
-}
-
 fn type_is_int(t: *mut Type) -> bool {
     unsafe {
     if t == null {
