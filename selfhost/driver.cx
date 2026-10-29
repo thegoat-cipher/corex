@@ -196,10 +196,6 @@ fn dr_need(a: *mut Arena, argv: **u8, argc: i32, i: i32, flag: str) -> cstr {
     }
 }
 
-fn dr_is_num(s: cstr, v: str) -> bool {
-    return rt_cstr_eq(s, v);
-}
-
 // Parse options from argv[start..argc]. The `allow_*` switches decide which
 // flags are legal for the command, so `check --opt 2` is a usage error rather
 // than a silently ignored flag.
@@ -694,17 +690,6 @@ fn manifest_read(a: *mut Arena, dir: str) -> FileData {
     }
 }
 
-fn manifest_sources(a: *mut Arena, dir: str) -> *mut PathList {
-    unsafe {
-    let fd: FileData = manifest_read(a, dir);
-    if !fd.ok {
-        return null;
-    }
-    return toml_sources(a, fd.data);
-
-    }
-}
-
 // Build every source listed in `<dir>/corex.toml` as one program. Each source
 // keeps its own `module` prefix.
 fn dr_manifest(a: *mut Arena, dir: str, d: *mut Diags, srcs: *mut SrcList,
@@ -774,12 +759,6 @@ fn dr_report_count(a: *mut Arena, d: *mut Diags) {
             rt_s(bp, " errors generated\n");
         }
         dr_err(rt_view(bp));
-    }
-}
-
-fn dr_front(a: *mut Arena, path: cstr, d: *mut Diags, srcs: *mut SrcList) -> Program {
-    unsafe {
-        return parse_program(a, d, srcs, rt_cstr_str(path as *u8));
     }
 }
 
