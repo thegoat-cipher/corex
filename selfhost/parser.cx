@@ -2300,15 +2300,6 @@ fn parse_program_all(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, root: str
     }
 }
 
-fn parse_program_cfg(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, root: str,
-    cfg: *mut PathList, is_root: bool) -> Program {
-    return parse_program_all(a, d, srcs, root, null, 0, cfg, is_root);
-}
-
-fn parse_program(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, root: str) -> Program {
-    return parse_program_cfg(a, d, srcs, root, null, true);
-}
-
 // Parse source text that has no file (`-` and `exec`). Diagnostics name the
 // synthetic file; relative `import`s resolve against the working directory.
 fn parse_program_text_all(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, name: str,
