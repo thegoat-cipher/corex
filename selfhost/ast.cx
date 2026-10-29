@@ -172,8 +172,6 @@ struct Item {
 struct Program {
     items: *mut Item,
     items_tail: *mut Item,
-    decls: *mut Decl,
-    decls_tail: *mut Decl,
     module_name: str,
     deps: *mut PathList,
 }
@@ -303,8 +301,7 @@ fn item_new(a: *mut Arena, kind: I, d: *mut Decl, tok: *mut Tok) -> *mut Item {
 }
 
 fn prog_init() -> Program {
-    return Program { items: null, items_tail: null, decls: null, decls_tail: null,
-        module_name: "", deps: null };
+    return Program { items: null, items_tail: null, module_name: "", deps: null };
 }
 
 fn srcs_new() -> SrcList {
