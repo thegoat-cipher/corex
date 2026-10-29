@@ -268,7 +268,64 @@ repro-opt: opt1 0f6bd235…, opt2 eda405ad…, opt3 58067778…
 
 ### Remaining blockers
 
-SH-033 (threads/atomics/volatile/TLS/inline asm), SH-034 (`lib/corex` 13/16),
-SH-037 (LSP/line editor), SH-039 (full 205-test port), SH-043 (remote push/CI),
-SH-044 (P3 cleanup not merged), SH-046 (full acceptance). These are scope
-blockers, not defects in the fixed tree.
+Pre-blocked-work snapshot: SH-033/SH-034/SH-037/SH-044 were subsequently
+completed; SH-039, SH-043, and SH-046 remain blocked per §8.
+
+## 8. Blocked-work follow-up (2026-10-29)
+
+All remaining blockers were assigned to dedicated workstreams and independently
+re-verified.
+
+### Completed
+
+- **SH-033:** volatile globals/places, `volatile_load`/`volatile_store`, 12
+  atomic builtins, inline `asm`, TLS/thread library runtime. `concurrency.sh`
+  33/33 across `--opt 0..3` and the Rust oracle.
+- **SH-034:** all 16 `lib/corex` modules build with both compilers
+  (`lib.sh` 16/16).
+- **SH-037:** `selfhost/lsp.cx` implements initialize/shutdown, document sync +
+  publishDiagnostics, hover, definition, references, rename, completion, and
+  formatting; `lsp.py` 35/35, gated by bootstrap/CI.
+- **SH-044:** P3 cleanup re-applied on the integrated tree: 71 redundant nested
+  `unsafe` wrappers, 20 dead helpers, `Program.decls`/`decls_tail`, orphaned
+  parser wrappers. 534 functions / 17,236 lines; behavior unchanged.
+
+### New defect found and fixed
+
+The SH-039 harness exposed an exponential `check_binary` hang (32+ term
+`1+1+…` expressions; `type_ok <- ck <- check_binary <- check_expr`). The left
+subtree was type-checked twice: once in the pointer-arithmetic precheck and
+again in the normal path. `check_binary` now checks each operand once and
+`behavior.py` enforces a per-process timeout. A 64-term expression now checks
+in 0.10 s and a regression is in the corpus.
+
+### Still blocked
+
+- **SH-039:** 126 passed / 9 failed / 70 blocked / 0 timeout over 205 rows.
+  The 68 `--lib` tests are Rust-internal; the 9 divergences are static
+  function-pointer/`str` tables, compound/designated literals, oracle IR text,
+  builder temp-dir internals, `load_source` spans, and private-item prose.
+  Evidence in `semantic-hang.md`. AC-4 remains blocked.
+- **SH-043:** push attempted from integrated `main`; HTTPS has no askpass and
+  SSH has no key, so remote CI has not run.
+- **SH-046:** depends on SH-039 and SH-043.
+
+### Final verified gates
+
+```text
+check: ok: 534 function(s), entry `main`; 17,236 lines
+stage1 96f1ef30e68a682ba38fadbc31f15bb7befadcfb884d338a00176bf3f3f87b3d
+stage2 f3e770a3c88e66a05494bea7e3a9dcaf405acec63c30e2bf9f4e0ad9c8ad3c71
+stage3 f3e770a3c88e66a05494bea7e3a9dcaf405acec63c30e2bf9f4e0ad9c8ad3c71
+stage4 f3e770a3c88e66a05494bea7e3a9dcaf405acec63c30e2bf9f4e0ad9c8ad3c71
+selfhosting tests: 270 passed, 0 failed (Stage 1/2/3)
+cli tests: 80 passed, 0 failed
+lsp tests: 35 passed, 0 failed
+dump tests: 81 passed, 0 failed
+fuzz tests: 330 passed, 0 failed; ASan: enabled
+concurrency tests: 33 passed, 0 failed
+lib tests: 16 passed, 0 failed
+cargo test: 205 passed, 0 failed
+behavior: 126 passed, 9 failed, 70 blocked, 0 timeout (205 rows)
+repro-opt: e3e6335e.../9af3b41a.../51c025a0... (full hashes in bootstrap-results)
+```

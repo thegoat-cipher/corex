@@ -58,10 +58,10 @@ behaviour suite is `tests/selfhosting/behavior.py` (205 rows:
 | SH-040 | Memory validation and fuzzing | COMPLETED | 330/330 ASan/fuzz; ASan required in CI; no signals |
 | SH-041 | Performance baseline | COMPLETED | Integrated table in `bootstrap-results.md` §3 (self-compile and frontend/RSS) |
 | SH-042 | Reproducibility at `--opt 1..3` | COMPLETED | `repro-opt.sh`; opt1 `e3e6335e…`, opt2 `9af3b41a…`, opt3 `51c025a0…` |
-| SH-043 | Commit/push and remote CI validation | NOT STARTED | Local commits only; remote push/CI not run |
+| SH-043 | Commit/push and remote CI validation | BLOCKED | Push attempted from integrated main: HTTPS rejected (`could not read Username`; no askpass), SSH rejected (`Permission denied (publickey)`). Remote CI has not run. |
 | SH-044 | Bootstrap code cleanup/review | COMPLETED | Reapplied on the integrated tree by `room/corex-cleanup-blockers-ppaf` in four commits (`33a8094` unsafe unwrap, `fa135cb` dead helpers/merges, `c53a580` `Program` fields, `8320b92` `parse_program` cutover), rebased onto `b53be92`. 558 → 534 functions, 17,653 → 17,236 lines (pre-tooling-merge tree 487 → 463 / 15,787 → 15,370). Gates unchanged: 270/80/35/81/330/33/16, 205 `cargo test`, 8/8 examples; Stage 2/3/4 `f3e770a3…`. Details in `worklogs/p3.md` |
 | SH-045 | Documentation maintenance | COMPLETED | P0/P1/P2/P3 worklogs plus `worklogs/sh033-034.md`; this tracker, `master.md`, results/validation |
-| SH-046 | Full self-hosting acceptance (AC-1…AC-9) | BLOCKED | Depends on SH-037, SH-039, SH-043 |
+| SH-046 | Full self-hosting acceptance (AC-1…AC-9) | BLOCKED | Depends on SH-039 (126/9/70/0) and SH-043 (credentials); SH-037 is complete |
 
 ## Final gate evidence
 

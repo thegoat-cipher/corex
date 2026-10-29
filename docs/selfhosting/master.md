@@ -87,7 +87,7 @@ Stage 2/3/4 are byte-identical. Stage 1 is Rust-compiled and differs by design
 
 See `tasks.md`. Outstanding: **SH-039** (full Rust suite against `corexc`:
 126/205 rows pass, 9 diverge, 70 are blocked with reasons), **SH-043** (remote
-push/CI), **SH-044** (P3 cleanup not merged), **SH-046** (full acceptance).
+push/CI blocked by missing GitHub credentials), **SH-046** (full acceptance).
 
 ## 5. Blockers
 
@@ -98,10 +98,9 @@ push/CI), **SH-044** (P3 cleanup not merged), **SH-046** (full acceptance).
   builder temp-dir internals, `driver::load_source` multi-file spans, and the
   private-item diagnostic prose. They are listed with evidence in
   `worklogs/semantic-hang.md`.
-- SH-043: commits are local; remote CI has not run.
-- SH-044: P3 cleanup commits conflict with the much larger integrated branches;
-  they are non-functional and were not merged.
-- SH-046: AC-1…AC-9 cannot complete until the above are resolved.
+- SH-043: both HTTPS and SSH push attempts were rejected (no credential
+  helper/askpass and no SSH key), so remote CI has not run.
+- SH-046: AC-1…AC-9 cannot complete until SH-039 and SH-043 resolve.
 
 ## 6. Architectural decisions
 

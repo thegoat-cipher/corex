@@ -256,29 +256,29 @@ Results and caveats: [`docs/benchmarks.md`](docs/benchmarks.md).
 ## Self-hosting
 
 A CoreX-written bootstrap compiler lives in `selfhost/`. It compiles its own
-source (15,228 lines across 14 files, 474 functions), emits LLVM 20 textual IR
+source (17,236 lines across 14 files, 534 functions), emits LLVM 20 textual IR
 through external `llvm-as`/`llc`/`cc`, and produces a freestanding static
 x86-64 ELF. Stage 1 is built by the Rust compiler; Stage 2 builds itself and
 Stage 3 rebuilds it. **Stage 2, Stage 3, and Stage 4 are byte-identical**
-(`sha256 c33aff55…`) under `--opt 0` with LLVM 20.1.8 and cc 15.2.0.
+(`sha256 f3e770a3…`) under `--opt 0` with LLVM 20.1.8 and cc 15.2.0.
 `selfhost/repro-opt.sh --corpus` verifies determinism and the self-fixed point
 at `--opt 1..3`.
 
 ```sh
-selfhost/bootstrap.sh              # Stage 1-4, corpus, CLI, dumps, fuzz, perf
+selfhost/bootstrap.sh              # Stage 1-4, corpus, CLI, LSP, dumps, fuzz, perf
 selfhost/repro-opt.sh --corpus     # optimized self-build gate
 tests/selfhosting/run.sh build/stage2/corexc
 ```
 
 The bootstrap now covers floats, function types/pointers, `for`/`do`/labels/
-`goto`, unions/bitfields/packed layout, file modules and manifests, macros,
-C `extern`/variadics, static aggregates, checked division, IO builtins, and
-diagnostic codes. It still has no threads/atomics/`volatile`/TLS/inline asm, no
-LSP/line-editor parity, and rejects `-g` because it emits no DWARF. Module
-builds are whole-program rather than separate-object. `examples/features.cx`
-still fails on float compound assignment; the other seven examples match.
-Rust `corex` remains the full-language Stage 0 reference. Details:
-`docs/selfhosting/master.md`,
+`goto`, unions/bitfields/packed layout, modules/manifests, macros, C
+`extern`/variadics, static aggregates, checked division, IO builtins,
+threads/atomics/`volatile`/TLS/inline asm, an LSP server, and diagnostic codes.
+All 16 `lib/corex` modules build. `examples/*.cx` all match the Rust oracle at
+`--opt 0..3`. It still rejects `-g` (no DWARF), and the parameterized 205-test
+Rust suite reports 126 passed / 9 divergent / 70 Rust-internal tests blocked;
+module builds remain whole-program. Rust `corex` remains the full-language
+Stage 0 reference. Details: `docs/selfhosting/master.md`,
 `bootstrap-results.md`, `validation-report.md`, and `tasks.md`.
 
 ## Repository layout
@@ -321,7 +321,7 @@ compiler/
     stdlib.rs           allocator, memory/strings, files, formatting, time, math
     concurrency.rs      atomics, volatile, asm, threads, futex, TLS
     tooling.rs          fmt/lint/doc/test, DWARF, sanitizers, LSP
-selfhost/               CoreX-written bootstrap compiler (14 files, 15,228 lines)
+selfhost/               CoreX-written bootstrap compiler (14 files, 17,236 lines)
 tests/selfhosting/      bootstrap corpus and differential harness
 lib/corex/              freestanding standard library modules
 examples/               hello, factorial, pointers, loop_sum, features, compiler_data,

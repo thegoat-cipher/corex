@@ -29,9 +29,12 @@ command. Timestamps are UTC on the working date.
 | REQ-SH-020 | 2026-10-28 | Spawn a master auditor for all P0–P3 claims | User "create a master auditor to audit all P0-P3" | Master orchestrator | SH-046 | Independent audit worktree; report in `worklogs/master-audit.md` |
 | REQ-SH-021 | 2026-10-28 | Fix all master-audit findings (F-01…F-15), including F-07 labels that follow other statements in dead blocks/ifs/loops/switch arms, then reconcile current-state docs and CI | Audit verification follow-up | Audit fixer | SH-001…046 | Stage 1 `f4192f40…`; Stage 2/3/4 `c33aff55…`; 249 checks × Stage 1/2/3; CLI 80; dumps 75; fuzz/ASan 327; examples 8/8; `lib/corex` 13/16; `repro-opt` opt1 `0f6bd235…`, opt2 `eda405ad…`, opt3 `58067778…` |
 | REQ-SH-022 | 2026-10-29 | Implement the remaining concurrency surface (SH-033) and build all 16 `lib/corex` modules (SH-034), with permanent tests and docs | Concurrency workstream | Concurrency workstream | SH-033, SH-034 | Stage 1 `926ecdec…`; Stage 2/3/4 `dcccb0e0…`; 266 checks × Stage 1/2/3; CLI 80; dumps 79; fuzz/ASan 329; concurrency 33; `lib/corex` 16/16; see `worklogs/sh033-034.md` |
+| REQ-SH-023 | 2026-10-29 | Port the LSP server and parameterize the Rust behaviour suite; fix the 32+ term `check_binary` hang and bound the harness | Blocked-work workstream | Tooling workstream | SH-037, SH-039 | LSP 35/35; behavior 126 passed/9 failed/70 blocked/0 timeout; 64-term check 0.10 s; Stage 2/3/4 `4739e03e…` pre-cleanup |
+| REQ-SH-024 | 2026-10-29 | Reapply the P3 cleanup on the integrated compiler | Blocked-work workstream | Cleanup workstream | SH-044 | Four commits, 71 unsafe wrappers, 20 dead helpers, `Program` fields, parser cutover; 534 functions/17,236 lines; Stage 2/3/4 `f3e770a3…`; gates unchanged |
+| REQ-SH-025 | 2026-10-29 | Push integrated main and validate remote CI | User "attempt all still blocked" | Master orchestrator | SH-043 | Attempted HTTPS and SSH pushes; both rejected (no askpass/credential helper, no SSH key). Remote CI not run; local gates green. |
 
 ## Open items
 
-Outstanding after integration: SH-037 (LSP/editor), SH-039 (full 205-test port),
-SH-043 (remote push/CI), SH-044 (P3 cleanup not merged), SH-046 (full
-acceptance). Details and evidence are in `tasks.md`.
+Outstanding: SH-039 (126 passed/9 failed/70 blocked/0 timeout over 205 rows),
+SH-043 (push blocked by missing GitHub credentials), SH-046 (acceptance).
+SH-033/034/037/044 are complete. Details and evidence are in `tasks.md`.
