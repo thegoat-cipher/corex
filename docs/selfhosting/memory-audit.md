@@ -141,9 +141,9 @@ there is no long-lived leak surface.
 ## 9. Verification evidence
 
 - `selfhost/bootstrap.sh`: Stage 2 == Stage 3 == Stage 4; three corpus runs.
-- 249 checks per compiler stage, 747 total on Stage 1/2/3; all pass.
-- 327 fuzz/ASan checks: 215 unsanitized (13 checked-in fuzz inputs, 2 generated,
-  200 mutants) plus 112 ASan (2 self-host checks, 37 positive cases, 13 fuzz
+- 266 checks per compiler stage, 798 total on Stage 1/2/3; all pass.
+- 329 fuzz/ASan checks: 215 unsanitized (13 checked-in fuzz inputs, 2 generated,
+  200 mutants) plus 114 ASan (2 self-host checks, 39 positive cases, 13 fuzz
   inputs, 60 mutants); no signals or sanitizer reports.
 - Arena stress: 128 × 32-byte blocks, patterns verified, `used = 4096`.
 - Struct-size parity between Rust Stage 0 and Stage 1 binaries.

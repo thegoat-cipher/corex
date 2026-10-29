@@ -108,17 +108,25 @@ Supported:
 - `let`, assignment, compound assignment, `if/else`, `while`, `loop`, `for`,
   `do while`, `break`, `continue`, `return`, `unsafe`, bare blocks, `switch`
   with fallthrough, `name:` labels and `goto`;
+- `static mut volatile` globals (volatile loads/stores for every access),
+  `volatile_load`/`volatile_store`, the twelve atomic builtins
+  (`atomic_load[_relaxed]`, `atomic_store[_relaxed]`,
+  `atomic_fetch_{add,sub,and,or,xor}`, `atomic_xchg`, `atomic_cas`,
+  `atomic_fence`), and inline `asm(template[, constraints[, operands...]])`
+  with `unsafe` gating;
 - expression macros, `#[cfg(...)]` attributes (`all`/`any`/`not` and explicit
   `--cfg` keys; `target_os=linux`, `target_arch=x86_64`, and `sanitize=true`
   when active are built in);
 - `import "file"` textual inclusion with relative/absolute paths;
-- `module`/`mod` units, `corex.toml` manifests, `mod$item` mangling, and `pub`
-  visibility enforced in semantic analysis;
+- `module`/`mod` units, `corex.toml` manifests, `mod$item` mangling, `pub`
+  visibility enforced in semantic analysis, and `mod` lookup through every
+  `-I` directory (`name.cx` and `name/mod.cx`);
 - `extern "C"` declarations, variadics, `--hosted`, `--shared`,
   `--emit obj|shared|staticlib`, and `--link`/`-L`/`-l`;
 - builtins: `print`, `len`, `syscall`, `alloc`, `free`, `assert`, `panic`,
   `data_ptr`, `str_from_raw`, `cstr_len`, `cstr_to_str`, `str_to_cstr`,
-  `vec_new`, `vec_push`, `vec_free`, `vec_slice`, `read_file`, `write_file`;
+  `vec_new`, `vec_push`, `vec_free`, `vec_slice`, `read_file`, `write_file`,
+  `asm`, the atomic builtins, `volatile_load`, and `volatile_store`;
 - sizes/layout: natural C layout (plus packed/`align`/union/bitfield rules),
   `str` and `[T]` = `{ ptr, i64 }`, `vec<T>` = `{ ptr, i64, i64 }`
   (24 bytes, align 8), enum = `i32`, arrays inline.
@@ -126,7 +134,6 @@ Supported:
 Intentionally unsupported in the bootstrap (rejected):
 
 - `match`, payload enums, generics beyond `vec<T>`, closures, traits;
-- threads, atomics, `volatile`, TLS, and inline asm (SH-033);
 - DWARF debug info (`-g`), LSP/line-editor parity (SH-037), and generated
   module interface files (modules are whole-program);
 - static initializers for aggregates whose layout is not plain (E0226).
@@ -225,9 +232,10 @@ emits no DWARF.
 3. Stage 2 builds Stage 3.
 4. `sha256(stage2) == sha256(stage3)` and `sha256(stage3) == sha256(stage4)`.
 5. `tests/selfhosting/run.sh` passes against Stage 1, Stage 2, and Stage 3
-   (249 checks: positive cases at `--opt 0..3`, negative cases, module
-   projects, FFI, and abort cases). `cli.sh`, `dump.sh`, and `fuzz.sh` add
-   CLI, differential, and sanitizer coverage.
+   (266 checks: positive cases at `--opt 0..3`, negative cases, module
+   projects, FFI, and abort cases). `cli.sh`, `dump.sh`, `fuzz.sh`,
+   `concurrency.sh`, and `lib.sh` add CLI, differential, sanitizer,
+   concurrency-runtime, and `lib/corex` matrix coverage.
 6. Every `build` in the harness is implicitly validated by `llvm-as`; the
    harness runs each case at `--opt 0,1,2,3`.
 7. Every negative case asserts a diagnostic code and matches the Rust oracle.
@@ -246,8 +254,10 @@ emits no DWARF.
   are not lowered to byte constants yet.
 - `vec` constants and globals are rejected (`vec_new` needs a runtime call);
   vec headers copy shallowly and ownership is manual, per the language spec.
-- Threads, atomics, `volatile`, TLS, and inline asm are not implemented
-  (SH-033); LSP/line-editor parity and DWARF (`-g`) are also absent.
+- Threads/TLS are library-level (`std_thread`/`std_tls`); TLS is an explicit
+  table keyed by `gettid`, there is no language-level `thread_local`, and
+  there is no thread join. Inline-asm constraints are passed to LLVM verbatim.
+- LSP/line-editor parity and DWARF (`-g`) are absent.
 - Modules are built as one whole program; visibility is enforced in semantic
   analysis rather than through generated interface files.
 - The compiler is single-threaded and allocates from one arena per process.

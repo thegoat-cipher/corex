@@ -1,0 +1,29 @@
+// Every atomic builtin, byte-sized bool atomics (the bootstrap represents
+// bool as i1), and pointer atomics. Expected output matches the Rust oracle.
+fn main() -> i32 {
+    unsafe {
+        let mut x: u32 = 10;
+        print(atomic_load_relaxed(&x));
+        atomic_store_relaxed(&mut x, 20);
+        print(x);
+        print(atomic_fetch_sub(&mut x, 3));
+        print(x);
+        print(atomic_fetch_and(&mut x, 15));
+        print(x);
+        print(atomic_fetch_xor(&mut x, 7));
+        print(x);
+        print(atomic_xchg(&mut x, 9));
+        print(x);
+        atomic_fence();
+        let mut b: bool = false;
+        print(atomic_load(&b));
+        atomic_store(&mut b, true);
+        print(b);
+        print(atomic_cas(&mut b, true, false));
+        print(b);
+        let mut p: *mut u8 = null;
+        print(atomic_xchg(&mut p, null) == null);
+        print(atomic_load(&p) == null);
+    }
+    return 0;
+}

@@ -1,0 +1,4 @@
+fn main() -> i32 {
+    asm("nop", "");
+    return 0;
+}

@@ -655,6 +655,42 @@ fn store_val(f: *mut Fn, addr: str, v: Val, ty: *mut Type) {
     }
 }
 
+fn load_volatile(f: *mut Fn, addr: str, ty: *mut Type) -> Val {
+    unsafe {
+    unsafe {
+    if is_agg(ty) {
+        return v_addr(ty, addr);
+    }
+    let id: i32 = fnewtmp(f);
+    fs(f, "  %t"); fi(f, id as i64);
+    fs(f, " = load volatile "); fs(f, llty((*f).cg, ty));
+    fs(f, ", ptr "); fs(f, addr); fnewline(f);
+    return v_ssa(ty, reg_of(f, id));
+
+    }
+
+    }
+}
+
+fn store_volatile(f: *mut Fn, addr: str, v: Val, ty: *mut Type) {
+    unsafe {
+    unsafe {
+    if is_agg(ty) {
+        let op: str = materialize(f, v, ty);
+        fs(f, "  store volatile "); fs(f, llty((*f).cg, ty));
+        fs(f, " "); fs(f, op);
+        fs(f, ", ptr "); fs(f, addr); fnewline(f);
+    } else {
+        fs(f, "  store volatile "); fs(f, llty((*f).cg, ty));
+        fs(f, " "); fs(f, operand(f, v, ty));
+        fs(f, ", ptr "); fs(f, addr); fnewline(f);
+    }
+
+    }
+
+    }
+}
+
 fn alloca_slot(f: *mut Fn, d: *mut Decl) -> str {
     unsafe {
     unsafe {
@@ -1473,6 +1509,9 @@ fn gen_expr(f: *mut Fn, e: *mut Expr) -> Val {
             return v_const((*d).ty, (*d).cval);
         }
         let a: Val = gen_addr(f, e);
+        if (*e).is_volatile {
+            return load_volatile(f, a.reg, (*e).ty);
+        }
         return load_val(f, a.reg, (*e).ty);
     }
     if k == E::Path {
@@ -1488,6 +1527,9 @@ fn gen_expr(f: *mut Fn, e: *mut Expr) -> Val {
         }
         if d != null && (*d).kind == D::Global {
             let a: Val = gen_addr(f, e);
+            if (*e).is_volatile {
+                return load_volatile(f, a.reg, (*e).ty);
+            }
             return load_val(f, a.reg, (*e).ty);
         }
         return v_const((*e).ty, (*e).index as i64);
@@ -1742,6 +1784,246 @@ fn gen_indirect_call(f: *mut Fn, e: *mut Expr) -> Val {
     }
 }
 
+// Write a quoted LLVM string constant to the function body. Bytes outside
+// printable ASCII, quotes, and backslashes use LLVM `\XX` hex escapes, which
+// also encodes the newlines in multi-line inline-asm templates.
+fn fq(f: *mut Fn, s: str) {
+    unsafe {
+    rt_b((*f).body, 34);
+    let n: usize = len(s);
+    let mut i: usize = 0;
+    while i < n {
+        let c: u8 = s[i];
+        if c == 34 || c == 92 || c < 32 || c >= 127 {
+            add_hex_byte((*f).body, c);
+        } else {
+            rt_b((*f).body, c);
+        }
+        i = i + 1;
+    }
+    rt_b((*f).body, 34);
+
+    }
+}
+
+fn gen_asm(f: *mut Fn, e: *mut Expr) -> Val {
+    unsafe {
+    let args: *mut Expr = (*e).args;
+    let mut skip: i32 = 1;
+    if args != null {
+        let second: *mut Expr = (*args).next;
+        if second != null {
+            let k1: E = (*second).kind;
+            if k1 == E::StrLit || k1 == E::CStrLit {
+                skip = 2;
+            }
+        }
+    }
+    let mut ab: Buf = rt_buf((*(*f).cg).a);
+    let ap: *mut Buf = &mut ab;
+    let mut arg: *mut Expr = args;
+    let mut i: i32 = 0;
+    while arg != null {
+        if i >= skip {
+            let v: Val = gen_expr(f, arg);
+            if (*ap).len > 0 {
+                rt_s(ap, ", ");
+            }
+            rt_s(ap, llty((*f).cg, (*arg).ty));
+            rt_s(ap, " ");
+            rt_s(ap, operand(f, v, (*arg).ty));
+        }
+        i = i + 1;
+        arg = (*arg).next;
+    }
+    let ty: *mut Type = (*e).ty;
+    if ty != null && (*ty).kind == K::Void {
+        fs(f, "  call void asm sideeffect ");
+        fq(f, (*e).text);
+        fs(f, ", ");
+        fq(f, (*e).sfield);
+        fs(f, "(");
+        fs(f, rt_view(ap));
+        fs(f, ")\n");
+        return v_void();
+    }
+    let d: i32 = fnewtmp(f);
+    fs(f, "  %t"); fi(f, d as i64);
+    fs(f, " = call ");
+    fs(f, llty((*f).cg, ty));
+    fs(f, " asm sideeffect ");
+    fq(f, (*e).text);
+    fs(f, ", ");
+    fq(f, (*e).sfield);
+    fs(f, "(");
+    fs(f, rt_view(ap));
+    fs(f, ")\n");
+    return v_ssa(ty, reg_of(f, d));
+
+    }
+}
+
+fn gen_atomic(f: *mut Fn, e: *mut Expr, bid: i32) -> Val {
+    unsafe {
+    let arg0: *mut Expr = (*e).args;
+    if bid == 20 || bid == 21 || bid == 32 {
+        let pv: Val = gen_expr(f, arg0);
+        let pt: *mut Type = (*arg0).ty;
+        let pointee: *mut Type = (*pt).elem;
+        let is_bool: bool = (*pointee).kind == K::Bool;
+        let id: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, id as i64);
+        fs(f, " = load ");
+        if bid == 32 {
+            fs(f, "volatile ");
+        } else {
+            fs(f, "atomic ");
+        }
+        if is_bool && bid != 32 {
+            fs(f, "i8");
+        } else {
+            fs(f, llty((*f).cg, pointee));
+        }
+        fs(f, ", ptr ");
+        fs(f, operand(f, pv, pt));
+        if bid == 20 {
+            fs(f, " seq_cst");
+        } else if bid == 21 {
+            fs(f, " monotonic");
+        }
+        fs(f, ", align ");
+        fi(f, type_align((*(*f).cg).sem, pointee) as i64);
+        fnewline(f);
+        if is_bool && bid != 32 {
+            let b: i32 = fnewtmp(f);
+            fs(f, "  %t"); fi(f, b as i64);
+            fs(f, " = trunc i8 %t"); fi(f, id as i64);
+            fs(f, " to i1"); fnewline(f);
+            return v_ssa(pointee, reg_of(f, b));
+        }
+        return v_ssa(pointee, reg_of(f, id));
+    }
+    if bid == 22 || bid == 23 || bid == 33 {
+        let pv: Val = gen_expr(f, arg0);
+        let val: Val = gen_expr(f, (*arg0).next);
+        let pointee: *mut Type = val.ty;
+        let is_bool: bool = (*pointee).kind == K::Bool;
+        let is_atomic_store: bool = bid != 33;
+        let mut ty_str: str = llty((*f).cg, pointee);
+        let mut vop: str = operand(f, val, pointee);
+        if is_bool && is_atomic_store {
+            let w: i32 = fnewtmp(f);
+            fs(f, "  %t"); fi(f, w as i64);
+            fs(f, " = zext i1 "); fs(f, vop); fs(f, " to i8"); fnewline(f);
+            vop = reg_of(f, w);
+            ty_str = "i8";
+        }
+        fs(f, "  store ");
+        if bid == 33 {
+            fs(f, "volatile ");
+        } else {
+            fs(f, "atomic ");
+        }
+        fs(f, ty_str);
+        fs(f, " ");
+        fs(f, vop);
+        fs(f, ", ptr ");
+        fs(f, operand(f, pv, (*arg0).ty));
+        if bid == 22 {
+            fs(f, " seq_cst");
+        } else if bid == 23 {
+            fs(f, " monotonic");
+        }
+        fs(f, ", align ");
+        fi(f, type_align((*(*f).cg).sem, pointee) as i64);
+        fnewline(f);
+        return v_void();
+    }
+    if bid >= 24 && bid <= 29 {
+        let pv: Val = gen_expr(f, arg0);
+        let val: Val = gen_expr(f, (*arg0).next);
+        let pointee: *mut Type = val.ty;
+        let is_bool: bool = (*pointee).kind == K::Bool;
+        let mut op: str = "add";
+        if bid == 25 { op = "sub"; }
+        if bid == 26 { op = "and"; }
+        if bid == 27 { op = "or"; }
+        if bid == 28 { op = "xor"; }
+        if bid == 29 { op = "xchg"; }
+        let mut ty_str: str = llty((*f).cg, pointee);
+        let mut vop: str = operand(f, val, pointee);
+        if is_bool {
+            let w: i32 = fnewtmp(f);
+            fs(f, "  %t"); fi(f, w as i64);
+            fs(f, " = zext i1 "); fs(f, vop); fs(f, " to i8"); fnewline(f);
+            vop = reg_of(f, w);
+            ty_str = "i8";
+        }
+        let id: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, id as i64);
+        fs(f, " = atomicrmw "); fs(f, op);
+        fs(f, " ptr "); fs(f, operand(f, pv, (*arg0).ty));
+        fs(f, ", "); fs(f, ty_str);
+        fs(f, " "); fs(f, vop);
+        fs(f, " seq_cst"); fnewline(f);
+        if is_bool {
+            let b: i32 = fnewtmp(f);
+            fs(f, "  %t"); fi(f, b as i64);
+            fs(f, " = trunc i8 %t"); fi(f, id as i64);
+            fs(f, " to i1"); fnewline(f);
+            return v_ssa(pointee, reg_of(f, b));
+        }
+        return v_ssa(pointee, reg_of(f, id));
+    }
+    if bid == 30 {
+        let pv: Val = gen_expr(f, arg0);
+        let expected: Val = gen_expr(f, (*arg0).next);
+        let newv: Val = gen_expr(f, (*(*arg0).next).next);
+        let pointee: *mut Type = expected.ty;
+        let is_bool: bool = (*pointee).kind == K::Bool;
+        let mut ty_str: str = llty((*f).cg, pointee);
+        let mut eop: str = operand(f, expected, pointee);
+        let mut nop: str = operand(f, newv, pointee);
+        if is_bool {
+            let we: i32 = fnewtmp(f);
+            fs(f, "  %t"); fi(f, we as i64);
+            fs(f, " = zext i1 "); fs(f, eop); fs(f, " to i8"); fnewline(f);
+            eop = reg_of(f, we);
+            let wn: i32 = fnewtmp(f);
+            fs(f, "  %t"); fi(f, wn as i64);
+            fs(f, " = zext i1 "); fs(f, nop); fs(f, " to i8"); fnewline(f);
+            nop = reg_of(f, wn);
+            ty_str = "i8";
+        }
+        let mut pb: Buf = rt_buf((*(*f).cg).a);
+        let bp: *mut Buf = &mut pb;
+        rt_s(bp, "{ ");
+        rt_s(bp, ty_str);
+        rt_s(bp, ", i1 }");
+        let pair: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, pair as i64);
+        fs(f, " = cmpxchg ptr "); fs(f, operand(f, pv, (*arg0).ty));
+        fs(f, ", "); fs(f, ty_str);
+        fs(f, " "); fs(f, eop);
+        fs(f, ", "); fs(f, ty_str);
+        fs(f, " "); fs(f, nop);
+        fs(f, " seq_cst seq_cst"); fnewline(f);
+        let ok: i32 = fnewtmp(f);
+        fs(f, "  %t"); fi(f, ok as i64);
+        fs(f, " = extractvalue "); fs(f, rt_view(bp));
+        fs(f, " %t"); fi(f, pair as i64);
+        fs(f, ", 1"); fnewline(f);
+        let bt: *mut Type = type_new((*(*f).cg).a, K::Bool);
+        return v_ssa(bt, reg_of(f, ok));
+    }
+    if bid == 31 {
+        fs(f, "  fence seq_cst\n");
+    }
+    return v_void();
+
+    }
+}
+
 fn gen_call(f: *mut Fn, e: *mut Expr) -> Val {
     unsafe {
     unsafe {
@@ -1751,6 +2033,12 @@ fn gen_call(f: *mut Fn, e: *mut Expr) -> Val {
             return gen_indirect_call(f, e);
         }
         return gen_user_call(f, e);
+    }
+    if bid == 19 {
+        return gen_asm(f, e);
+    }
+    if bid >= 20 && bid <= 33 {
+        return gen_atomic(f, e, bid);
     }
     if bid == 1 {
         gen_print(f, e);
@@ -2429,6 +2717,10 @@ fn gen_stmt(f: *mut Fn, st: *mut Stmt) {
     let k: S = (*st).kind;
     if k == S::Let {
         let d: *mut Decl = (*st).decl;
+        if (*d).ty != null && (*(*d).ty).kind == K::Void {
+            let _ = gen_expr(f, (*st).expr);
+            return;
+        }
         let slot: str = alloca_slot(f, d);
         let v: Val = gen_expr(f, (*st).expr);
         store_val(f, slot, v, (*d).ty);
@@ -2458,6 +2750,8 @@ fn gen_stmt(f: *mut Fn, st: *mut Stmt) {
                 old = load_bitfield(f, addr.reg, fld);
             } else if is_field {
                 old = load_val_align(f, addr.reg, ty, al);
+            } else if (*target).is_volatile {
+                old = load_volatile(f, addr.reg, ty);
             } else {
                 old = load_val(f, addr.reg, ty);
             }
@@ -2471,6 +2765,8 @@ fn gen_stmt(f: *mut Fn, st: *mut Stmt) {
             store_bitfield(f, addr.reg, fld, out);
         } else if is_field {
             store_val_align(f, addr.reg, out, ty, al);
+        } else if (*target).is_volatile {
+            store_volatile(f, addr.reg, out, ty);
         } else {
             store_val(f, addr.reg, out, ty);
         }

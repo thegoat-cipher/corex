@@ -1,0 +1,6 @@
+fn main() -> i32 {
+    unsafe {
+        print(atomic_load(5));
+    }
+    return 0;
+}

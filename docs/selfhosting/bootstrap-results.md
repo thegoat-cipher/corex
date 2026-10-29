@@ -1,8 +1,8 @@
 # Bootstrap Results
 
-Date: 2026-10-28
-Command: `selfhost/bootstrap.sh` on the integrated compiler (after the P0–P3
-audit fixes).
+Date: 2026-10-29
+Command: `selfhost/bootstrap.sh` on the integrated compiler with the SH-033
+concurrency surface and SH-034 library closure.
 
 ## 1. Environment
 
@@ -20,10 +20,10 @@ audit fixes).
 
 | Stage | SHA-256 | Size |
 |---|---|---:|
-| Stage 1 (Rust-built from CoreX source) | `f4192f40a4571bdfec5f4514bf035a1246486f80ad94fa54e2fedf79a17af884` | 489,088 bytes |
-| Stage 2 (Stage 1-built) | `c33aff55ae3c74ab87358b4db50062a548fed238b7cae4cd9e7ac8f202eb5f78` | 548,016 bytes |
-| Stage 3 (Stage 2-built) | `c33aff55ae3c74ab87358b4db50062a548fed238b7cae4cd9e7ac8f202eb5f78` | 548,016 bytes |
-| Stage 4 (Stage 3-built) | `c33aff55ae3c74ab87358b4db50062a548fed238b7cae4cd9e7ac8f202eb5f78` | 548,016 bytes |
+| Stage 1 (Rust-built from CoreX source) | `926ecdec940f571bcabaae07194bf8688e07bb0e69f57ab554746e4da454571f` | 510,960 bytes |
+| Stage 2 (Stage 1-built) | `dcccb0e017843e6d5dc6f2ca4d488cb74427a33c814f2639894c48633e7361ad` | 575,128 bytes |
+| Stage 3 (Stage 2-built) | `dcccb0e017843e6d5dc6f2ca4d488cb74427a33c814f2639894c48633e7361ad` | 575,128 bytes |
+| Stage 4 (Stage 3-built) | `dcccb0e017843e6d5dc6f2ca4d488cb74427a33c814f2639894c48633e7361ad` | 575,128 bytes |
 
 `stage2 == stage3 == stage4` byte-for-byte. Stage 1 differs because it is
 compiled by the Rust backend (Rust ABI/runtime helper spellings), while
@@ -45,25 +45,25 @@ Stage builds (`--opt 0`, wall time, final run):
 
 | Step | Wall time |
 |---|---:|
-| Stage 1 (Rust Stage 0 compiles CoreX source) | 0.604 s |
-| Stage 2 (Stage 1 compiles itself) | 0.727 s |
-| Stage 3 (Stage 2 compiles itself) | 0.722 s |
-| Stage 4 (Stage 3 compiles itself) | 0.752 s |
+| Stage 1 (Rust Stage 0 compiles CoreX source) | 0.567 s |
+| Stage 2 (Stage 1 compiles itself) | 0.725 s |
+| Stage 3 (Stage 2 compiles itself) | 0.717 s |
+| Stage 4 (Stage 3 compiles itself) | 0.719 s |
 
 Integrated performance table. This is the only performance baseline cited by
 the self-hosting docs. Numbers are best-of-N wall time on the host above
-(2026-10-28, LLVM 20.1.8, cc 15.2.0); self-compile varies with host load, so
+(2026-10-29, LLVM 20.1.8, cc 15.2.0); self-compile varies with host load, so
 the observed range across final runs is shown.
 
 | Metric | Observed |
 |---|---|
-| Compiler source closure | 15,228 lines, 472,690 bytes (`selfhost/*.cx`) |
-| Self-compile `build --opt 0` (best of 3) | **708 ms** (repeated runs vary with host load) |
-| Frontend `check` of the compiler source (best of 5) | **64 ms** |
-| Frontend corpus (37 files, 24,780 bytes) | 32 ms (0.74 MB/s) |
-| Frontend throughput (immutable closure) | **7.04 MB/s** |
-| Peak RSS, self-compile | 94,008 KiB (≈91.8 MiB) |
-| Peak RSS, frontend `check` | 21,184 KiB (≈20.7 MiB) |
+| Compiler source closure | 15,787 lines, 490,167 bytes (`selfhost/*.cx`) |
+| Self-compile `build --opt 0` (best of 3) | **731 ms** (repeated runs vary with host load) |
+| Frontend `check` of the compiler source (best of 5) | **67 ms** |
+| Frontend corpus (39 files, 26,495 bytes) | 29 ms (0.87 MB/s) |
+| Frontend throughput (immutable closure) | **6.98 MB/s** |
+| Peak RSS, self-compile | 95,352 KiB (≈93.1 MiB) |
+| Peak RSS, frontend `check` | 21,916 KiB (≈21.4 MiB) |
 
 `tests/selfhosting/perf.sh` applies only a 60 s smoke bound; the numbers above
 are observations, not a gate.
@@ -71,14 +71,14 @@ are observations, not a gate.
 ## 4. Behavioural corpus
 
 ```text
-selfhosting tests: 249 passed, 0 failed (Stage 1)
-selfhosting tests: 249 passed, 0 failed (Stage 2)
-selfhosting tests: 249 passed, 0 failed (Stage 3)
+selfhosting tests: 266 passed, 0 failed (Stage 1)
+selfhosting tests: 266 passed, 0 failed (Stage 2)
+selfhosting tests: 266 passed, 0 failed (Stage 3)
 ```
 
-Composition: 37 positive cases × 4 opt levels = 148; 56 negative cases (each
+Composition: 39 positive cases × 4 opt levels = 156; 65 negative cases (each
 asserts a `.code` that matches the Rust oracle); 28 malformed inputs; 4 module
-projects (3 normal × 4 + 1 `must_fail` = 13); 1 FFI project × 4 = 4; total 249.
+projects (3 normal × 4 + 1 `must_fail` = 13); 1 FFI project × 4 = 4; total 266.
 Expected stdout/exit values were produced by the Rust oracle and are checked
 byte-for-byte.
 
@@ -87,36 +87,42 @@ Additional gates:
 ```text
 cli tests: 80 passed, 0 failed (Stage 1)
 cli tests: 80 passed, 0 failed (Stage 2)
-dump tests: 75 passed, 0 failed (Stage 2)
-fuzz tests: 327 passed, 0 failed (Stage 2)
+dump tests: 79 passed, 0 failed (Stage 2)
+fuzz tests: 329 passed, 0 failed (Stage 2)
 ASan: enabled (60 mutated inputs + corpus)
+concurrency tests: 33 passed, 0 failed (Stage 2)
+lib tests: 16 passed, 0 failed (Stage 2)
 ```
 
 CLI coverage now includes build-failure status, signal-killed tools, built-in
 cfg selection, `check`/`emit-ir` frontend options, stdin builds, dead-label IR
 verification, and hosted float `%=`. Fuzz/ASan is 215 unsanitized checks
-(13 checked-in fuzz inputs, 2 generated, 200 mutants) plus 112 ASan checks
-(2 self-host, 37 positive, 13 fuzz, 60 mutants). CI sets
+(13 checked-in fuzz inputs, 2 generated, 200 mutants) plus 114 ASan checks
+(2 self-host, 39 positive, 13 fuzz, 60 mutants). CI sets
 `COREX_REQUIRE_ASAN=1`, so a skipped sanitizer run fails the gate; locally a
 missing ASan runtime is reported and skipped.
 
+`concurrency.sh` ports the three `compiler/tests/concurrency.rs` behaviours
+(atomics/volatile/asm, TLS, threads + futex mutex) and runs the bootstrap at
+`--opt 0..3` plus the oracle at `--opt 2`. `lib.sh` builds every `lib/corex`
+module with both compilers.
+
 The example matrix is **8/8** against the oracle (stdout and exit status,
-`--opt 0`), and `lib/corex` builds **13/16** modules; `std_sync`, `std_tls`, and
-`std_thread` remain blocked by SH-033. The Rust reference suite remains
-**205/205**.
+`--opt 0`), and `lib/corex` builds **16/16** modules. The Rust reference suite
+remains **205/205**.
 
 ## 5. Optimized reproducibility
 
 `selfhost/repro-opt.sh --corpus` builds the compiler twice at each optimization
 level and checks determinism, the self-fixed point, and Stage 1/Stage 2
-agreement. All three levels pass, and the 249-check corpus passes with each
+agreement. All three levels pass, and the 266-check corpus passes with each
 optimized compiler:
 
 | Level | SHA-256 | Size |
 |---|---|---:|
-| `--opt 1` | `0f6bd2355968070f61c4097e966effd36ba7953415b801cb71bcfc3a0a3db81d` | 424,416 bytes |
-| `--opt 2` | `eda405ad9c109c673343d4885c9952ec475a48cb1ad1f4047a1cd4139b1a0981` | 472,120 bytes |
-| `--opt 3` | `58067778faf2bfe10ca6ccc0b37523063e199a8558e0dabd681eeb98b629ed25` | 876,072 bytes |
+| `--opt 1` | `58e5c30d05631e49b9091a5416c165afda8c462e16ea31ecee11887d0654557f` | 443,072 bytes |
+| `--opt 2` | `d4e106cb35579458dd79b6f68632388e33f891500ade1d70a8d6bff31d81d270` | 495,016 bytes |
+| `--opt 3` | `ab469e2f1864c8a6ac29d1963b5891d7da256454a3f9ed3add3296f27ec724a2` | 829,488 bytes |
 
 Hashes differ *across* levels by design; within each level,
 `repeat == self == fixed == stage1 oracle`.
@@ -138,7 +144,7 @@ bad stage or a failing gate. CI additionally exports `COREX_REQUIRE_ASAN=1`.
 
 - The compiler is freestanding: it uses Linux syscalls and external LLVM/cc
   tools at compile time.
-- The source is 15,228 lines across 14 files and 474 functions.
+- The source is 15,787 lines across 14 files and 487 functions.
 - Known gaps are listed in `master.md` §9, `bootstrap-architecture.md` §10, and
-  `tasks.md`: threads/atomics/volatile/TLS/asm, LSP/editor parity, DWARF
-  (`-g`), full 205-test parity, and `lib/corex` completion (13/16).
+  `tasks.md`: LSP/editor parity, DWARF (`-g`), and full 205-test parity.
+  `lib/corex` is complete (16/16).

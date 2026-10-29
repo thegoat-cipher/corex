@@ -4,6 +4,11 @@
 > `room/corex-audit-fixes-6cmw` and independently re-verified on merged `main`
 > (`d6983fd`). This file is the pre-fix snapshot; see §7 for the follow-up
 > evidence and residual blockers.
+>
+> **Update (2026-10-29):** SH-033 and SH-034 are now complete (volatile,
+> atomics, inline asm, thread/TLS runtime, `lib/corex` 16/16); see
+> `worklogs/sh033-034.md`. The blockers listed below for those two rows are
+> historical.
 
 Date: 2026-10-28
 Audited commit: `084f1f3` (`main`), baseline `0c55d59`

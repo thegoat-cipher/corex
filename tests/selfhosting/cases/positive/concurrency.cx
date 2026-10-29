@@ -1,0 +1,29 @@
+// Atomics, volatile globals, and inline assembly at every opt level.
+// Expected output matches the Rust reference compiler's concurrency test.
+static mut volatile FLAG: u32 = 0;
+
+fn main() -> i32 {
+    print(FLAG);
+    FLAG = 7;
+    print(FLAG);
+    unsafe {
+        let mut x: u32 = 0;
+        print(atomic_fetch_add(&mut x, 5));
+        print(x);
+        print(atomic_load(&x));
+        atomic_store(&mut x, 9);
+        print(atomic_cas(&mut x, 9, 11));
+        print(x);
+        print(atomic_fetch_or(&mut x, 4));
+        print(x);
+        atomic_fence();
+        print(volatile_load(&FLAG));
+        volatile_store(&mut FLAG, 3);
+        print(FLAG);
+        let v: usize = asm("movq $$1, $0", "=r");
+        print(v);
+        asm("nop", "");
+        asm("", "~{memory}");
+    }
+    return 0;
+}

@@ -50,7 +50,7 @@ pub fn spawn(entry: fn(i64) -> i32, arg: i64, stack_size: usize) -> Thread {
         let top: usize = (stack as usize + size) & (0 - 16);
         let result: usize = asm(
             "movq $1, %rdi\nmovq $2, %rsi\nxorq %rdx, %rdx\nxorq %r10, %r10\nxorq %r8, %r8\nmovq $$56, %rax\nsyscall\ntestq %rax, %rax\njne 1f\nmovq $4, %rdi\ncall *$3\nmovq $$60, %rax\nxorq %rdi, %rdi\nsyscall\n1:\n",
-            "={rax},r,r,r,r,~{rdi},~{rsi},~{rdx},~{r10},~{r8},~{rcx},~{r11},~{memory}",
+            "=&{rax},r,r,r,r,~{rdi},~{rsi},~{rdx},~{r10},~{r8},~{rcx},~{r11},~{memory}",
             flags,
             top,
             entry,

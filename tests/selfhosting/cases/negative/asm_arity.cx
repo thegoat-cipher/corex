@@ -1,0 +1,6 @@
+fn main() -> i32 {
+    unsafe {
+        asm();
+    }
+    return 0;
+}
