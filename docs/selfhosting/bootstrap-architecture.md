@@ -232,7 +232,7 @@ emits no DWARF.
 3. Stage 2 builds Stage 3.
 4. `sha256(stage2) == sha256(stage3)` and `sha256(stage3) == sha256(stage4)`.
 5. `tests/selfhosting/run.sh` passes against Stage 1, Stage 2, and Stage 3
-   (266 checks: positive cases at `--opt 0..3`, negative cases, module
+   (270 checks: positive cases at `--opt 0..3`, negative cases, module
    projects, FFI, and abort cases). `cli.sh`, `dump.sh`, `fuzz.sh`,
    `concurrency.sh`, and `lib.sh` add CLI, differential, sanitizer,
    concurrency-runtime, and `lib/corex` matrix coverage.

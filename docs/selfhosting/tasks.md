@@ -3,11 +3,12 @@
 Last updated: 2026-10-29. Statuses: NOT STARTED, IN PROGRESS, BLOCKED,
 COMPLETED. A task is only COMPLETED with the evidence named in the row.
 
-Final integrated compiler: **558 functions**, **17,653 lines** across 15
-`selfhost/*.cx` files (LSP included). `selfhost/bootstrap.sh` builds Stage 1–4,
-runs the behavioural corpus (270 checks per stage), CLI parity (80), the LSP
-protocol suite (35), differential dumps (81), fuzzing/ASan (330), concurrency
-parity (33), the `lib/corex` matrix (16), and the performance baseline;
+Final integrated compiler: **534 functions**, **17,236 lines** across 15
+`selfhost/*.cx` files (LSP included; 558 / 17,653 before the SH-044 cleanup).
+`selfhost/bootstrap.sh` builds Stage 1–4, runs the behavioural corpus (270
+checks per stage), CLI parity (80), the LSP protocol suite (35), differential
+dumps (81), fuzzing/ASan (330), concurrency parity (33), the `lib/corex`
+matrix (16), and the performance baseline;
 `selfhost/repro-opt.sh --corpus` covers `--opt 1..3`. The parameterized Rust
 behaviour suite is `tests/selfhosting/behavior.py` (205 rows:
 126 passed / 9 failed / 70 blocked / 0 timeout) — see
@@ -24,9 +25,9 @@ behaviour suite is `tests/selfhosting/behavior.py` (205 rows:
 | SH-007 | Types and semantic analysis | COMPLETED | `types.cx`, `semantic.cx` |
 | SH-008 | LLVM IR backend/ABI | COMPLETED | `codegen.cx` |
 | SH-009 | Driver/CLI/linking | COMPLETED | `driver.cx` |
-| SH-010 | Build Stage 1 with Rust Stage 0 | COMPLETED | Stage 1 `926ecdec…` |
-| SH-011 | Build Stage 2 with Stage 1 | COMPLETED | Stage 2 `dcccb0e0…` |
-| SH-012 | Build Stage 3 with Stage 2 | COMPLETED | Stage 3 `dcccb0e0…` |
+| SH-010 | Build Stage 1 with Rust Stage 0 | COMPLETED | Stage 1 `96f1ef30…` |
+| SH-011 | Build Stage 2 with Stage 1 | COMPLETED | Stage 2 `f3e770a3…` |
+| SH-012 | Build Stage 3 with Stage 2 | COMPLETED | Stage 3 `f3e770a3…` |
 | SH-013 | Compare Stage 2/3 and 3/4 | COMPLETED | `stage2 == stage3 == stage4` |
 | SH-014 | Differential/negative/native/opt tests | COMPLETED | `tests/selfhosting/`; 270 per stage |
 | SH-015 | Documentation and CI | COMPLETED | `docs/selfhosting/`; `.github/workflows/ci.yml` |
@@ -56,20 +57,20 @@ behaviour suite is `tests/selfhosting/behavior.py` (205 rows:
 | SH-039 | Full Rust behavior suite against `corexc` | BLOCKED | `behavior.py` runs all 205 rows with per-process 60 s timeouts: 126 passed, 9 failed, 70 blocked, 0 timeout. The 68 `--lib` unit tests are Rust-internal (blocked); the 9 divergences (static fn-pointer tables, compound literals, oracle IR text/temp-dir/load_source contracts, private-item prose) are listed with evidence in `worklogs/semantic-hang.md`; AC-4 therefore remains blocked |
 | SH-040 | Memory validation and fuzzing | COMPLETED | 330/330 ASan/fuzz; ASan required in CI; no signals |
 | SH-041 | Performance baseline | COMPLETED | Integrated table in `bootstrap-results.md` §3 (self-compile and frontend/RSS) |
-| SH-042 | Reproducibility at `--opt 1..3` | COMPLETED | `repro-opt.sh`; opt1 `58e5c30d…`, opt2 `d4e106cb…`, opt3 `ab469e2f…` |
+| SH-042 | Reproducibility at `--opt 1..3` | COMPLETED | `repro-opt.sh`; opt1 `e3e6335e…`, opt2 `9af3b41a…`, opt3 `51c025a0…` |
 | SH-043 | Commit/push and remote CI validation | NOT STARTED | Local commits only; remote push/CI not run |
-| SH-044 | Bootstrap code cleanup/review | BLOCKED | P3 cleanup commits conflict with the larger integrated language branches; non-functional and not merged. See `worklogs/p3.md` |
+| SH-044 | Bootstrap code cleanup/review | COMPLETED | Reapplied on the integrated tree by `room/corex-cleanup-blockers-ppaf` in four commits (`33a8094` unsafe unwrap, `fa135cb` dead helpers/merges, `c53a580` `Program` fields, `8320b92` `parse_program` cutover), rebased onto `b53be92`. 558 → 534 functions, 17,653 → 17,236 lines (pre-tooling-merge tree 487 → 463 / 15,787 → 15,370). Gates unchanged: 270/80/35/81/330/33/16, 205 `cargo test`, 8/8 examples; Stage 2/3/4 `f3e770a3…`. Details in `worklogs/p3.md` |
 | SH-045 | Documentation maintenance | COMPLETED | P0/P1/P2/P3 worklogs plus `worklogs/sh033-034.md`; this tracker, `master.md`, results/validation |
 | SH-046 | Full self-hosting acceptance (AC-1…AC-9) | BLOCKED | Depends on SH-037, SH-039, SH-043 |
 
 ## Final gate evidence
 
 ```text
-compiler/target/release/corex check selfhost/corexc.cx -> ok: 558 function(s), entry `main`
-stage1 c779aa6b2bd8f0fea6101cc617b486ebaca24ec67550061547c31ae5920d46d6
-stage2 4739e03ef87d810d69672cfc6d81697e93d864d0fec607bd2402c160c3bb4204
-stage3 4739e03ef87d810d69672cfc6d81697e93d864d0fec607bd2402c160c3bb4204
-stage4 4739e03ef87d810d69672cfc6d81697e93d864d0fec607bd2402c160c3bb4204
+compiler/target/release/corex check selfhost/corexc.cx -> ok: 534 function(s), entry `main`
+stage1 96f1ef30e68a682ba38fadbc31f15bb7befadcfb884d338a00176bf3f3f87b3d
+stage2 f3e770a3c88e66a05494bea7e3a9dcaf405acec63c30e2bf9f4e0ad9c8ad3c71
+stage3 f3e770a3c88e66a05494bea7e3a9dcaf405acec63c30e2bf9f4e0ad9c8ad3c71
+stage4 f3e770a3c88e66a05494bea7e3a9dcaf405acec63c30e2bf9f4e0ad9c8ad3c71
 reproducible: stage2 == stage3 == stage4
 selfhosting tests: 270 passed, 0 failed (Stage 1/2/3)
 cli tests: 80 passed, 0 failed
@@ -80,7 +81,7 @@ concurrency tests: 33 passed, 0 failed
 lib tests: 16 passed, 0 failed
 cargo test: 205 passed, 0 failed
 behavior suite: 126 passed, 0 skipped, 9 failed, 70 blocked, 0 timeout (205 rows)
-repro-opt: deterministic and self-reproducing at --opt 1..3
+repro-opt: opt1 e3e6335e…, opt2 9af3b41a…, opt3 51c025a0… (deterministic, fixed point)
 examples: 8/8 match the oracle
 lib/corex: 16/16 build
 ```

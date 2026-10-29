@@ -57,13 +57,13 @@ the observed range across final runs is shown.
 
 | Metric | Observed |
 |---|---|
-| Compiler source closure | 17,653 lines, 547,698 bytes (`selfhost/*.cx`) |
-| Self-compile `build --opt 0` (best of 3) | **979 ms** (repeated runs vary with host load) |
-| Frontend `check` of the compiler source (best of 5) | **84 ms** |
-| Frontend corpus (40 files, 27,620 bytes) | 31 ms (0.85 MB/s) |
-| Frontend throughput (immutable closure) | **6.22 MB/s** |
-| Peak RSS, self-compile | 98,948 KiB (≈96.6 MiB) |
-| Peak RSS, frontend `check` | 24,200 KiB (≈23.6 MiB) |
+| Compiler source closure | 17,236 lines, 541,991 bytes (`selfhost/*.cx`) |
+| Self-compile `build --opt 0` (best of 3) | **835 ms** (repeated runs vary with host load) |
+| Frontend `check` of the compiler source (best of 5) | **75 ms** |
+| Frontend corpus (40 files, 27,620 bytes) | 29 ms (0.91 MB/s) |
+| Frontend throughput (immutable closure) | **6.89 MB/s** |
+| Peak RSS, self-compile | 98,880 KiB (≈96.6 MiB) |
+| Peak RSS, frontend `check` | 23,940 KiB (≈23.4 MiB) |
 
 `tests/selfhosting/perf.sh` applies only a 60 s smoke bound; the numbers above
 are observations, not a gate.
@@ -119,14 +119,14 @@ remains **205/205**.
 
 `selfhost/repro-opt.sh --corpus` builds the compiler twice at each optimization
 level and checks determinism, the self-fixed point, and Stage 1/Stage 2
-agreement. All three levels pass, and the 266-check corpus passes with each
+agreement. All three levels pass, and the 270-check corpus passes with each
 optimized compiler:
 
 | Level | SHA-256 | Size |
 |---|---|---:|
-| `--opt 1` | `58e5c30d05631e49b9091a5416c165afda8c462e16ea31ecee11887d0654557f` | 443,072 bytes |
-| `--opt 2` | `d4e106cb35579458dd79b6f68632388e33f891500ade1d70a8d6bff31d81d270` | 495,016 bytes |
-| `--opt 3` | `ab469e2f1864c8a6ac29d1963b5891d7da256454a3f9ed3add3296f27ec724a2` | 829,488 bytes |
+| `--opt 1` | `e3e6335e32182abcd258a104b8693571130e00493d7ef5a41adbda85ababd313` | 504,544 bytes |
+| `--opt 2` | `9af3b41a132a0c1cc698bd7d5445a48041c5b49215b2910ad84063ebdecedd84` | 563,736 bytes |
+| `--opt 3` | `51c025a044009057505d4baa7cfa8b5882c3193d75f2f494ba015ee2528baa02` | 906,440 bytes |
 
 Hashes differ *across* levels by design; within each level,
 `repeat == self == fixed == stage1 oracle`.
@@ -148,7 +148,7 @@ bad stage or a failing gate. CI additionally exports `COREX_REQUIRE_ASAN=1`.
 
 - The compiler is freestanding: it uses Linux syscalls and external LLVM/cc
   tools at compile time.
-- The source is 17,653 lines across 15 files and 558 functions.
+- The source is 17,236 lines across 15 files and 534 functions.
 - Known gaps are listed in `master.md` §9, `bootstrap-architecture.md` §10, and
   `tasks.md`: DWARF (`-g`) and full 205-test parity (SH-039; see
   `worklogs/semantic-hang.md`). The LSP is implemented and gated (35/35).

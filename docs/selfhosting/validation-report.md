@@ -2,14 +2,14 @@
 
 Date: 2026-10-29
 Compiler under test: integrated `selfhost/` with the SH-033 concurrency surface,
-SH-034 library closure, and the SH-037 LSP (558 functions, 17,653 lines).
+SH-034 library closure, and the SH-037 LSP (534 functions, 17,236 lines).
 
 ## 1. Result summary
 
 | Gate | Result | Evidence |
 |---|---|---|
-| Stage 0 builds Stage 1 | PASS | Stage 1 `c779aa6b…`; runs the corpus |
-| Stage 1 builds Stage 2 | PASS | Stage 2 `4739e03e…` |
+| Stage 0 builds Stage 1 | PASS | Stage 1 `96f1ef30…`; runs the corpus |
+| Stage 1 builds Stage 2 | PASS | Stage 2 `f3e770a3…` |
 | Stage 2 builds Stage 3 | PASS | Stage 3 identical to Stage 2 |
 | Stage 3 builds Stage 4 | PASS | Stage 4 identical |
 | Stage 2/3 compile user programs | PASS | 270 checks per stage; outputs byte-identical |
@@ -53,7 +53,7 @@ miscompilation) recorded from the differential oracle.
 
 ## 3. Frontend and IR
 
-- `compiler/target/release/corex check selfhost/corexc.cx` → `ok: 558
+- `compiler/target/release/corex check selfhost/corexc.cx` → `ok: 534
   function(s), entry main`; the bootstrap compiler produces the same result.
 - Every build invokes `llvm-as`; malformed IR aborts the build and `build`
   exits nonzero (exit 3 for tool failures) without printing `compiled`.
@@ -77,10 +77,10 @@ against both compilers.
 ## 5. Bootstrap validation
 
 ```text
-stage1 c779aa6b2bd8f0fea6101cc617b486ebaca24ec67550061547c31ae5920d46d6
-stage2 4739e03ef87d810d69672cfc6d81697e93d864d0fec607bd2402c160c3bb4204
-stage3 4739e03ef87d810d69672cfc6d81697e93d864d0fec607bd2402c160c3bb4204
-stage4 4739e03ef87d810d69672cfc6d81697e93d864d0fec607bd2402c160c3bb4204
+stage1 96f1ef30e68a682ba38fadbc31f15bb7befadcfb884d338a00176bf3f3f87b3d
+stage2 f3e770a3c88e66a05494bea7e3a9dcaf405acec63c30e2bf9f4e0ad9c8ad3c71
+stage3 f3e770a3c88e66a05494bea7e3a9dcaf405acec63c30e2bf9f4e0ad9c8ad3c71
+stage4 f3e770a3c88e66a05494bea7e3a9dcaf405acec63c30e2bf9f4e0ad9c8ad3c71
 reproducible: stage2 == stage3 == stage4
 ```
 
@@ -91,12 +91,12 @@ Optimized levels are deterministic and self-reproducing:
 
 | Level | SHA-256 |
 |---|---|
-| `--opt 1` | `b60536fbabc745a6bdbb926ebd7a09cc624f12231a425e61c1c37c0ab4f79b88` |
-| `--opt 2` | `fc2d43659bbc229322eafb3fc6218d9f2824076bced5edfc95d316d662309987` |
-| `--opt 3` | `cf4291fa9ea150fb8518a864111d200389fa24a4669131d064b2c6239dbaa827` |
+| `--opt 1` | `e3e6335e32182abcd258a104b8693571130e00493d7ef5a41adbda85ababd313` |
+| `--opt 2` | `9af3b41a132a0c1cc698bd7d5445a48041c5b49215b2910ad84063ebdecedd84` |
+| `--opt 3` | `51c025a044009057505d4baa7cfa8b5882c3193d75f2f494ba015ee2528baa02` |
 
-The integrated performance table (979 ms best self-compile, 84 ms frontend,
-6.22 MB/s closure throughput, 98,948/24,200 KiB peak RSS) is recorded once
+The integrated performance table (835 ms best self-compile, 75 ms frontend,
+6.89 MB/s closure throughput, 98,880/23,940 KiB peak RSS) is recorded once
 in `bootstrap-results.md` §3.
 
 ## 6. Acceptance criteria
