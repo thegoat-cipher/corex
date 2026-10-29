@@ -57,13 +57,13 @@ the observed range across final runs is shown.
 
 | Metric | Observed |
 |---|---|
-| Compiler source closure | 15,787 lines, 490,167 bytes (`selfhost/*.cx`) |
-| Self-compile `build --opt 0` (best of 3) | **731 ms** (repeated runs vary with host load) |
-| Frontend `check` of the compiler source (best of 5) | **67 ms** |
-| Frontend corpus (39 files, 26,495 bytes) | 29 ms (0.87 MB/s) |
-| Frontend throughput (immutable closure) | **6.98 MB/s** |
-| Peak RSS, self-compile | 95,352 KiB (≈93.1 MiB) |
-| Peak RSS, frontend `check` | 21,916 KiB (≈21.4 MiB) |
+| Compiler source closure | 17,653 lines, 547,698 bytes (`selfhost/*.cx`) |
+| Self-compile `build --opt 0` (best of 3) | **979 ms** (repeated runs vary with host load) |
+| Frontend `check` of the compiler source (best of 5) | **84 ms** |
+| Frontend corpus (40 files, 27,620 bytes) | 31 ms (0.85 MB/s) |
+| Frontend throughput (immutable closure) | **6.22 MB/s** |
+| Peak RSS, self-compile | 98,948 KiB (≈96.6 MiB) |
+| Peak RSS, frontend `check` | 24,200 KiB (≈23.6 MiB) |
 
 `tests/selfhosting/perf.sh` applies only a 60 s smoke bound; the numbers above
 are observations, not a gate.
@@ -71,24 +71,28 @@ are observations, not a gate.
 ## 4. Behavioural corpus
 
 ```text
-selfhosting tests: 266 passed, 0 failed (Stage 1)
-selfhosting tests: 266 passed, 0 failed (Stage 2)
-selfhosting tests: 266 passed, 0 failed (Stage 3)
+selfhosting tests: 270 passed, 0 failed (Stage 1)
+selfhosting tests: 270 passed, 0 failed (Stage 2)
+selfhosting tests: 270 passed, 0 failed (Stage 3)
 ```
 
-Composition: 39 positive cases × 4 opt levels = 156; 65 negative cases (each
-asserts a `.code` that matches the Rust oracle); 28 malformed inputs; 4 module
-projects (3 normal × 4 + 1 `must_fail` = 13); 1 FFI project × 4 = 4; total 266.
+Composition: 40 positive cases × 4 opt levels = 160 (including the 64-term
+`pointer_chain.cx` regression); 65 negative cases (each asserts a `.code` that
+matches the Rust oracle); 28 malformed inputs; 4 module projects
+(3 normal × 4 + 1 `must_fail` = 13); 1 FFI project × 4 = 4; total 270.
 Expected stdout/exit values were produced by the Rust oracle and are checked
-byte-for-byte.
+byte-for-byte. Positive `check`/`build` and negative `check` run under
+`timeout ${COREX_CASE_TIMEOUT:-30}`, so a checker regression fails instead of
+hanging the gate.
 
 Additional gates:
 
 ```text
 cli tests: 80 passed, 0 failed (Stage 1)
 cli tests: 80 passed, 0 failed (Stage 2)
-dump tests: 79 passed, 0 failed (Stage 2)
-fuzz tests: 329 passed, 0 failed (Stage 2)
+lsp tests: 35 passed, 0 failed (Stage 2)
+dump tests: 81 passed, 0 failed (Stage 2)
+fuzz tests: 330 passed, 0 failed (Stage 2)
 ASan: enabled (60 mutated inputs + corpus)
 concurrency tests: 33 passed, 0 failed (Stage 2)
 lib tests: 16 passed, 0 failed (Stage 2)
@@ -97,8 +101,8 @@ lib tests: 16 passed, 0 failed (Stage 2)
 CLI coverage now includes build-failure status, signal-killed tools, built-in
 cfg selection, `check`/`emit-ir` frontend options, stdin builds, dead-label IR
 verification, and hosted float `%=`. Fuzz/ASan is 215 unsanitized checks
-(13 checked-in fuzz inputs, 2 generated, 200 mutants) plus 114 ASan checks
-(2 self-host, 39 positive, 13 fuzz, 60 mutants). CI sets
+(13 checked-in fuzz inputs, 2 generated, 200 mutants) plus 115 ASan checks
+(2 self-host, 40 positive, 13 fuzz, 60 mutants). CI sets
 `COREX_REQUIRE_ASAN=1`, so a skipped sanitizer run fails the gate; locally a
 missing ASan runtime is reported and skipped.
 
@@ -144,7 +148,8 @@ bad stage or a failing gate. CI additionally exports `COREX_REQUIRE_ASAN=1`.
 
 - The compiler is freestanding: it uses Linux syscalls and external LLVM/cc
   tools at compile time.
-- The source is 15,787 lines across 14 files and 487 functions.
+- The source is 17,653 lines across 15 files and 558 functions.
 - Known gaps are listed in `master.md` §9, `bootstrap-architecture.md` §10, and
-  `tasks.md`: LSP/editor parity, DWARF (`-g`), and full 205-test parity.
+  `tasks.md`: DWARF (`-g`) and full 205-test parity (SH-039; see
+  `worklogs/semantic-hang.md`). The LSP is implemented and gated (35/35).
   `lib/corex` is complete (16/16).

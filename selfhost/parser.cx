@@ -1856,7 +1856,7 @@ fn parse_file(p: *mut P, path: str) {
     let c: cstr = rt_to_cstr((*p).a, path);
     let fd: FileData = rt_read_file((*p).a, c);
     if !fd.ok {
-        diag_add((*p).d, (*p).a, 0, 0, 0, "cannot open source file");
+        diag_addc((*p).d, (*p).a, 0, 0, 0, "E0232", "cannot open source file");
         return;
     }
     let pl: *mut PathList = rt_alloc((*p).a, sizeof(PathList)) as *mut PathList;

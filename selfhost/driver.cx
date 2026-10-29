@@ -619,16 +619,23 @@ fn toml_list(a: *mut Arena, text: str, key: str) -> *mut PathList {
     let kl: usize = len(key);
     let mut i: usize = 0;
     while i < n {
-        let mut ok: bool = i + kl <= n;
+        // Keys may be indented (the oracle parses standard TOML). Skip the
+        // leading blanks before matching; the newline scan below still uses
+        // the unindented line start.
+        let mut l: usize = i;
+        while l < n && (text[l] == 32 || text[l] == 9) {
+            l = l + 1;
+        }
+        let mut ok: bool = l + kl <= n;
         let mut j: usize = 0;
         while ok && j < kl {
-            if text[i + j] != key[j] {
+            if text[l + j] != key[j] {
                 ok = false;
             }
             j = j + 1;
         }
         if ok {
-            let mut k: usize = i + kl;
+            let mut k: usize = l + kl;
             while k < n && (text[k] == 32 || text[k] == 9) {
                 k = k + 1;
             }
