@@ -6,7 +6,8 @@ use std::path::Path;
 use std::process::{Command, Stdio};
 
 use corex::diagnostics::SourceFile;
-use corex::driver::{self, BuildConfig, LinkInputs};
+mod common;
+use common::driver::{self, BuildConfig, LinkInputs};
 use corex::lsp::parse_json;
 
 fn build(source: &str, config: &BuildConfig) -> (driver::Artifacts, driver::Artifacts, String) {

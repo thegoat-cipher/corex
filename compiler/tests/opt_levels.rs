@@ -15,7 +15,8 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use corex::diagnostics::SourceFile;
-use corex::driver;
+mod common;
+use common::driver;
 
 const OPT_LEVELS: [u8; 4] = [0, 1, 2, 3];
 

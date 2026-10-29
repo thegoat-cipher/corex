@@ -3,7 +3,8 @@
 //! the deterministic evidence for that claim.
 
 use corex::diagnostics::SourceFile;
-use corex::driver;
+mod common;
+use common::driver;
 
 struct Rng(u64);
 

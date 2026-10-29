@@ -10,7 +10,8 @@ use std::path::Path;
 use std::process::Command;
 
 use corex::diagnostics::SourceFile;
-use corex::driver::{self, LinkInputs};
+mod common;
+use common::driver::{self, LinkInputs};
 
 struct RunResult {
     stdout: String,

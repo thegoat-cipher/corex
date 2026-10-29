@@ -7,8 +7,13 @@
 use std::io::Write;
 use std::process::{Command, Output, Stdio};
 
+mod common;
+
 fn corex() -> Command {
-    Command::new(env!("CARGO_BIN_EXE_corex"))
+    match common::compiler() {
+        Some(bin) => Command::new(bin),
+        None => Command::new(env!("CARGO_BIN_EXE_corex")),
+    }
 }
 
 fn with_stdin(args: &[&str], input: &str) -> Output {

@@ -7,7 +7,8 @@
 use std::process::Command;
 
 use corex::diagnostics::SourceFile;
-use corex::driver;
+mod common;
+use common::driver;
 
 struct RunResult {
     stdout: String,
