@@ -24,9 +24,7 @@ ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)
 TESTS = os.path.join(ROOT, "compiler", "tests")
 
 # Whole suites that cannot exercise `corexc` at all.
-BLOCKED_SUITES = {
-    "concurrency": "SH-033: threads/atomics/TLS/inline asm are not implemented",
-}
+BLOCKED_SUITES = {}
 
 # Individual tests that depend on oracle-only APIs or documented contracts.
 BLOCKED_TESTS = {

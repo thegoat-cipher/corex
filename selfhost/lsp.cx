@@ -532,14 +532,18 @@ fn jp_value(jp: *mut JP) -> *mut J {
             j_push((*jp).a, arr, item);
             jp_ws(jp);
             let d: i32 = jp_peek(jp);
+            // Separate `if`s, not `if/else if/else`: the bootstrap emits an
+            // empty merge label when every arm of an if diverges, which is
+            // invalid IR when the merge sits directly before a loop label.
             if d == 44 {
                 unsafe { (*jp).pos = (*jp).pos + 1; }
-            } else if d == 93 {
+                continue;
+            }
+            if d == 93 {
                 unsafe { (*jp).pos = (*jp).pos + 1; }
                 return arr;
-            } else {
-                return jp_fail(jp);
             }
+            return jp_fail(jp);
         }
     }
     if c == 123 {
@@ -569,12 +573,13 @@ fn jp_value(jp: *mut JP) -> *mut J {
             let d: i32 = jp_peek(jp);
             if d == 44 {
                 unsafe { (*jp).pos = (*jp).pos + 1; }
-            } else if d == 125 {
+                continue;
+            }
+            if d == 125 {
                 unsafe { (*jp).pos = (*jp).pos + 1; }
                 return obj;
-            } else {
-                return jp_fail(jp);
             }
+            return jp_fail(jp);
         }
     }
     if c == 45 || (c >= 48 && c <= 57) {
