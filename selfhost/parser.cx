@@ -30,15 +30,11 @@ struct P {
 
 fn pk(p: *mut P) -> *mut Tok {
     unsafe {
-    unsafe {
         return (*p).toks + (*p).pos as usize;
-    }
-
     }
 }
 
 fn pk_n(p: *mut P, n: i32) -> *mut Tok {
-    unsafe {
     unsafe {
         let at: usize = (*p).pos as usize + n as usize;
         if at >= (*p).ntoks as usize {
@@ -46,16 +42,11 @@ fn pk_n(p: *mut P, n: i32) -> *mut Tok {
         }
         return (*p).toks + at;
     }
-
-    }
 }
 
 fn tkind(p: *mut P) -> T {
     unsafe {
-    unsafe {
         return (*pk(p)).kind;
-    }
-
     }
 }
 
@@ -68,12 +59,9 @@ fn at(p: *mut P, k: T) -> bool {
 
 fn bump(p: *mut P) {
     unsafe {
-    unsafe {
         if (*p).pos < (*p).ntoks - 1 {
             (*p).pos = (*p).pos + 1;
         }
-    }
-
     }
 }
 
@@ -310,7 +298,6 @@ fn parse_type_inner(p: *mut P) -> *mut Type {
 
 fn append_param(d: *mut Decl, p: *mut Param) {
     unsafe {
-    unsafe {
         if (*d).params == null {
             (*d).params = p;
         } else {
@@ -322,12 +309,9 @@ fn append_param(d: *mut Decl, p: *mut Param) {
         }
         (*d).nparams = (*d).nparams + 1;
     }
-
-    }
 }
 
 fn append_field(d: *mut Decl, f: *mut Field) {
-    unsafe {
     unsafe {
         if (*d).fields == null {
             (*d).fields = f;
@@ -341,12 +325,9 @@ fn append_field(d: *mut Decl, f: *mut Field) {
         (*f).index = (*d).nfields;
         (*d).nfields = (*d).nfields + 1;
     }
-
-    }
 }
 
 fn append_variant(d: *mut Decl, v: *mut Variant) {
-    unsafe {
     unsafe {
         if (*d).variants == null {
             (*d).variants = v;
@@ -358,8 +339,6 @@ fn append_variant(d: *mut Decl, v: *mut Variant) {
             (*q).next = v;
         }
         (*d).nvariants = (*d).nvariants + 1;
-    }
-
     }
 }
 
@@ -1774,7 +1753,6 @@ fn parse_lor(p: *mut P) -> *mut Expr {
 
 fn parse_expr(p: *mut P) -> *mut Expr {
     unsafe {
-    unsafe {
         (*p).depth = (*p).depth + 1;
         if (*p).depth > 200 {
             perrc(p, "E0111", "nesting depth exceeds the limit of 200");
@@ -1791,12 +1769,9 @@ fn parse_expr(p: *mut P) -> *mut Expr {
     let e: *mut Expr = parse_lor(p);
     unsafe { (*p).depth = (*p).depth - 1; }
     return e;
-
-    }
 }
 
 fn path_loaded(p: *mut P, path: str) -> bool {
-    unsafe {
     unsafe {
         let mut q: *mut PathList = (*p).loaded;
         while q != null {
@@ -1807,8 +1782,6 @@ fn path_loaded(p: *mut P, path: str) -> bool {
         }
     }
     return false;
-
-    }
 }
 
 fn parse_src_text(p: *mut P, name: str, base: str, text: str) {

@@ -63,122 +63,88 @@ struct Fn {
 
 fn v_ssa(ty: *mut Type, reg: str) -> Val {
     unsafe {
-    unsafe {
     return Val { kind: 0, ty: ty, reg: reg, is_const: false, ival: 0 };
-
-    }
 
     }
 }
 
 fn v_const(ty: *mut Type, value: i64) -> Val {
     unsafe {
-    unsafe {
     return Val { kind: 0, ty: ty, reg: "", is_const: true, ival: value };
-
-    }
 
     }
 }
 
 fn v_addr(ty: *mut Type, reg: str) -> Val {
     unsafe {
-    unsafe {
     return Val { kind: 1, ty: ty, reg: reg, is_const: false, ival: 0 };
-
-    }
 
     }
 }
 
 fn v_void() -> Val {
     unsafe {
-    unsafe {
     return Val { kind: 2, ty: null, reg: "", is_const: false, ival: 0 };
-
-    }
 
     }
 }
 
 fn fs(f: *mut Fn, s: str) {
     unsafe {
-    unsafe {
     rt_s((*f).body, s);
-
-    }
 
     }
 }
 
 fn fi(f: *mut Fn, v: i64) {
     unsafe {
-    unsafe {
     rt_i((*f).body, v);
-
-    }
 
     }
 }
 
 fn fc(f: *mut Fn, c: u8) {
     unsafe {
-    unsafe {
     rt_b((*f).body, c);
-
-    }
 
     }
 }
 
 fn fnewline(f: *mut Fn) {
     unsafe {
-    unsafe {
     rt_b((*f).body, 10);
-
-    }
 
     }
 }
 
 fn fnewlbl(f: *mut Fn) -> i32 {
     unsafe {
-    unsafe {
     let id: i32 = (*f).lbl;
     (*f).lbl = id + 1;
     return id;
-
-    }
 
     }
 }
 
 fn fnewtmp(f: *mut Fn) -> i32 {
     unsafe {
-    unsafe {
     let id: i32 = (*f).tmp;
     (*f).tmp = id + 1;
     return id;
-
-    }
 
     }
 }
 
 fn freg(f: *mut Fn, id: i32) {
     unsafe {
-    unsafe {
     rt_b((*f).body, 37);
     rt_b((*f).body, 116);
     rt_i((*f).body, id as i64);
 
     }
-
-    }
 }
 
 fn flabel(f: *mut Fn, id: i32) {
-    unsafe {
     unsafe {
     rt_b((*f).body, 76);
     rt_i((*f).body, id as i64);
@@ -186,24 +152,18 @@ fn flabel(f: *mut Fn, id: i32) {
     rt_b((*f).body, 10);
 
     }
-
-    }
 }
 
 fn fbrlbl(f: *mut Fn, id: i32) {
-    unsafe {
     unsafe {
     fs(f, "  br label %L");
     fi(f, id as i64);
     fnewline(f);
 
     }
-
-    }
 }
 
 fn fbrcond(f: *mut Fn, cond: str, tid: i32, fid: i32) {
-    unsafe {
     unsafe {
     fs(f, "  br i1 ");
     fs(f, cond);
@@ -214,12 +174,9 @@ fn fbrcond(f: *mut Fn, cond: str, tid: i32, fid: i32) {
     fnewline(f);
 
     }
-
-    }
 }
 
 fn ftemp(f: *mut Fn, ty: *mut Type) -> str {
-    unsafe {
     unsafe {
     let id: i32 = fnewtmp(f);
     let name: str = ir_name(f, id);
@@ -230,22 +187,16 @@ fn ftemp(f: *mut Fn, ty: *mut Type) -> str {
     return name;
 
     }
-
-    }
 }
 
 fn fs_entry(f: *mut Fn, s: str) {
     unsafe {
-    unsafe {
     rt_s((*f).entry, s);
-
-    }
 
     }
 }
 
 fn ir_name(f: *mut Fn, id: i32) -> str {
-    unsafe {
     unsafe {
     let mut b: Buf = rt_buf((*(*f).cg).a);
     let bp: *mut Buf = &mut b;
@@ -255,12 +206,9 @@ fn ir_name(f: *mut Fn, id: i32) -> str {
     return rt_view(bp);
 
     }
-
-    }
 }
 
 fn var_name(f: *mut Fn, slot: i32) -> str {
-    unsafe {
     unsafe {
     let mut b: Buf = rt_buf((*(*f).cg).a);
     let bp: *mut Buf = &mut b;
@@ -270,12 +218,9 @@ fn var_name(f: *mut Fn, slot: i32) -> str {
     return rt_view(bp);
 
     }
-
-    }
 }
 
 fn llty(cg: *mut Cg, t: *mut Type) -> str {
-    unsafe {
     unsafe {
     if t == null {
         return "void";
@@ -322,12 +267,9 @@ fn llty(cg: *mut Cg, t: *mut Type) -> str {
     return "i64";
 
     }
-
-    }
 }
 
 fn is_agg(t: *mut Type) -> bool {
-    unsafe {
     unsafe {
     if t == null {
         return false;
@@ -336,12 +278,9 @@ fn is_agg(t: *mut Type) -> bool {
     return k == K::Str || k == K::Slice || k == K::Array || k == K::Struct || k == K::Vec;
 
     }
-
-    }
 }
 
 fn add_hex_byte(b: *mut Buf, v: u8) {
-    unsafe {
     unsafe {
     let hexes: [u8; 16] = [48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 97, 98, 99, 100, 101, 102];
     rt_b(b, 92);
@@ -349,12 +288,9 @@ fn add_hex_byte(b: *mut Buf, v: u8) {
     rt_b(b, hexes[(v & 15) as usize]);
 
     }
-
-    }
 }
 
 fn add_string(cg: *mut Cg, data: str) -> i32 {
-    unsafe {
     unsafe {
     let id: i32 = (*cg).strs;
     (*cg).strs = id + 1;
@@ -384,12 +320,9 @@ fn add_string(cg: *mut Cg, data: str) -> i32 {
     return id;
 
     }
-
-    }
 }
 
 fn add_cstr(cg: *mut Cg, data: str) -> i32 {
-    unsafe {
     unsafe {
     let mut b: Buf = rt_buf((*cg).a);
     let bp: *mut Buf = &mut b;
@@ -398,12 +331,9 @@ fn add_cstr(cg: *mut Cg, data: str) -> i32 {
     return add_string(cg, rt_view(bp));
 
     }
-
-    }
 }
 
 fn str_id_ptr(f: *mut Fn, id: i32, n: usize) -> str {
-    unsafe {
     unsafe {
     let tid: i32 = fnewtmp(f);
     fs(f, "  %t");
@@ -419,12 +349,9 @@ fn str_id_ptr(f: *mut Fn, id: i32, n: usize) -> str {
     return rt_view(bp);
 
     }
-
-    }
 }
 
 fn make_str_val(f: *mut Fn, text: str) -> Val {
-    unsafe {
     unsafe {
     let n: usize = len(text);
     let id: i32 = add_string((*f).cg, text);
@@ -444,12 +371,9 @@ fn make_str_val(f: *mut Fn, text: str) -> Val {
     return v_addr((*(*f).cg).str_ty, slot);
 
     }
-
-    }
 }
 
 fn make_cstr_val(f: *mut Fn, text: str) -> Val {
-    unsafe {
     unsafe {
     let n: usize = len(text) + 1;
     let id: i32 = add_cstr((*f).cg, text);
@@ -458,14 +382,11 @@ fn make_cstr_val(f: *mut Fn, text: str) -> Val {
     return v_ssa(ct, p);
 
     }
-
-    }
 }
 
 // Builds a `{ ptr, i64 }` slice value in a stack slot from a data pointer and
 // a length operand. Used for `&array` coercion and range slicing.
 fn gen_slice_val(f: *mut Fn, ty: *mut Type, data: str, n: str) -> Val {
-    unsafe {
     unsafe {
     let slot: str = ftemp(f, ty);
     let p0: i32 = fnewtmp(f);
@@ -481,15 +402,12 @@ fn gen_slice_val(f: *mut Fn, ty: *mut Type, data: str, n: str) -> Val {
     return v_addr(ty, slot);
 
     }
-
-    }
 }
 
 // Branches to an abort block unless `cond` (an i1 register) holds. The abort
 // block prints `msg` on fd 2 and exits 101, matching the Rust oracle. Control
 // continues in the fallthrough block after this call.
 fn gen_abort_if(f: *mut Fn, cond: str, msg: str) {
-    unsafe {
     unsafe {
     let good: i32 = fnewlbl(f);
     let bad: i32 = fnewlbl(f);
@@ -504,8 +422,6 @@ fn gen_abort_if(f: *mut Fn, cond: str, msg: str) {
     fs(f, "  unreachable\n");
     (*(*f).cg).used_fatal = true;
     flabel(f, good);
-
-    }
 
     }
 }
@@ -530,7 +446,6 @@ fn float_ll(a: *mut Arena, ty: *mut Type, bits: i64) -> str {
 
 fn operand(f: *mut Fn, v: Val, ty: *mut Type) -> str {
     unsafe {
-    unsafe {
     if v.is_const {
         if ty != null && ((*ty).kind == K::Ptr || (*ty).kind == K::CStr || (*ty).kind == K::Fn) {
             return "null";
@@ -552,12 +467,9 @@ fn operand(f: *mut Fn, v: Val, ty: *mut Type) -> str {
     return v.reg;
 
     }
-
-    }
 }
 
 fn cast_operand_to_i64(f: *mut Fn, v: Val, ty: *mut Type) -> str {
-    unsafe {
     unsafe {
     if v.is_const {
         return operand(f, v, ty);
@@ -582,12 +494,9 @@ fn cast_operand_to_i64(f: *mut Fn, v: Val, ty: *mut Type) -> str {
     return reg_of(f, id);
 
     }
-
-    }
 }
 
 fn reg_of(f: *mut Fn, id: i32) -> str {
-    unsafe {
     unsafe {
     let mut b: Buf = rt_buf((*(*f).cg).a);
     let bp: *mut Buf = &mut b;
@@ -595,12 +504,9 @@ fn reg_of(f: *mut Fn, id: i32) -> str {
     return rt_view(bp);
 
     }
-
-    }
 }
 
 fn load_val(f: *mut Fn, addr: str, ty: *mut Type) -> Val {
-    unsafe {
     unsafe {
     if is_agg(ty) {
         return v_addr(ty, addr);
@@ -612,12 +518,9 @@ fn load_val(f: *mut Fn, addr: str, ty: *mut Type) -> Val {
     return v_ssa(ty, reg_of(f, id));
 
     }
-
-    }
 }
 
 fn materialize(f: *mut Fn, v: Val, ty: *mut Type) -> str {
-    unsafe {
     unsafe {
     if !is_agg(ty) {
         return operand(f, v, ty);
@@ -632,12 +535,9 @@ fn materialize(f: *mut Fn, v: Val, ty: *mut Type) -> str {
     return v.reg;
 
     }
-
-    }
 }
 
 fn store_val(f: *mut Fn, addr: str, v: Val, ty: *mut Type) {
-    unsafe {
     unsafe {
     if is_agg(ty) {
         let op: str = materialize(f, v, ty);
@@ -651,12 +551,9 @@ fn store_val(f: *mut Fn, addr: str, v: Val, ty: *mut Type) {
     }
 
     }
-
-    }
 }
 
 fn load_volatile(f: *mut Fn, addr: str, ty: *mut Type) -> Val {
-    unsafe {
     unsafe {
     if is_agg(ty) {
         return v_addr(ty, addr);
@@ -668,12 +565,9 @@ fn load_volatile(f: *mut Fn, addr: str, ty: *mut Type) -> Val {
     return v_ssa(ty, reg_of(f, id));
 
     }
-
-    }
 }
 
 fn store_volatile(f: *mut Fn, addr: str, v: Val, ty: *mut Type) {
-    unsafe {
     unsafe {
     if is_agg(ty) {
         let op: str = materialize(f, v, ty);
@@ -687,12 +581,9 @@ fn store_volatile(f: *mut Fn, addr: str, v: Val, ty: *mut Type) {
     }
 
     }
-
-    }
 }
 
 fn alloca_slot(f: *mut Fn, d: *mut Decl) -> str {
-    unsafe {
     unsafe {
     let name: str = var_name(f, (*d).slot);
     fs_entry(f, name);
@@ -700,8 +591,6 @@ fn alloca_slot(f: *mut Fn, d: *mut Decl) -> str {
     fs_entry(f, llty((*f).cg, (*d).ty));
     fs_entry(f, "\n");
     return name;
-
-    }
 
     }
 }
@@ -716,7 +605,6 @@ fn str_data_ptr(f: *mut Fn, text: str) -> str {
 
 fn gen_vec_field(f: *mut Fn, hdr: str, idx: i32) -> str {
     unsafe {
-    unsafe {
     let id: i32 = fnewtmp(f);
     fs(f, "  %t"); fi(f, id as i64);
     fs(f, " = getelementptr inbounds { ptr, i64, i64 }, ptr ");
@@ -725,14 +613,11 @@ fn gen_vec_field(f: *mut Fn, hdr: str, idx: i32) -> str {
     return reg_of(f, id);
 
     }
-
-    }
 }
 
 // Address of the 24-byte vec header for an expression. Vec values are always
 // aggregates, so `gen_expr` yields a slot address; `gen_addr` covers places.
 fn vec_hdr(f: *mut Fn, e: *mut Expr) -> str {
-    unsafe {
     unsafe {
     let mut h: Val = null_val();
     if is_place(e) {
@@ -749,12 +634,9 @@ fn vec_hdr(f: *mut Fn, e: *mut Expr) -> str {
     return hp;
 
     }
-
-    }
 }
 
 fn gen_addr(f: *mut Fn, e: *mut Expr) -> Val {
-    unsafe {
     unsafe {
     let k: E = (*e).kind;
     if k == E::StrLit {
@@ -886,16 +768,11 @@ fn gen_addr(f: *mut Fn, e: *mut Expr) -> Val {
     return v_const((*e).ty, 0);
 
     }
-
-    }
 }
 
 fn null_val() -> Val {
     unsafe {
-    unsafe {
     return Val { kind: 2, ty: null, reg: "", is_const: false, ival: 0 };
-
-    }
 
     }
 }
@@ -951,7 +828,6 @@ fn gen_checked_arith(f: *mut Fn, op: T, a: str, b: str, ty: *mut Type) -> str {
 // signed `MIN / -1` overflow, exactly like the Rust oracle.
 fn gen_guard_div(f: *mut Fn, a: str, b: str, ty: *mut Type) {
     unsafe {
-    unsafe {
     let bits: i32 = int_bits(ty);
     let zid: i32 = fnewtmp(f);
     fs(f, "  %t"); fi(f, zid as i64);
@@ -989,12 +865,9 @@ fn gen_guard_div(f: *mut Fn, a: str, b: str, ty: *mut Type) {
     gen_abort_if(f, reg_of(f, gid), "corex: division by zero or signed overflow\n");
 
     }
-
-    }
 }
 
 fn gen_simple_bin(f: *mut Fn, op: T, a: str, b: str, ty: *mut Type) -> str {
-    unsafe {
     unsafe {
     if (*((*f).cg)).sanitize && checked_int(ty) && (op == T::Plus || op == T::Minus || op == T::Star) {
         return gen_checked_arith(f, op, a, b, ty);
@@ -1044,12 +917,9 @@ fn gen_simple_bin(f: *mut Fn, op: T, a: str, b: str, ty: *mut Type) -> str {
     return reg_of(f, id);
 
     }
-
-    }
 }
 
 fn gen_cmp(f: *mut Fn, op: T, a: str, b: str, ty: *mut Type) -> str {
-    unsafe {
     unsafe {
     let id: i32 = fnewtmp(f);
     fs(f, "  %t"); fi(f, id as i64);
@@ -1087,12 +957,9 @@ fn gen_cmp(f: *mut Fn, op: T, a: str, b: str, ty: *mut Type) -> str {
     return reg_of(f, id);
 
     }
-
-    }
 }
 
 fn gen_cast(f: *mut Fn, e: *mut Expr) -> Val {
-    unsafe {
     unsafe {
     let from: *mut Type = (*e).opty;
     let to: *mut Type = (*e).ty;
@@ -1183,12 +1050,9 @@ fn gen_cast(f: *mut Fn, e: *mut Expr) -> Val {
     return v_ssa(to, reg_of(f, id));
 
     }
-
-    }
 }
 
 fn narrow(f: *mut Fn, wide: str, to: *mut Type) -> Val {
-    unsafe {
     unsafe {
     let k: K = (*to).kind;
     if (k == K::I64 || k == K::U64 || k == K::Usize || k == K::Isize) {
@@ -1200,12 +1064,9 @@ fn narrow(f: *mut Fn, wide: str, to: *mut Type) -> Val {
     return v_ssa(to, reg_of(f, id));
 
     }
-
-    }
 }
 
 fn int_bits(t: *mut Type) -> i32 {
-    unsafe {
     unsafe {
     let k: K = (*t).kind;
     if k == K::Bool { return 1; }
@@ -1215,12 +1076,9 @@ fn int_bits(t: *mut Type) -> i32 {
     return 64;
 
     }
-
-    }
 }
 
 fn gen_binary(f: *mut Fn, e: *mut Expr) -> Val {
-    unsafe {
     unsafe {
     let op: T = (*e).op;
     if op == T::AmpAmp || op == T::PipePipe {
@@ -1290,8 +1148,6 @@ fn gen_binary(f: *mut Fn, e: *mut Expr) -> Val {
     let a: str = operand(f, l, rt);
     let b: str = operand(f, r, rt);
     return v_ssa((*e).ty, gen_simple_bin(f, op, a, b, rt));
-
-    }
 
     }
 }
@@ -1467,7 +1323,6 @@ fn store_bitfield(f: *mut Fn, ptr: str, fld: *mut Field, v: Val) {
 }
 
 fn gen_expr(f: *mut Fn, e: *mut Expr) -> Val {
-    unsafe {
     unsafe {
     if e == null {
         return v_void();
@@ -1743,8 +1598,6 @@ fn gen_expr(f: *mut Fn, e: *mut Expr) -> Val {
         return v_addr(ty, slot);
     }
     return v_void();
-
-    }
 
     }
 }
@@ -2041,7 +1894,6 @@ fn gen_atomic(f: *mut Fn, e: *mut Expr, bid: i32) -> Val {
 }
 
 fn gen_call(f: *mut Fn, e: *mut Expr) -> Val {
-    unsafe {
     unsafe {
     let bid: i32 = (*e).index;
     if bid == 0 {
@@ -2464,12 +2316,9 @@ fn gen_call(f: *mut Fn, e: *mut Expr) -> Val {
     return v_void();
 
     }
-
-    }
 }
 
 fn gen_user_call(f: *mut Fn, e: *mut Expr) -> Val {
-    unsafe {
     unsafe {
     let d: *mut Decl = (*e).decl;
     let args: *mut Buf = rt_alloc((*(*f).cg).a, sizeof(Buf)) as *mut Buf;
@@ -2555,16 +2404,11 @@ fn gen_user_call(f: *mut Fn, e: *mut Expr) -> Val {
     return v_ssa(ret, reg_of(f, id));
 
     }
-
-    }
 }
 
 fn rt_buf_len(b: *mut Buf) -> usize {
     unsafe {
-    unsafe {
     return (*b).len;
-
-    }
 
     }
 }
@@ -2657,7 +2501,6 @@ fn gen_print(f: *mut Fn, e: *mut Expr) {
 
 fn gen_assert_panic(f: *mut Fn, e: *mut Expr, bid: i32) -> Val {
     unsafe {
-    unsafe {
     if bid == 7 {
         let arg: *mut Expr = (*e).args;
         let v: Val = gen_expr(f, arg);
@@ -2690,8 +2533,6 @@ fn gen_assert_panic(f: *mut Fn, e: *mut Expr, bid: i32) -> Val {
     (*(*f).cg).used_assert = true;
     (*(*f).cg).used_fatal = true;
     return v_void();
-
-    }
 
     }
 }
@@ -2776,7 +2617,6 @@ fn gen_do_while(f: *mut Fn, st: *mut Stmt) {
 }
 
 fn gen_stmt(f: *mut Fn, st: *mut Stmt) {
-    unsafe {
     unsafe {
     let k: S = (*st).kind;
     if k == S::Let {
@@ -2979,12 +2819,9 @@ fn gen_stmt(f: *mut Fn, st: *mut Stmt) {
     }
 
     }
-
-    }
 }
 
 fn gen_switch(f: *mut Fn, st: *mut Stmt) {
-    unsafe {
     unsafe {
     let ty: *mut Type = (*(*st).expr).ty;
     let v: Val = gen_expr(f, (*st).expr);
@@ -3037,8 +2874,6 @@ fn gen_switch(f: *mut Fn, st: *mut Stmt) {
     flabel(f, end);
     (*f).loops = (*ctx).next;
     (*f).terminated = false;
-
-    }
 
     }
 }
@@ -3116,7 +2951,6 @@ fn stmt_starts_label(st: *mut Stmt) -> bool {
 
 fn gen_block(f: *mut Fn, head: *mut Stmt) -> bool {
     unsafe {
-    unsafe {
     let mut s: *mut Stmt = head;
     while s != null {
         if !(*f).terminated || (*s).kind == S::Label {
@@ -3136,8 +2970,6 @@ fn gen_block(f: *mut Fn, head: *mut Stmt) -> bool {
     return (*f).terminated;
 
     }
-
-    }
 }
 
 fn cg_buf(cg: *mut Cg) -> *mut Buf {
@@ -3151,7 +2983,6 @@ fn cg_buf(cg: *mut Cg) -> *mut Buf {
 }
 
 fn gen_types(cg: *mut Cg) {
-    unsafe {
     unsafe {
     let mut d: *mut Decl = (*((*cg).sem)).globals;
     while d != null {
@@ -3171,8 +3002,6 @@ fn gen_types(cg: *mut Cg) {
         }
         d = (*d).next;
     }
-    }
-
     }
 }
 
@@ -3351,7 +3180,6 @@ fn const_init(cg: *mut Cg, d: *mut Decl) -> str {
 
 fn gen_globals(cg: *mut Cg) {
     unsafe {
-    unsafe {
     let mut d: *mut Decl = (*((*cg).sem)).globals;
     while d != null {
         if (*d).kind == D::Global {
@@ -3371,8 +3199,6 @@ fn gen_globals(cg: *mut Cg) {
         }
         d = (*d).next;
     }
-    }
-
     }
 }
 
@@ -3450,7 +3276,6 @@ fn cg_collect_label_stmt(f: *mut Fn, st: *mut Stmt) {
 }
 
 fn gen_fn(cg: *mut Cg, d: *mut Decl) {
-    unsafe {
     unsafe {
     let ret: *mut Type = (*d).ty;
     let mut f: Fn = Fn { cg: cg, d: d, entry: null, body: null, tmp: 0, lbl: 1, terminated: false, loops: null, labels: null };
@@ -3548,12 +3373,9 @@ fn gen_fn(cg: *mut Cg, d: *mut Decl) {
     rt_s((*cg).defs, rt_view((*fp).body));
     rt_s((*cg).defs, "}\n\n");
     }
-
-    }
 }
 
 fn gen_helpers(cg: *mut Cg) {
-    unsafe {
     unsafe {
     let mut h: Buf = rt_buf((*cg).a);
     let hp: *mut Buf = &mut h;
@@ -3686,12 +3508,9 @@ done:
     rt_s(hp, "define weak i32 @memcmp(ptr %a, ptr %b, i64 %n) {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [ 0, %entry ], [ %next, %more ]\n  %cond = icmp ult i64 %i, %n\n  br i1 %cond, label %body, label %equal\nbody:\n  %ap = getelementptr inbounds i8, ptr %a, i64 %i\n  %av = load i8, ptr %ap, align 1\n  %bp = getelementptr inbounds i8, ptr %b, i64 %i\n  %bv = load i8, ptr %bp, align 1\n  %same = icmp eq i8 %av, %bv\n  br i1 %same, label %more, label %diff\nmore:\n  %next = add i64 %i, 1\n  br label %loop\ndiff:\n  %ax = zext i8 %av to i32\n  %bx = zext i8 %bv to i32\n  %d = sub i32 %ax, %bx\n  ret i32 %d\nequal:\n  ret i32 0\n}\n\n");
     rt_s((*cg).defs, rt_view(hp));
     }
-
-    }
 }
 
 fn gen_entry(cg: *mut Cg, out: *mut Buf) {
-    unsafe {
     unsafe {
     // `--hosted` leaves `_start` to the C runtime; shared/static-library
     // output has no entry point at all.
@@ -3713,8 +3532,6 @@ fn gen_entry(cg: *mut Cg, out: *mut Buf) {
         rt_s(out, "define void @_start() #0 {\nentry:\n  %r = call i32 @main()\n  %ext = sext i32 %r to i64\n  %e = call i64 @_cx_syscall(i64 60, i64 %ext, i64 0, i64 0, i64 0, i64 0, i64 0)\n  unreachable\n}\n\n");
     }
     (*cg).used_syscall = true;
-    }
-
     }
 }
 
@@ -3911,14 +3728,11 @@ fn cg_test_entry(cg: *mut Cg, out: *mut Buf) {
 
 fn cg_run_tests(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program, sem: *mut Sem) -> str {
     unsafe {
-    unsafe {
     let cg: *mut Cg = cg_init(a, sem, false, false, true);
     cg_prelude(cg);
     let mut entry: Buf = rt_buf(a);
     let ep: *mut Buf = &mut entry;
     cg_test_entry(cg, ep);
     return cg_module(cg, ep);
-    }
-
     }
 }
