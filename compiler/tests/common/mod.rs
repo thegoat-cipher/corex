@@ -25,6 +25,7 @@
 use std::ffi::OsString;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use corex::diagnostics::{Diagnostic, Severity, SourceFile, Span};
 
@@ -86,9 +87,7 @@ pub mod driver {
                 let (path, cleanup) = source_path(file);
                 let out = run(&bin, &["check".into(), path_as_arg(&path)]);
                 let diagnostics = parse_diagnostics(file, &out.stderr);
-                if let Some(dir) = cleanup {
-                    let _ = std::fs::remove_dir_all(dir);
-                }
+                cleanup_path(cleanup);
                 if out.status.success() {
                     // Tests only match `Ok(_)`; the value is never inspected in
                     // the suite. Re-run the oracle frontend so the type is real.
@@ -109,9 +108,7 @@ pub mod driver {
                 let (path, cleanup) = source_path(file);
                 let out = run(&bin, &["emit-ir".into(), path_as_arg(&path)]);
                 let diagnostics = parse_diagnostics(file, &out.stderr);
-                if let Some(dir) = cleanup {
-                    let _ = std::fs::remove_dir_all(dir);
-                }
+                cleanup_path(cleanup);
                 if out.status.success() {
                     Ok(String::from_utf8_lossy(&out.stdout).into_owned())
                 } else if diagnostics.is_empty() {
@@ -131,9 +128,7 @@ pub mod driver {
                 let (path, cleanup) = source_path(&file);
                 let out = run(&bin, &["lint".into(), path_as_arg(&path)]);
                 let diagnostics = parse_diagnostics(&file, &out.stderr);
-                if let Some(dir) = cleanup {
-                    let _ = std::fs::remove_dir_all(dir);
-                }
+                cleanup_path(cleanup);
                 if out.status.success() {
                     Ok(diagnostics)
                 } else {
@@ -236,18 +231,14 @@ pub mod driver {
             )]);
         }
         let file = &roots[0];
-        if config.debug_info {
-            return Err(vec![parity_error(
-                "`-g`/DWARF is rejected by contract in the bootstrap (SH-036)",
-            )]);
-        }
-        if config.test_mode {
-            return Err(vec![parity_error(
-                "test_mode builds need `corexc test`, which runs rather than links",
-            )]);
-        }
         let (path, cleanup) = source_path(file);
         let mut args: Vec<OsString> = vec!["build".into(), path_as_arg(&path)];
+        if config.debug_info {
+            args.push("-g".into());
+        }
+        if config.test_mode {
+            args.push("--test".into());
+        }
         args.push("-o".into());
         args.push(output.as_os_str().to_os_string());
         args.push("--opt".into());
@@ -294,9 +285,7 @@ pub mod driver {
         }
         let out = run(bin, &args);
         let diagnostics = parse_diagnostics(file, &out.stderr);
-        if let Some(dir) = cleanup {
-            let _ = std::fs::remove_dir_all(dir);
-        }
+        cleanup_path(cleanup);
         if !out.status.success() {
             return Err(if diagnostics.is_empty() {
                 vec![parity_error(&format!(
@@ -420,10 +409,40 @@ fn out_path_from(args: Vec<OsString>, _out: Output) -> PathBuf {
 
 /// Write an in-memory source to a unique `.cx` file when its nominal path does
 /// not exist on disk (most diagnostic tests use synthetic names).
+fn cleanup_path(path: Option<PathBuf>) {
+    if let Some(p) = path {
+        if p.is_dir() {
+            let _ = std::fs::remove_dir_all(p);
+        } else {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
 fn source_path(file: &SourceFile) -> (PathBuf, Option<PathBuf>) {
+    static SEQ: AtomicU64 = AtomicU64::new(0);
     let nominal = Path::new(&file.name);
+    let text = file.root_text();
     if nominal.is_file() {
-        return (nominal.to_path_buf(), None);
+        // `driver::load_source` returns concatenated text under the original
+        // name. Rebuild from the root unit and reuse the file only when its
+        // bytes match; otherwise write a sibling `.cx` so relative imports
+        // still resolve against the same directory.
+        let same = std::fs::read(nominal)
+            .map(|bytes| bytes == text.as_bytes())
+            .unwrap_or(false);
+        if same {
+            return (nominal.to_path_buf(), None);
+        }
+        let dir = nominal.parent().unwrap_or(Path::new("."));
+        let stem = nominal
+            .file_stem()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "input".to_string());
+        let seq = SEQ.fetch_add(1, Ordering::Relaxed);
+        let path = dir.join(format!("{stem}.parity-{}-{seq}.cx", std::process::id()));
+        std::fs::write(&path, text).expect("write parity source");
+        return (path.clone(), Some(path));
     }
     let dir = corex::driver::temp_dir("corexc-parity-src");
     std::fs::create_dir_all(&dir).expect("create parity source dir");
@@ -435,7 +454,7 @@ fn source_path(file: &SourceFile) -> (PathBuf, Option<PathBuf>) {
         name.push_str(".cx");
     }
     let path = dir.join(name);
-    std::fs::write(&path, &file.text).expect("write parity source");
+    std::fs::write(&path, text).expect("write parity source");
     (path, Some(dir))
 }
 
@@ -495,7 +514,7 @@ fn parse_diagnostics(file: &SourceFile, stderr: &[u8]) -> Vec<Diagnostic> {
         let mut parts = prefix.rsplitn(3, ':');
         let col: usize = parts.next().and_then(|v| v.trim().parse().ok()).unwrap_or(1);
         let line_no: usize = parts.next().and_then(|v| v.trim().parse().ok()).unwrap_or(1);
-        let _path = parts.next().unwrap_or("");
+        let path = parts.next().unwrap_or("");
         let after = &line[marker..];
         let (code, message) = if bracketed {
             match after.find("]: ") {
@@ -516,7 +535,7 @@ fn parse_diagnostics(file: &SourceFile, stderr: &[u8]) -> Vec<Diagnostic> {
                 .to_string();
             (String::new(), message)
         };
-        let start = offset_of(&file.text, line_no, col);
+        let start = file.offset_in(path, line_no, col);
         let bytes = file.text.as_bytes();
         let mut end = start;
         while end < bytes.len() && is_word(bytes[end]) {

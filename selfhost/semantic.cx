@@ -1232,7 +1232,8 @@ fn is_const_expr(s: *mut Sem, e: *mut Expr, cur: *mut Decl) -> bool {
     if k == E::Unary {
         if (*e).op == T::Amp {
             if (*e).lhs != null && (*(*e).lhs).kind == E::Ident
-                && (*(*e).lhs).decl != null && (*(*(*e).lhs).decl).kind == D::Global {
+                && (*(*e).lhs).decl != null
+                && ((*(*(*e).lhs).decl).kind == D::Global || (*(*(*e).lhs).decl).kind == D::Func) {
                 return true;
             }
             return false;
@@ -1245,7 +1246,7 @@ fn is_const_expr(s: *mut Sem, e: *mut Expr, cur: *mut Decl) -> bool {
     if k == E::Cast {
         return is_const_expr(s, (*e).lhs, cur);
     }
-    if k == E::StructLit || k == E::ArrayLit {
+    if k == E::StructLit || k == E::ArrayLit || k == E::CompoundLit {
         let mut a: *mut Expr = (*e).args;
         while a != null {
             if !is_const_expr(s, a, cur) {
@@ -1773,6 +1774,44 @@ fn check_expr_inner(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type
         (*e).opty = tt;
         (*e).ty = t;
         return t;
+    }
+    if k == E::CompoundLit {
+        let tt: *mut Type = resolve_type(s, (*e).type_arg);
+        let tk: K = (*tt).kind;
+        if tk == K::Struct {
+            let d: *mut Decl = (*tt).decl;
+            let mut arg: *mut Expr = (*e).args;
+            while arg != null {
+                let fld: *mut Field = find_field(d, (*arg).sfield);
+                if fld == null {
+                    sdiagc(s, "E0227", (*arg).file, (*arg).line, (*arg).col, "unknown field");
+                } else {
+                    let vt: *mut Type = resolve_type(s, check_expr(s, arg, (*fld).ty));
+                    if !type_compat((*fld).ty, vt) {
+                        sdiag(s, (*arg).file, (*arg).line, (*arg).col, "field type mismatch");
+                    }
+                }
+                arg = (*arg).next;
+            }
+        } else if tk == K::Array {
+            let elem: *mut Type = (*tt).elem;
+            let mut arg: *mut Expr = (*e).args;
+            while arg != null {
+                if (*arg).index < 0 || (*arg).index as i64 >= (*tt).len as i64 {
+                    sdiagc(s, "E0222", (*arg).file, (*arg).line, (*arg).col, "designated index is out of bounds");
+                }
+                let vt: *mut Type = resolve_type(s, check_expr(s, arg, elem));
+                if !type_compat(elem, vt) {
+                    sdiagc(s, "E0203", (*arg).file, (*arg).line, (*arg).col, "compound literal element type mismatch");
+                }
+                arg = (*arg).next;
+            }
+        } else {
+            sdiagc(s, "E0100", (*e).file, (*e).line, (*e).col, "compound literal requires a struct or array type");
+        }
+        (*e).opty = tt;
+        (*e).ty = tt;
+        return tt;
     }
     if k == E::StructLit {
         let d: *mut Decl = lookup(s, (*e).name);
@@ -2312,7 +2351,25 @@ fn check_call(s: *mut Sem, e: *mut Expr, expected: *mut Type) -> *mut Type {
         let d: *mut Decl = lookup(s, name);
         if d != null && (*d).kind == D::Func {
             if !visible(s, d) {
-                sdiag(s, (*e).file, (*e).line, (*e).col, "item is private to its module");
+                // The oracle resolves visibility during name lookup, so a
+                // private item is reported as undefined with its `a::b` name.
+                let mut db: Buf = rt_buf((*s).a);
+                let dbp: *mut Buf = &mut db;
+                let mut ni: usize = 0;
+                while ni < len(name) {
+                    if name[ni] == 36 {
+                        rt_s(dbp, "::");
+                    } else {
+                        rt_b(dbp, name[ni]);
+                    }
+                    ni = ni + 1;
+                }
+                let mut mb: Buf = rt_buf((*s).a);
+                let mbp: *mut Buf = &mut mb;
+                rt_s(mbp, "undefined item `");
+                rt_s(mbp, rt_view(dbp));
+                rt_s(mbp, "`");
+                sdiagc(s, "E0201", (*e).file, (*e).line, (*e).col, rt_view(mbp));
             }
             (*e).decl = d;
             let mut arg: *mut Expr = (*e).args;

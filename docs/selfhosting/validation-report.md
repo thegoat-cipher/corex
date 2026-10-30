@@ -2,14 +2,16 @@
 
 Date: 2026-10-29
 Compiler under test: integrated `selfhost/` with the SH-033 concurrency surface,
-SH-034 library closure, and the SH-037 LSP (534 functions, 17,236 lines).
+SH-034 library closure, the SH-037 LSP, the SH-039 behaviour suite, and the
+SH-044 cleanup (545 functions, 17,747 lines after this tooling change;
+534 / 17,236 before it).
 
 ## 1. Result summary
 
 | Gate | Result | Evidence |
 |---|---|---|
-| Stage 0 builds Stage 1 | PASS | Stage 1 `96f1ef30…`; runs the corpus |
-| Stage 1 builds Stage 2 | PASS | Stage 2 `f3e770a3…` |
+| Stage 0 builds Stage 1 | PASS | Stage 1 `57075bae…`; runs the corpus |
+| Stage 1 builds Stage 2 | PASS | Stage 2 `bcf17bc8…` |
 | Stage 2 builds Stage 3 | PASS | Stage 3 identical to Stage 2 |
 | Stage 3 builds Stage 4 | PASS | Stage 4 identical |
 | Stage 2/3 compile user programs | PASS | 270 checks per stage; outputs byte-identical |
@@ -40,7 +42,7 @@ Additional gates:
 | LSP protocol (`lsp.py`) | 35/35 |
 | Differential token/AST/IR dumps | 81/81 |
 | Fuzz/ASan inputs | 330/330 |
-| Parameterized Rust suite (`behavior.py`, Stage 2) | 126 passed, 9 failed, 70 blocked, 0 timeout (205 rows) |
+| Parameterized Rust suite (`behavior.py`, Stage 2) | 137 passed, 0 failed, 68 blocked, 0 timeout (205 rows) |
 | Concurrency runtime parity | 33/33 |
 | `lib/corex` modules | 16/16, both compilers |
 | Rust reference tests | 205/205 |
@@ -77,10 +79,10 @@ against both compilers.
 ## 5. Bootstrap validation
 
 ```text
-stage1 96f1ef30e68a682ba38fadbc31f15bb7befadcfb884d338a00176bf3f3f87b3d
-stage2 f3e770a3c88e66a05494bea7e3a9dcaf405acec63c30e2bf9f4e0ad9c8ad3c71
-stage3 f3e770a3c88e66a05494bea7e3a9dcaf405acec63c30e2bf9f4e0ad9c8ad3c71
-stage4 f3e770a3c88e66a05494bea7e3a9dcaf405acec63c30e2bf9f4e0ad9c8ad3c71
+stage1 57075baed1bb96564739e1274f16716fcd5fa693ee22c5a916eef7e5433796c0
+stage2 bcf17bc8ecd73f13fbce75ea24034ea160c5d027bd7e9b40077e17fc10541f64
+stage3 bcf17bc8ecd73f13fbce75ea24034ea160c5d027bd7e9b40077e17fc10541f64
+stage4 bcf17bc8ecd73f13fbce75ea24034ea160c5d027bd7e9b40077e17fc10541f64
 reproducible: stage2 == stage3 == stage4
 ```
 
@@ -91,12 +93,12 @@ Optimized levels are deterministic and self-reproducing:
 
 | Level | SHA-256 |
 |---|---|
-| `--opt 1` | `e3e6335e32182abcd258a104b8693571130e00493d7ef5a41adbda85ababd313` |
-| `--opt 2` | `9af3b41a132a0c1cc698bd7d5445a48041c5b49215b2910ad84063ebdecedd84` |
-| `--opt 3` | `51c025a044009057505d4baa7cfa8b5882c3193d75f2f494ba015ee2528baa02` |
+| `--opt 1` | `0745f798dc417c21868f697161e1a7b923f1b0284a6304076f0ee8fad8b1da42` |
+| `--opt 2` | `2cd22d2900ac4c9c2f3b1fc46473fe495841655a90cc3e394d928d665a1214f9` |
+| `--opt 3` | `37d52093a0ab10ac304aecc5fa58e6a0299f5bc8a5322e1a607f5ec908752bf5` |
 
-The integrated performance table (835 ms best self-compile, 75 ms frontend,
-6.89 MB/s closure throughput, 98,880/23,940 KiB peak RSS) is recorded once
+The integrated performance table (1304 ms best self-compile, 113 ms frontend,
+4.72 MB/s closure throughput, 99,456/24,720 KiB peak RSS) is recorded once
 in `bootstrap-results.md` §3.
 
 ## 6. Acceptance criteria
@@ -106,7 +108,7 @@ in `bootstrap-results.md` §3.
 | AC-1 corpus parity | PASS (scope) | 270-check corpus at four opt levels; 8/8 examples match the oracle; `lib/corex` 16/16 |
 | AC-2 negative parity | PASS | 65/65 negative cases assert a code and match the Rust oracle |
 | AC-3 IR validity | PASS | Every build is assembled; `emit-ir --verify` covers unreachable-label IR |
-| AC-4 full 205-test behavior suite | BLOCKED | `behavior.py` runs all 205 rows: 126 passed, 9 failed, 70 blocked, 0 timeout. The 68 `--lib` unit tests are Rust-internal; the 9 divergences (static fn-pointer/`str` tables, compound literals, oracle IR text, temp-dir/`load_source` contracts, private-item prose) are listed in `worklogs/semantic-hang.md` |
+| AC-4 full 205-test behavior suite | PASS (scope) | `behavior.py` runs all 205 rows: 137 passed, 0 failed, 68 blocked, 0 timeout. Every CLI-expressible integration test passes; the 68 `--lib` unit tests call Rust-internal modules and are reported as blocked with that reason. See `worklogs/semantic-hang.md` |
 | AC-5 modules/FFI | PASS (scope) | Module projects, archives/shared objects, C both directions |
 | AC-6 determinism | PASS | Twin builds byte-identical |
 | AC-7 fixed point | PASS | Stage 2 == Stage 3 == Stage 4 |
@@ -121,9 +123,10 @@ in `bootstrap-results.md` §3.
 - `lib/corex` builds 16/16 modules with both compilers.
 - The LSP is implemented (`corexc lsp`, 35 protocol checks); the line editor is
   the plain `repl` with no prompt output.
-- `-g` is rejected by contract (exit 2) because the bootstrap emits no DWARF.
-- Behaviour-suite divergences are recorded in `worklogs/semantic-hang.md`;
-  no behaviour test times out.
+- `-g` emits minimal DWARF (compile unit, subprogram DIEs, line tables); local
+  variable and type DIEs are not described.
+- The behaviour suite has no failing or timing-out rows; only the 68
+  Rust-internal unit tests are blocked (see `worklogs/semantic-hang.md`).
 - Static initializers for non-plain aggregates (packed/union/bitfield/`align`)
   are rejected with E0226 rather than lowered to byte constants.
 - Aggregate/`bool` calling conventions differ from Rust `corex`, so objects

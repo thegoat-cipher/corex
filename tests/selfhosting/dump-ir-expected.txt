@@ -33,14 +33,15 @@
  define weak i32 @memcmp(ptr %, ptr %, i64 %)
  define weak ptr @memcpy(ptr %, ptr %, i64 %)
 ## structs
-@@ -1,6 +1,6 @@
-+define % @make(i32 %)
+@@ -1,7 +1,7 @@
  define i32 @main()
  define void @_start()
 -define void @make(ptr %, i32 %)
  define weak i32 @memcmp(ptr %, ptr %, i64 %)
  define weak ptr @memcpy(ptr %, ptr %, i64 %)
  define weak ptr @memmove(ptr %, ptr %, i64 %)
+ define weak void @memset(ptr %, i8 %, i64 %)
++define { i32, i64 } @make(i32 %)
 ## vec
 @@ -1,8 +1,8 @@
  define i32 @main()

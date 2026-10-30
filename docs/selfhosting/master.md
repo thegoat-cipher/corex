@@ -11,7 +11,7 @@ bootstrap.
 ## 2. Current stage
 
 **Stage 3 reproducibility verified (fixed point: Stage 2 == Stage 3 == Stage 4).**
-The integrated compiler is **534 functions / 17,236 lines** across 15
+The integrated compiler is **545 functions / 17,747 lines** across 15
 `selfhost/*.cx` files (including the LSP).
 
 | Stage | Compiler | Output | Status |
@@ -24,10 +24,10 @@ The integrated compiler is **534 functions / 17,236 lines** across 15
 Hashes (final integrated run, `--opt 0`):
 
 ```text
-stage1 96f1ef30e68a682ba38fadbc31f15bb7befadcfb884d338a00176bf3f3f87b3d
-stage2 f3e770a3c88e66a05494bea7e3a9dcaf405acec63c30e2bf9f4e0ad9c8ad3c71
-stage3 f3e770a3c88e66a05494bea7e3a9dcaf405acec63c30e2bf9f4e0ad9c8ad3c71
-stage4 f3e770a3c88e66a05494bea7e3a9dcaf405acec63c30e2bf9f4e0ad9c8ad3c71
+stage1 57075baed1bb96564739e1274f16716fcd5fa693ee22c5a916eef7e5433796c0
+stage2 bcf17bc8ecd73f13fbce75ea24034ea160c5d027bd7e9b40077e17fc10541f64
+stage3 bcf17bc8ecd73f13fbce75ea24034ea160c5d027bd7e9b40077e17fc10541f64
+stage4 bcf17bc8ecd73f13fbce75ea24034ea160c5d027bd7e9b40077e17fc10541f64
 ```
 
 Stage 2/3/4 are byte-identical. Stage 1 is Rust-compiled and differs by design
@@ -48,9 +48,16 @@ Stage 2/3/4 are byte-identical. Stage 1 is Rust-compiled and differs by design
   `print`, special values, and compound assignment (`+= -= *= /=`, plus
   `%=` via `frem` when libm is linked).
 - Checked division/remainder (zero and `MIN/-1` abort 101).
-- Static aggregate/global initializers for plain layouts; non-plain
-  (packed/union/bitfield/`align`) statics are rejected with E0226, matching the
-  oracle.
+- Static aggregate/global initializers for plain layouts, including
+  function-pointer tables (`[fn(...); N] = [&f]`), `[str; N]`, nested arrays,
+  and struct arrays; non-plain (packed/union/bitfield/`align`) statics are
+  rejected with E0226, matching the oracle. Plain structs use inline
+  structural IR types like the oracle.
+- Compound literals: partial struct literals (`Point { x: 9, ... }`) and typed
+  designated array literals (`[i32; 4] { 1: 10, 3: 30 }`).
+- DWARF: `-g`/`--debug` emits a compile unit, per-function
+  `DW_TAG_subprogram`, and line locations (no variable DIEs); `readelf
+  --debug-dump=decodedline/info` sees the source file, lines, and functions.
 - `str_to_cstr`, `read_file`, `write_file`.
 - Diagnostics: all 65 negative cases assert a code and match the oracle.
 - Function types/pointers, indirect calls, struct fields and dispatch tables.
@@ -69,7 +76,9 @@ Stage 2/3/4 are byte-identical. Stage 1 is Rust-compiled and differs by design
   checks in `tests/selfhosting/lsp.py`, gated by bootstrap and CI.
 - Parameterized Rust behaviour suite: `tests/selfhosting/behavior.py` runs all
   205 rows against any `corexc` with a 60 s per-process timeout and reports
-  `passed/skipped/failed/blocked/timeout` (see `worklogs/semantic-hang.md`).
+  `passed/skipped/failed/blocked/timeout`: 137 passed, 0 failed, 68 blocked
+  (the Rust-internal `--lib` unit tests), 0 timeout (see
+  `worklogs/semantic-hang.md`).
 - Semantic checker is linear in left-deep operator chains (the pointer
   pre-check and literal adoption no longer re-walk the left operand); the
   64-term regression runs in 0.10 s under a 30 s case timeout.
@@ -85,22 +94,15 @@ Stage 2/3/4 are byte-identical. Stage 1 is Rust-compiled and differs by design
 
 ## 4. Active tasks
 
-See `tasks.md`. Outstanding: **SH-039** (full Rust suite against `corexc`:
-126/205 rows pass, 9 diverge, 70 are blocked with reasons), **SH-043** (remote
-push/CI blocked by missing GitHub credentials), **SH-046** (full acceptance).
+See `tasks.md`. Outstanding: **SH-043** (remote push/CI blocked by missing
+GitHub credentials), **SH-046** (full acceptance; SH-037, SH-039, and SH-044
+are complete).
 
 ## 5. Blockers
 
-- SH-039: the parameterized suite is complete and bounded. 68 `--lib` unit
-  tests are Rust-internal (blocked), and 9 integration tests diverge:
-  static function-pointer/`str` tables (E0226), compound/designated literals,
-  oracle IR text (`__corex_*` symbol names, `%p0` parameters, `undef`),
-  builder temp-dir internals, `driver::load_source` multi-file spans, and the
-  private-item diagnostic prose. They are listed with evidence in
-  `worklogs/semantic-hang.md`.
 - SH-043: both HTTPS and SSH push attempts were rejected (no credential
   helper/askpass and no SSH key), so remote CI has not run.
-- SH-046: AC-1…AC-9 cannot complete until SH-039 and SH-043 resolve.
+- SH-046: AC-1…AC-9 cannot complete until SH-043 resolves.
 
 ## 6. Architectural decisions
 
@@ -126,7 +128,7 @@ Final observed gates (see `bootstrap-results.md` for hashes and the integrated
 performance table):
 
 ```text
-check: ok: 534 function(s), entry `main`
+check: ok: 545 function(s), entry `main`
 stage2 == stage3 == stage4
 selfhosting tests: 270 passed, 0 failed (Stage 1/2/3)
 cli tests: 80 passed, 0 failed
@@ -136,7 +138,7 @@ fuzz tests: 330 passed, 0 failed
 concurrency tests: 33 passed, 0 failed
 lib tests: 16 passed, 0 failed
 cargo test: 205 passed, 0 failed
-behavior suite: 126 passed, 9 failed, 70 blocked, 0 timeout (205 rows)
+behavior suite: 137 passed, 0 failed, 68 blocked, 0 timeout (205 rows)
 repro-opt: deterministic and self-reproducing at --opt 1..3
 ```
 
@@ -145,18 +147,16 @@ executable.
 
 ## 8. Next implementation priorities
 
-1. **SH-039:** close the 9 divergences listed in `worklogs/semantic-hang.md`
-   (static fn-pointer tables, compound literals, oracle IR text, adapter-only
-   contracts, private-item prose).
-2. **SH-043/046:** push, run remote CI, record final AC-1…AC-9 evidence.
-3. **SH-044:** redo the cleanup on the integrated tree if desired; it is
+1. **SH-043/046:** push, run remote CI, record final AC-1…AC-9 evidence.
+2. **SH-044:** redo the cleanup on the integrated tree if desired; it is
    non-functional.
 
 ## 9. Known limits
 
-Still absent from the bootstrap: DWARF (`-g`) and full Rust-suite parity
-(SH-039). The LSP is implemented; the line editor remains the plain `repl`
-without prompt output. Module builds are whole-program (no separate interface
+DWARF is minimal: line tables and `DW_TAG_subprogram` DIEs, but no local
+variable/type DIEs. The LSP is implemented; the line editor remains the plain
+`repl` without prompt output. The 68 `--lib` unit tests cannot run against an
+external compiler (`behavior.py` reports them as blocked). Module builds are whole-program (no separate interface
 files). All 8 examples match the oracle; `lib/corex` builds 16/16. Static
 initializers for non-plain aggregates are rejected (E0226). Aggregate/bool
 calling conventions differ from the Rust compiler, so objects from the two

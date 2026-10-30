@@ -3,16 +3,16 @@
 Last updated: 2026-10-29. Statuses: NOT STARTED, IN PROGRESS, BLOCKED,
 COMPLETED. A task is only COMPLETED with the evidence named in the row.
 
-Final integrated compiler: **534 functions**, **17,236 lines** across 15
-`selfhost/*.cx` files (LSP included; 558 / 17,653 before the SH-044 cleanup).
+Final integrated compiler: **545 functions**, **17,747 lines** across 15
+`selfhost/*.cx` files (LSP included; SH-044 cleanup applied).
 `selfhost/bootstrap.sh` builds Stage 1–4, runs the behavioural corpus (270
 checks per stage), CLI parity (80), the LSP protocol suite (35), differential
 dumps (81), fuzzing/ASan (330), concurrency parity (33), the `lib/corex`
 matrix (16), and the performance baseline;
 `selfhost/repro-opt.sh --corpus` covers `--opt 1..3`. The parameterized Rust
 behaviour suite is `tests/selfhosting/behavior.py` (205 rows:
-126 passed / 9 failed / 70 blocked / 0 timeout) — see
-`worklogs/semantic-hang.md`.
+137 passed / 0 failed / 68 blocked / 0 timeout; the blocked rows are the
+Rust-internal `--lib` unit tests) — see `worklogs/semantic-hang.md`.
 
 | ID | Task | Status | Evidence |
 |---|---|---|---|
@@ -51,26 +51,26 @@ behaviour suite is `tests/selfhosting/behavior.py` (205 rows:
 | SH-033 | Threads, atomics, volatile, TLS, inline asm | COMPLETED | volatile globals/`volatile_load`/`volatile_store`; 12 atomic builtins; `asm`; `std_sync`/`std_tls`/`std_thread` runtime parity at `--opt 0..3`; `concurrency.sh` 33/33 |
 | SH-034 | Build `lib/corex` | COMPLETED | 16/16 modules build with the bootstrap and the oracle (`tests/selfhosting/lib.sh`) |
 | SH-035 | CLI parity | COMPLETED | `run`/`exec`/`fmt`/`lint`/`doc`/`test`/REPL/stdin; build failure and signal status propagate; CLI 80/80 |
-| SH-036 | Link/emit flags | COMPLETED | `--emit obj/shared/staticlib`, `--hosted`, `--shared`, `--sanitize`, `-I`, `--cfg`, `--link`, `-L`, `-l`; `-g` is rejected by contract (exit 2) because no DWARF is emitted |
+| SH-036 | Link/emit flags | COMPLETED | `--emit obj/shared/staticlib`, `--hosted`, `--shared`, `--sanitize`, `-I`, `--cfg`, `--link`, `-L`, `-l`; `-g` emits DWARF (compile unit, per-function `DW_TAG_subprogram`, line locations); `build --test` links the test runner |
 | SH-037 | LSP/line editor/remaining tooling | COMPLETED | `selfhost/lsp.cx` (1,499 lines) implements initialize/initialized/shutdown/exit, didOpen/didChange/didClose + publishDiagnostics, hover, definition, references, rename, completion, and whole-document formatting; `corexc lsp` wired in `driver.cx`; `lsp.py` 35/35 in bootstrap and CI |
 | SH-038 | Differential token/AST/IR dumps | COMPLETED | Rust oracle; 81/81; known IR divergences recorded |
-| SH-039 | Full Rust behavior suite against `corexc` | BLOCKED | `behavior.py` runs all 205 rows with per-process 60 s timeouts: 126 passed, 9 failed, 70 blocked, 0 timeout. The 68 `--lib` unit tests are Rust-internal (blocked); the 9 divergences (static fn-pointer tables, compound literals, oracle IR text/temp-dir/load_source contracts, private-item prose) are listed with evidence in `worklogs/semantic-hang.md`; AC-4 therefore remains blocked |
+| SH-039 | Full Rust behavior suite against `corexc` | COMPLETED | `behavior.py` runs all 205 rows with per-process 60 s timeouts: 137 passed, 0 failed, 68 blocked, 0 timeout (exit 0). Every CLI-expressible integration test passes; the 68 `--lib` unit tests call Rust-internal modules and are reported as blocked with that reason. See `worklogs/semantic-hang.md` |
 | SH-040 | Memory validation and fuzzing | COMPLETED | 330/330 ASan/fuzz; ASan required in CI; no signals |
 | SH-041 | Performance baseline | COMPLETED | Integrated table in `bootstrap-results.md` §3 (self-compile and frontend/RSS) |
-| SH-042 | Reproducibility at `--opt 1..3` | COMPLETED | `repro-opt.sh`; opt1 `e3e6335e…`, opt2 `9af3b41a…`, opt3 `51c025a0…` |
+| SH-042 | Reproducibility at `--opt 1..3` | COMPLETED | `repro-opt.sh`; opt1 `0745f798…`, opt2 `2cd22d29…`, opt3 `37d52093…` |
 | SH-043 | Commit/push and remote CI validation | BLOCKED | Push attempted from integrated main: HTTPS rejected (`could not read Username`; no askpass), SSH rejected (`Permission denied (publickey)`). Remote CI has not run. |
 | SH-044 | Bootstrap code cleanup/review | COMPLETED | Reapplied on the integrated tree by `room/corex-cleanup-blockers-ppaf` in four commits (`33a8094` unsafe unwrap, `fa135cb` dead helpers/merges, `c53a580` `Program` fields, `8320b92` `parse_program` cutover), rebased onto `b53be92`. 558 → 534 functions, 17,653 → 17,236 lines (pre-tooling-merge tree 487 → 463 / 15,787 → 15,370). Gates unchanged: 270/80/35/81/330/33/16, 205 `cargo test`, 8/8 examples; Stage 2/3/4 `f3e770a3…`. Details in `worklogs/p3.md` |
 | SH-045 | Documentation maintenance | COMPLETED | P0/P1/P2/P3 worklogs plus `worklogs/sh033-034.md`; this tracker, `master.md`, results/validation |
-| SH-046 | Full self-hosting acceptance (AC-1…AC-9) | BLOCKED | Depends on SH-039 (126/9/70/0) and SH-043 (credentials); SH-037 is complete |
+| SH-046 | Full self-hosting acceptance (AC-1…AC-9) | BLOCKED | SH-037, SH-039, and SH-044 are complete; depends on SH-043 (remote push/CI credentials) |
 
 ## Final gate evidence
 
 ```text
-compiler/target/release/corex check selfhost/corexc.cx -> ok: 534 function(s), entry `main`
-stage1 96f1ef30e68a682ba38fadbc31f15bb7befadcfb884d338a00176bf3f3f87b3d
-stage2 f3e770a3c88e66a05494bea7e3a9dcaf405acec63c30e2bf9f4e0ad9c8ad3c71
-stage3 f3e770a3c88e66a05494bea7e3a9dcaf405acec63c30e2bf9f4e0ad9c8ad3c71
-stage4 f3e770a3c88e66a05494bea7e3a9dcaf405acec63c30e2bf9f4e0ad9c8ad3c71
+compiler/target/release/corex check selfhost/corexc.cx -> ok: 545 function(s), entry `main`
+stage1 57075baed1bb96564739e1274f16716fcd5fa693ee22c5a916eef7e5433796c0
+stage2 bcf17bc8ecd73f13fbce75ea24034ea160c5d027bd7e9b40077e17fc10541f64
+stage3 bcf17bc8ecd73f13fbce75ea24034ea160c5d027bd7e9b40077e17fc10541f64
+stage4 bcf17bc8ecd73f13fbce75ea24034ea160c5d027bd7e9b40077e17fc10541f64
 reproducible: stage2 == stage3 == stage4
 selfhosting tests: 270 passed, 0 failed (Stage 1/2/3)
 cli tests: 80 passed, 0 failed
@@ -80,8 +80,8 @@ fuzz tests: 330 passed, 0 failed
 concurrency tests: 33 passed, 0 failed
 lib tests: 16 passed, 0 failed
 cargo test: 205 passed, 0 failed
-behavior suite: 126 passed, 0 skipped, 9 failed, 70 blocked, 0 timeout (205 rows)
-repro-opt: opt1 e3e6335e…, opt2 9af3b41a…, opt3 51c025a0… (deterministic, fixed point)
+behavior suite: 137 passed, 0 skipped, 0 failed, 68 blocked, 0 timeout (205 rows)
+repro-opt: opt1 0745f798…, opt2 2cd22d29…, opt3 37d52093… (deterministic, fixed point)
 examples: 8/8 match the oracle
 lib/corex: 16/16 build
 ```
