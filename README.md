@@ -19,10 +19,26 @@ fn main() -> i32 {
 }
 ```
 
-Status: **CoreX 0.3.0 — C-class systems language implemented and tested** — 205 automated
-tests pass (68 unit, 137 integration), including native compile/run tests at
-every optimization level, C ABI tests in both directions, separate-compilation
-and manifest builds, DWARF inspection, LSP sessions, and sanitizer aborts.
+Status: **CoreX 0.4.0 — self-hosted compiler release**. The Rust `corex`
+compiler remains the Stage 0 reference and passes 205 automated tests (68 unit,
+137 integration), including native compile/run tests at every optimization
+level, C ABI tests in both directions, separate-compilation and manifest builds,
+DWARF inspection, LSP sessions, and sanitizer aborts.
+
+A CoreX-written bootstrap compiler in `selfhost/` (545 functions, 17,747 lines
+across 15 files) builds itself: Stage 1 is built by Rust `corex`, and Stage 2,
+Stage 3, and Stage 4 are byte-identical (`sha256 e66cad85…`). It passes the
+270-check corpus (Stages 1-3), CLI 80, LSP 35, differential dumps 81,
+fuzz/ASan 330, concurrency 33, and `lib/corex` 16/16; the externalized
+`behavior.py` suite reports 137 passed / 0 failed / 68 blocked / 0 timeout out
+of 205 rows.
+
+The second readiness audit rates the self-hosted compiler **READY WITH CAVEATS**
+([worklog](docs/selfhosting/worklogs/selfhost-readiness-2.md)): diagnostic
+positions or counts still differ from the Rust oracle for 13 of 65 negative
+inputs (AC-2); AC-4 covers the 137 CLI-expressible rows while the 68
+Rust-internal unit tests cannot run against `corexc`; AC-8 is met with a
+documented metric rather than the original `--opt 2` evidence.
 
 The language now has function pointers, C control flow, unions/bitfields/packed
 layout, `sizeof`/`alignof`/`offsetof`, C FFI and variadic calls, file modules
@@ -260,26 +276,37 @@ source (17,747 lines across 15 files, 545 functions), emits LLVM 20 textual IR
 through external `llvm-as`/`llc`/`cc`, and produces a freestanding static
 x86-64 ELF. Stage 1 is built by the Rust compiler; Stage 2 builds itself and
 Stage 3 rebuilds it. **Stage 2, Stage 3, and Stage 4 are byte-identical**
-(`sha256 bcf17bc8…`) under `--opt 0` with LLVM 20.1.8 and cc 15.2.0.
+(`sha256 e66cad85…`) under `--opt 0` with LLVM 20.1.8 and cc 15.2.0.
 `selfhost/repro-opt.sh --corpus` verifies determinism and the self-fixed point
-at `--opt 1..3`.
+at `--opt 1..3` (`f463fd3b…`, `0d213b2b…`, `2c1cfb85…`).
 
 ```sh
-selfhost/bootstrap.sh              # Stage 1-4, corpus, CLI, LSP, dumps, fuzz, perf
-selfhost/repro-opt.sh --corpus     # optimized self-build gate
-tests/selfhosting/run.sh build/stage2/corexc
+selfhost/bootstrap.sh                                  # Stage 1-4 + all local gates
+selfhost/repro-opt.sh --corpus                         # optimized self-build gate
+tests/selfhosting/lsp.py build/stage2/corexc           # 35 LSP protocol checks
+python3 tests/selfhosting/behavior.py \
+  --compiler build/stage2/corexc --json                # 205 behavioral rows
 ```
 
-The bootstrap now covers floats, function types/pointers, `for`/`do`/labels/
+Observed gates: corpus 270 passed on each of Stages 1-3, CLI 80, LSP 35,
+differential dumps 81, fuzz/ASan 330, concurrency 33, `lib/corex` 16/16, and
+`behavior.py` 137 passed / 0 failed / 68 blocked / 0 timeout. The Rust suite is
+205/205. Remote CI was green at the audited `main` commit.
+
+The bootstrap covers floats, function types/pointers, `for`/`do`/labels/
 `goto`, unions/bitfields/packed layout, modules/manifests, macros, C
-`extern`/variadics, static aggregates and compound literals, checked division,
-IO builtins, threads/atomics/`volatile`/TLS/inline asm, DWARF (`-g`), an LSP
-server, and diagnostic codes. All 16 `lib/corex` modules build. `examples/*.cx`
-all match the Rust oracle at `--opt 0..3`. The parameterized 205-test Rust suite
-reports 137 passed / 0 failed / 68 Rust-internal unit tests blocked; module
-builds remain whole-program. Rust `corex` remains the full-language Stage 0
-reference. Details: `docs/selfhosting/master.md`,
-`bootstrap-results.md`, `validation-report.md`, and `tasks.md`.
+`extern`/variadics, static function-pointer/`str` tables, compound and
+designated literals, checked division, IO builtins,
+threads/atomics/`volatile`/TLS/inline asm, DWARF (`-g`), an LSP server, and
+diagnostic codes. All 16 `lib/corex` modules build. `examples/*.cx` all match
+the Rust oracle at `--opt 0..3`. Rust `corex` remains the full-language Stage 0
+reference. Boundaries: whole-program module builds (no separate interfaces);
+library-level threads/TLS with no join; minimal DWARF (compile unit,
+`DW_TAG_subprogram`, line locations only); aggregate/`bool` objects are not
+link-compatible with Rust `corex`; ASan covers `check` only; Linux x86-64 only.
+Details and caveats: `docs/selfhosting/master.md`, `bootstrap-results.md`,
+`validation-report.md`, `tasks.md`, and the
+[second readiness audit](docs/selfhosting/worklogs/selfhost-readiness-2.md).
 
 ## Repository layout
 
@@ -376,7 +403,17 @@ Feature boundaries:
   expose only `pub` items through generated interfaces. Legacy
   `import "file.cx";` still expands textually into one flat namespace. Struct
   fields have no per-field visibility. Public signatures may not expose private
-  local types.
+  local types. The self-hosted compiler builds projects whole-program and does
+  not emit separate interface files.
+- **Debug info.** `-g` emits a DWARF 5 compile unit, per-function
+  `DW_TAG_subprogram`, and line locations; there are no local-variable or type
+  DIEs.
+- **Sanitizers.** `--sanitize` checks signed arithmetic and hardens the
+  allocator; ASan validation covers `check` only, not `fmt`, `lint`, `doc`,
+  `dump`, or `repl`.
+- **Self-hosted ABI.** Aggregate/`bool` calling conventions differ between Rust
+  `corex` and `corexc`, so their object files are not link-compatible for
+  aggregate parameters.
 - **Threads/TLS.** `std_thread::spawn` exists but there is no join; threads exit
   via `exit(2)`. TLS is the explicit `std_tls` table keyed by thread id, not a
   compiler `thread_local`. Stacks are caller-allocated and must be freed only

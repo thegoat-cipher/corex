@@ -1,6 +1,6 @@
 # CoreX Self-Hosting — Master Status
 
-Last updated: 2026-10-29.
+Last updated: 2026-10-30 (CoreX 0.4.0 release).
 
 ## 1. Objective
 
@@ -16,7 +16,7 @@ The integrated compiler is **545 functions / 17,747 lines** across 15
 
 | Stage | Compiler | Output | Status |
 |---|---|---|---|
-| 0 | Rust `corex 0.3.0` | `build/stage1/corexc` | COMPLETED |
+| 0 | Rust `corex 0.4.0` | `build/stage1/corexc` | COMPLETED |
 | 1 | Stage 0 | `build/stage2/corexc` | COMPLETED |
 | 2 | Stage 1 | `build/stage3/corexc` | COMPLETED |
 | 3 | Stage 2 | `build/stage4/corexc` | COMPLETED |
@@ -24,10 +24,10 @@ The integrated compiler is **545 functions / 17,747 lines** across 15
 Hashes (final integrated run, `--opt 0`):
 
 ```text
-stage1 57075baed1bb96564739e1274f16716fcd5fa693ee22c5a916eef7e5433796c0
-stage2 bcf17bc8ecd73f13fbce75ea24034ea160c5d027bd7e9b40077e17fc10541f64
-stage3 bcf17bc8ecd73f13fbce75ea24034ea160c5d027bd7e9b40077e17fc10541f64
-stage4 bcf17bc8ecd73f13fbce75ea24034ea160c5d027bd7e9b40077e17fc10541f64
+stage1 a8d92b786598bb4071ebe522bde09bb7b636dc0e9f56539d8b3e33e65be4ee9a
+stage2 e66cad85e6937c55407a2025b271c744da8a0aaf145d6abbd722d28be8e876b4
+stage3 e66cad85e6937c55407a2025b271c744da8a0aaf145d6abbd722d28be8e876b4
+stage4 e66cad85e6937c55407a2025b271c744da8a0aaf145d6abbd722d28be8e876b4
 ```
 
 Stage 2/3/4 are byte-identical. Stage 1 is Rust-compiled and differs by design
@@ -91,25 +91,19 @@ Stage 2/3/4 are byte-identical. Stage 1 is Rust-compiled and differs by design
   `bootstrap-results.md` §3.
 - Optimized reproducibility gate: `repro-opt.sh --corpus` passes at `--opt 1..3`.
 - CI updated for the integrated gates.
-- Remote CI: workflow_dispatch run
-  [41095491312](https://github.com/thegoat-cipher/corex/actions/runs/41095491312)
-  green on `47b60b5` (cargo 205, examples, full bootstrap with ASan,
-  `repro-opt --corpus`, install smoke). Main was pushed as `96c3790`; its
-  push-triggered run
-  [41097021388](https://github.com/thegoat-cipher/corex/actions/runs/41097021388)
-  completed green.
+- Remote CI was green at the audited `main` commit (cargo 205, examples, full
+  bootstrap with ASan, `repro-opt --corpus`, install smoke). The install-smoke
+  step asserts `corex 0.4.0`.
 
 ## 4. Active tasks
 
 No tracked task is outstanding. `tasks.md` marks SH-043 (remote CI) and SH-046
-(AC-1…AC-9) complete; the independent master audit is the remaining external
-verification.
+(AC-1…AC-9) complete; the second readiness audit records the release as
+**READY WITH CAVEATS**.
 
 ## 5. Blockers
 
-None. Branch `room/corex-tooling-hang-fix-g3gb` is pushed and remote CI run
-[41095491312](https://github.com/thegoat-cipher/corex/actions/runs/41095491312)
-is green on `47b60b5`.
+None.
 
 ## 6. Architectural decisions
 
@@ -146,7 +140,7 @@ concurrency tests: 33 passed, 0 failed
 lib tests: 16 passed, 0 failed
 cargo test: 205 passed, 0 failed
 behavior suite: 137 passed, 0 failed, 68 blocked, 0 timeout (205 rows)
-remote CI: run 41095491312 green (13/13 steps)
+remote CI: green at the audited main commit
 repro-opt: deterministic and self-reproducing at --opt 1..3
 ```
 
@@ -155,9 +149,10 @@ executable.
 
 ## 8. Next implementation priorities
 
-1. **SH-043/046:** push, run remote CI, record final AC-1…AC-9 evidence.
-2. **SH-044:** redo the cleanup on the integrated tree if desired; it is
-   non-functional.
+1. Address the second readiness audit caveats: AC-2 diagnostic positions/counts
+   (13/65 negatives), `behavior.py` enforcement in CI, and the AC-8 metric.
+2. Keep current-state hashes, sizes, and counts synchronized with the release
+   tree (audit findings F-04–F-06).
 
 ## 9. Known limits
 
