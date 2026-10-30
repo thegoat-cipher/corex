@@ -57,13 +57,13 @@ the observed range across final runs is shown.
 
 | Metric | Observed |
 |---|---|
-| Compiler source closure | 17,236 lines, 541,991 bytes (`selfhost/*.cx`) |
-| Self-compile `build --opt 0` (best of 3) | **835 ms** (repeated runs vary with host load) |
-| Frontend `check` of the compiler source (best of 5) | **75 ms** |
-| Frontend corpus (40 files, 27,620 bytes) | 29 ms (0.91 MB/s) |
-| Frontend throughput (immutable closure) | **6.89 MB/s** |
-| Peak RSS, self-compile | 98,880 KiB (≈96.6 MiB) |
-| Peak RSS, frontend `check` | 23,940 KiB (≈23.4 MiB) |
+| Compiler source closure | 17,747 lines, 559,300 bytes (`selfhost/*.cx`) |
+| Self-compile `build --opt 0` (best of 3) | **1304 ms** (repeated runs vary with host load) |
+| Frontend `check` of the compiler source (best of 5) | **113 ms** |
+| Frontend corpus (40 files, 27,620 bytes) | 42 ms (0.63 MB/s) |
+| Frontend throughput (immutable closure) | **4.72 MB/s** |
+| Peak RSS, self-compile | 99,456 KiB (≈97.5 MiB) |
+| Peak RSS, frontend `check` | 24,720 KiB (≈24.4 MiB) |
 
 `tests/selfhosting/perf.sh` applies only a 60 s smoke bound; the numbers above
 are observations, not a gate.
@@ -96,6 +96,7 @@ fuzz tests: 330 passed, 0 failed (Stage 2)
 ASan: enabled (60 mutated inputs + corpus)
 concurrency tests: 33 passed, 0 failed (Stage 2)
 lib tests: 16 passed, 0 failed (Stage 2)
+behavior suite: 137 passed, 0 failed, 68 blocked, 0 timeout (205 rows)
 ```
 
 CLI coverage now includes build-failure status, signal-killed tools, built-in
@@ -124,9 +125,9 @@ optimized compiler:
 
 | Level | SHA-256 | Size |
 |---|---|---:|
-| `--opt 1` | `e3e6335e32182abcd258a104b8693571130e00493d7ef5a41adbda85ababd313` | 504,544 bytes |
-| `--opt 2` | `9af3b41a132a0c1cc698bd7d5445a48041c5b49215b2910ad84063ebdecedd84` | 563,736 bytes |
-| `--opt 3` | `51c025a044009057505d4baa7cfa8b5882c3193d75f2f494ba015ee2528baa02` | 906,440 bytes |
+| `--opt 1` | `0745f798dc417c21868f697161e1a7b923f1b0284a6304076f0ee8fad8b1da42` | 518,920 bytes |
+| `--opt 2` | `2cd22d2900ac4c9c2f3b1fc46473fe495841655a90cc3e394d928d665a1214f9` | 582,384 bytes |
+| `--opt 3` | `37d52093a0ab10ac304aecc5fa58e6a0299f5bc8a5322e1a607f5ec908752bf5` | 949,520 bytes |
 
 Hashes differ *across* levels by design; within each level,
 `repeat == self == fixed == stage1 oracle`.
@@ -148,8 +149,9 @@ bad stage or a failing gate. CI additionally exports `COREX_REQUIRE_ASAN=1`.
 
 - The compiler is freestanding: it uses Linux syscalls and external LLVM/cc
   tools at compile time.
-- The source is 17,236 lines across 15 files and 534 functions.
+- The source is 17,747 lines across 15 files and 545 functions.
 - Known gaps are listed in `master.md` §9, `bootstrap-architecture.md` §10, and
-  `tasks.md`: DWARF (`-g`) and full 205-test parity (SH-039; see
-  `worklogs/semantic-hang.md`). The LSP is implemented and gated (35/35).
-  `lib/corex` is complete (16/16).
+  `tasks.md`: DWARF is minimal (line tables + subprogram DIEs, no variables).
+  The LSP is implemented and gated (35/35); the behaviour suite passes every
+  CLI-expressible test (137/137; 68 Rust-internal unit tests blocked; see
+  `worklogs/semantic-hang.md`). `lib/corex` is complete (16/16).

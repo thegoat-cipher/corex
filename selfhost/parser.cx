@@ -1086,9 +1086,15 @@ fn parse_struct_lit(p: *mut P, name: str, tok: *mut Tok) -> *mut Expr {
     let e: *mut Expr = expr_new((*p).a, E::StructLit, tok);
     unsafe { (*e).name = name; }
     expect(p, T::LBrace);
+    let mut partial: bool = false;
     let mut head: *mut Expr = null;
     let mut tail: *mut Expr = null;
     while !at(p, T::RBrace) && !at(p, T::Eof) {
+        if at(p, T::Ellipsis) {
+            bump(p);
+            partial = true;
+            break;
+        }
         let ft: *mut Tok = pk(p);
         if !at(p, T::Ident) {
             perr(p, "expected field name");
@@ -1114,8 +1120,67 @@ fn parse_struct_lit(p: *mut P, name: str, tok: *mut Tok) -> *mut Expr {
         }
     }
     expect(p, T::RBrace);
-    unsafe { (*e).args = head; }
+    unsafe {
+        (*e).args = head;
+        if partial {
+            // `Point { x: 1, ... }`: a typed compound literal; omitted fields
+            // are zero-initialized.
+            (*e).kind = E::CompoundLit;
+            let ty: *mut Type = type_new((*p).a, K::Named);
+            (*ty).name = name;
+            (*e).type_arg = ty;
+        }
+    }
     return e;
+
+    }
+}
+
+fn tok_at(p: *mut P, i: i32) -> *mut Tok {
+    unsafe {
+    let mut j: i32 = i;
+    if j < 0 {
+        j = 0;
+    }
+    if j >= (*p).ntoks {
+        j = (*p).ntoks - 1;
+    }
+    return (*p).toks + j as usize;
+
+    }
+}
+
+// True for `[T; N] { ... }` (a typed designated array literal). The `{` after
+// the closing bracket disambiguates it from an array literal/repeat.
+fn compound_array_ahead(p: *mut P) -> bool {
+    unsafe {
+    if !at(p, T::LBracket) {
+        return false;
+    }
+    let mut depth: i32 = 0;
+    let mut i: i32 = (*p).pos;
+    while i < (*p).ntoks {
+        let k: T = (*tok_at(p, i)).kind;
+        if k == T::LBracket {
+            depth = depth + 1;
+        } else if k == T::RBracket {
+            depth = depth - 1;
+            if depth == 0 {
+                break;
+            }
+        }
+        i = i + 1;
+    }
+    if i >= (*p).ntoks || i < 2 {
+        return false;
+    }
+    if (*tok_at(p, i + 1)).kind != T::LBrace {
+        return false;
+    }
+    if (*tok_at(p, i - 1)).kind != T::Int || (*tok_at(p, i - 2)).kind != T::Semi {
+        return false;
+    }
+    return true;
 
     }
 }
@@ -1203,6 +1268,57 @@ fn parse_primary(p: *mut P) -> *mut Expr {
         bump(p);
         let e: *mut Expr = parse_expr(p);
         expect(p, T::RParen);
+        return e;
+    }
+    if k == T::LBracket && compound_array_ahead(p) {
+        bump(p);
+        let elem: *mut Type = parse_type(p);
+        expect(p, T::Semi);
+        let lt: *mut Tok = pk(p);
+        let n: i64 = (*lt).ival;
+        if at(p, T::Int) {
+            bump(p);
+        } else {
+            perr(p, "expected array length");
+        }
+        expect(p, T::RBracket);
+        expect(p, T::LBrace);
+        let e: *mut Expr = expr_new((*p).a, E::CompoundLit, t);
+        let mut head: *mut Expr = null;
+        let mut tail: *mut Expr = null;
+        while !at(p, T::RBrace) && !at(p, T::Eof) {
+            let it: *mut Tok = pk(p);
+            if !at(p, T::Int) {
+                perr(p, "expected array index");
+                sync(p);
+                break;
+            }
+            bump(p);
+            expect(p, T::Colon);
+            let val: *mut Expr = parse_expr(p);
+            if val == null {
+                sync(p);
+                break;
+            }
+            unsafe {
+                (*val).index = (*it).ival as i32;
+                (*val).sfield = (*it).text;
+                if head == null {
+                    head = val;
+                } else {
+                    (*tail).next = val;
+                }
+            }
+            tail = val;
+            if !eat(p, T::Comma) {
+                break;
+            }
+        }
+        expect(p, T::RBrace);
+        unsafe {
+            (*e).type_arg = type_array((*p).a, elem, n as usize, null);
+            (*e).args = head;
+        }
         return e;
     }
     if k == T::LBracket {

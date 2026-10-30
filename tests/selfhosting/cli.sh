@@ -327,16 +327,16 @@ rc=$?
 set -e
 expect_rc 3 "$rc" "--cfg accepted"
 
-# -g fails with a diagnostic instead of silently emitting nothing.
-set +e
-err="$("$COMPILER" build "$TMP/hostmain.cx" -g -o "$TMP/nodbg" 2>&1 >/dev/null)"
-rc=$?
-set -e
-expect_rc 2 "$rc" "-g rejected"
-case "$err" in
-  *"debug info"*) ok ;;
-  *) bad "-g message: $err" ;;
-esac
+# -g emits DWARF (a compile unit with subprogram DIEs and line tables).
+"$COMPILER" build "$TMP/hostmain.cx" -g -o "$TMP/dbgmain" >/dev/null
+file "$TMP/dbgmain" | grep -q ELF && ok || bad "-g build is not an ELF"
+if command -v readelf >/dev/null 2>&1; then
+  if readelf --debug-dump=info "$TMP/dbgmain" 2>/dev/null | grep -q DW_TAG_subprogram; then
+    ok
+  else
+    bad "-g did not emit DW_TAG_subprogram"
+  fi
+fi
 
 # Unknown --emit values are usage errors.
 set +e

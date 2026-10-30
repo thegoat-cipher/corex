@@ -43,33 +43,9 @@ LIB_REASON = (
     "unit tests call Rust-internal modules directly; no CLI equivalent exists"
 )
 
-# Individual tests that depend on oracle-only APIs or documented contracts.
-BLOCKED_TESTS = {
-    (
-        "tooling",
-        "formatter_is_idempotent_and_semantics_preserving",
-    ): "calls the in-process Rust formatter; `corexc fmt` is covered by cli.sh",
-    (
-        "tooling",
-        "docs_are_generated_from_doc_comments",
-    ): "calls the in-process Rust parser/docgen; `corexc doc` is covered by cli.sh",
-    (
-        "tooling",
-        "test_runner_reports_pass_and_failure",
-    ): "uses `BuildConfig::test_mode`; `corexc test` runs rather than links",
-    (
-        "tooling",
-        "debug_info_has_line_tables_and_subprograms",
-    ): "DWARF is rejected by contract in the bootstrap (SH-036)",
-    (
-        "tooling",
-        "language_server_reports_diagnostics_and_edits",
-    ): "launches the Rust `corex-lsp` binary; the CoreX server is covered by lsp.py",
-    (
-        "compiler_caps",
-        "imports_expand_relative_to_the_importing_file",
-    ): "inspects `driver::load_source` expansion; there is no CLI equivalent",
-}
+# No individual test needs a special-case block: every CLI-expressible test
+# passes against `corexc`. See `LIB_REASON` for the in-process unit tests.
+BLOCKED_TESTS = {}
 
 
 def suites():

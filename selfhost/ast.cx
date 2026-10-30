@@ -5,7 +5,7 @@
 enum E {
     IntLit, FloatLit, StrLit, CStrLit, CharLit, BoolLit, NullLit,
     Ident, Path, Call, Index, Field, Unary, Binary, Cast,
-    Sizeof, Alignof, Offsetof, StructLit, ArrayLit, SliceRange
+    Sizeof, Alignof, Offsetof, StructLit, ArrayLit, CompoundLit, SliceRange
 }
 
 // `SliceRange` reuses the expression operand slots: `lhs` is the base,

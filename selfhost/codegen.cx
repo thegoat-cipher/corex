@@ -47,6 +47,10 @@ struct Cg {
     hosted: bool,
     // Shared/static-library output has no entry point.
     make_entry: bool,
+    // `-g`: emit a compile unit, per-function subprograms, and line locations.
+    debug: bool,
+    dbg: *mut Buf,
+    dbg_next: i32,
 }
 
 struct Fn {
@@ -57,6 +61,7 @@ struct Fn {
     tmp: i32,
     lbl: i32,
     terminated: bool,
+    dbg_sp: i32,
     loops: *mut LoopCtx,
     labels: *mut Lbl,
 }
@@ -209,13 +214,23 @@ fn llty(cg: *mut Cg, t: *mut Type) -> str {
     if k == K::Struct {
         let mut b: Buf = rt_buf((*cg).a);
         let bp: *mut Buf = &mut b;
-        if (*t).decl == null || struct_plain((*t).decl) {
-            rt_s(bp, "%struct.");
-            if (*t).decl != null {
-                rt_s(bp, (*((*t).decl)).name);
-            } else {
-                rt_s(bp, "unknown");
+        if (*t).decl == null {
+            return "{ i32 }";
+        }
+        if struct_plain((*t).decl) {
+            // Inline the layout, matching the oracle's structural IR types.
+            rt_s(bp, "{ ");
+            let mut f: *mut Field = (*((*t).decl)).fields;
+            let mut first: bool = true;
+            while f != null {
+                if !first {
+                    rt_s(bp, ", ");
+                }
+                rt_s(bp, llty(cg, (*f).ty));
+                first = false;
+                f = (*f).next;
             }
+            rt_s(bp, " }");
             return rt_view(bp);
         }
         rt_b(bp, 91);
@@ -317,7 +332,7 @@ fn make_str_val(f: *mut Fn, text: str) -> Val {
     let p: str = str_id_ptr(f, id, n);
     let s1: i32 = fnewtmp(f);
     fs(f, "  %t"); fi(f, s1 as i64);
-    fs(f, " = insertvalue { ptr, i64 } undef, ptr ");
+    fs(f, " = insertvalue { ptr, i64 } zeroinitializer, ptr ");
     fs(f, p);
     fs(f, ", 0\n");
     let s2: i32 = fnewtmp(f);
@@ -1515,6 +1530,57 @@ fn gen_expr(f: *mut Fn, e: *mut Expr) -> Val {
         }
         return v_addr(ty, slot);
     }
+    if k == E::CompoundLit {
+        let ty: *mut Type = (*e).ty;
+        let slot: str = ftemp(f, ty);
+        fs(f, "  store "); fs(f, llty((*f).cg, ty));
+        fs(f, " zeroinitializer, ptr "); fs(f, slot);
+        fs(f, ", align "); fi(f, type_align((*((*f).cg)).sem, ty) as i64); fnewline(f);
+        if (*ty).kind == K::Struct {
+            let d: *mut Decl = (*ty).decl;
+            let plain: bool = struct_plain(d);
+            let mut arg: *mut Expr = (*e).args;
+            while arg != null {
+                let fld: *mut Field = find_field(d, (*arg).sfield);
+                if fld != null {
+                    let id: i32 = fnewtmp(f);
+                    fs(f, "  %t"); fi(f, id as i64);
+                    if plain {
+                        fs(f, " = getelementptr inbounds "); fs(f, llty((*f).cg, ty));
+                        fs(f, ", ptr "); fs(f, slot);
+                        fs(f, ", i32 0, i32 "); fi(f, (*fld).index as i64); fnewline(f);
+                    } else {
+                        fs(f, " = getelementptr inbounds i8, ptr "); fs(f, slot);
+                        fs(f, ", i64 "); fi(f, (*fld).offset as i64); fnewline(f);
+                    }
+                    let faddr: str = reg_of(f, id);
+                    let v: Val = gen_expr(f, arg);
+                    if (*fld).bit_width > 0 {
+                        store_bitfield(f, faddr, fld, v);
+                    } else if plain {
+                        store_val(f, faddr, v, (*fld).ty);
+                    } else {
+                        store_val_align(f, faddr, v, (*fld).ty, 1);
+                    }
+                }
+                arg = (*arg).next;
+            }
+        } else if (*ty).kind == K::Array {
+            let elem: *mut Type = (*ty).elem;
+            let mut arg: *mut Expr = (*e).args;
+            while arg != null {
+                let id: i32 = fnewtmp(f);
+                fs(f, "  %t"); fi(f, id as i64);
+                fs(f, " = getelementptr inbounds "); fs(f, llty((*f).cg, ty));
+                fs(f, ", ptr "); fs(f, slot);
+                fs(f, ", i64 0, i64 "); fi(f, (*arg).index as i64); fnewline(f);
+                let v: Val = gen_expr(f, arg);
+                store_val(f, reg_of(f, id), v, elem);
+                arg = (*arg).next;
+            }
+        }
+        return v_addr(ty, slot);
+    }
     if k == E::ArrayLit {
         let ty: *mut Type = (*e).ty;
         let slot: str = ftemp(f, ty);
@@ -1581,7 +1647,9 @@ fn gen_indirect_call(f: *mut Fn, e: *mut Expr) -> Val {
         fs(f, cp);
         fs(f, "(");
         fs(f, rt_view(args));
-        fs(f, ")\n");
+        fs(f, ")");
+        dbg_attach(f, (*e).line, (*e).col);
+        fnewline(f);
         return v_void();
     }
     let id: i32 = fnewtmp(f);
@@ -1592,7 +1660,9 @@ fn gen_indirect_call(f: *mut Fn, e: *mut Expr) -> Val {
     fs(f, cp);
     fs(f, "(");
     fs(f, rt_view(args));
-    fs(f, ")\n");
+    fs(f, ")");
+    dbg_attach(f, (*e).line, (*e).col);
+    fnewline(f);
     if is_agg(ret) {
         let slot: str = ftemp(f, ret);
         fs(f, "  store "); fs(f, llty((*f).cg, ret));
@@ -1904,7 +1974,7 @@ fn gen_call(f: *mut Fn, e: *mut Expr) -> Val {
         }
         let id: i32 = fnewtmp(f);
         fs(f, "  %t"); fi(f, id as i64);
-        fs(f, " = call i64 @_cx_syscall(");
+        fs(f, " = call i64 @__corex_syscall(");
         let mut j: i32 = 0;
         while j < 7 {
             if j > 0 { fs(f, ", "); }
@@ -1963,7 +2033,7 @@ fn gen_call(f: *mut Fn, e: *mut Expr) -> Val {
         let n: str = cast_operand_to_i64(f, nv, (*narg).ty);
         let s1: i32 = fnewtmp(f);
         fs(f, "  %t"); fi(f, s1 as i64);
-        fs(f, " = insertvalue { ptr, i64 } undef, ptr "); fs(f, p); fs(f, ", 0\n");
+        fs(f, " = insertvalue { ptr, i64 } zeroinitializer, ptr "); fs(f, p); fs(f, ", 0\n");
         let s2: i32 = fnewtmp(f);
         fs(f, "  %t"); fi(f, s2 as i64);
         fs(f, " = insertvalue { ptr, i64 } %t"); fi(f, s1 as i64);
@@ -2202,7 +2272,7 @@ fn gen_call(f: *mut Fn, e: *mut Expr) -> Val {
         fs(f, " = load i64, ptr "); fs(f, f1); fnewline(f);
         let s1: i32 = fnewtmp(f);
         fs(f, "  %t"); fi(f, s1 as i64);
-        fs(f, " = insertvalue { ptr, i64 } undef, ptr %t"); fi(f, data as i64); fs(f, ", 0\n");
+        fs(f, " = insertvalue { ptr, i64 } zeroinitializer, ptr %t"); fi(f, data as i64); fs(f, ", 0\n");
         let s2: i32 = fnewtmp(f);
         fs(f, "  %t"); fi(f, s2 as i64);
         fs(f, " = insertvalue { ptr, i64 } %t"); fi(f, s1 as i64);
@@ -2334,7 +2404,9 @@ fn gen_user_call(f: *mut Fn, e: *mut Expr) -> Val {
         fs(f, (*d).name);
         fs(f, "(");
         fs(f, rt_view(args));
-        fs(f, ")\n");
+        fs(f, ")");
+        dbg_attach(f, (*e).line, (*e).col);
+        fnewline(f);
         return v_void();
     }
     let id: i32 = fnewtmp(f);
@@ -2345,7 +2417,9 @@ fn gen_user_call(f: *mut Fn, e: *mut Expr) -> Val {
     fs(f, (*d).name);
     fs(f, "(");
     fs(f, rt_view(args));
-    fs(f, ")\n");
+    fs(f, ")");
+    dbg_attach(f, (*e).line, (*e).col);
+    fnewline(f);
     if is_agg(ret) {
         let slot: str = ftemp(f, ret);
         fs(f, "  store "); fs(f, llty((*f).cg, ret));
@@ -2380,7 +2454,9 @@ fn gen_print(f: *mut Fn, e: *mut Expr) {
         fs(f, " = getelementptr inbounds "); fs(f, llty((*f).cg, ty)); fs(f, ", ptr "); fs(f, base.reg);
         fs(f, ", i64 0, i64 0\n");
         fs(f, "  call void @_cx_print_str(ptr %t"); fi(f, gid as i64);
-        fs(f, ", i64 "); fi(f, (*ty).len as i64); fs(f, ")\n");
+        fs(f, ", i64 "); fi(f, (*ty).len as i64); fs(f, ")");
+        dbg_attach(f, (*e).line, (*e).col);
+        fnewline(f);
         (*(*f).cg).used_print_str = true;
         return;
     }
@@ -2393,7 +2469,9 @@ fn gen_print(f: *mut Fn, e: *mut Expr) {
         fs(f, "  %t"); fi(f, s2 as i64);
         fs(f, " = extractvalue { ptr, i64 } "); fs(f, st); fs(f, ", 1\n");
         fs(f, "  call void @_cx_print_str(ptr %t"); fi(f, s1 as i64);
-        fs(f, ", i64 %t"); fi(f, s2 as i64); fs(f, ")\n");
+        fs(f, ", i64 %t"); fi(f, s2 as i64); fs(f, ")");
+        dbg_attach(f, (*e).line, (*e).col);
+        fnewline(f);
         (*(*f).cg).used_print_str = true;
         return;
     }
@@ -2405,7 +2483,9 @@ fn gen_print(f: *mut Fn, e: *mut Expr) {
             fs(f, " = fpext float "); fs(f, wide); fs(f, " to double\n");
             wide = reg_of(f, idw);
         }
-        fs(f, "  call void @_cx_print_f64(double "); fs(f, wide); fs(f, ")\n");
+        fs(f, "  call void @_cx_print_f64(double "); fs(f, wide); fs(f, ")");
+        dbg_attach(f, (*e).line, (*e).col);
+        fnewline(f);
         (*(*f).cg).used_print_f64 = true;
         return;
     }
@@ -2414,7 +2494,9 @@ fn gen_print(f: *mut Fn, e: *mut Expr) {
         fs(f, "  %t"); fi(f, id as i64);
         fs(f, " = call i64 @_cx_cstr_len(ptr "); fs(f, operand(f, v, ty)); fs(f, ")\n");
         fs(f, "  call void @_cx_print_str(ptr "); fs(f, operand(f, v, ty));
-        fs(f, ", i64 %t"); fi(f, id as i64); fs(f, ")\n");
+        fs(f, ", i64 %t"); fi(f, id as i64); fs(f, ")");
+        dbg_attach(f, (*e).line, (*e).col);
+        fnewline(f);
         (*(*f).cg).used_cstr_len = true;
         (*(*f).cg).used_print_str = true;
         return;
@@ -2423,21 +2505,29 @@ fn gen_print(f: *mut Fn, e: *mut Expr) {
         let id: i32 = fnewtmp(f);
         fs(f, "  %t"); fi(f, id as i64);
         fs(f, " = zext i1 "); fs(f, operand(f, v, ty)); fs(f, " to i8\n");
-        fs(f, "  call void @_cx_print_bool(i8 %t"); fi(f, id as i64); fs(f, ")\n");
+        fs(f, "  call void @_cx_print_bool(i8 %t"); fi(f, id as i64); fs(f, ")");
+        dbg_attach(f, (*e).line, (*e).col);
+        fnewline(f);
         (*(*f).cg).used_print_bool = true;
         return;
     }
     if k == K::Char {
-        fs(f, "  call void @_cx_print_char(i8 "); fs(f, operand(f, v, ty)); fs(f, ")\n");
+        fs(f, "  call void @_cx_print_char(i8 "); fs(f, operand(f, v, ty)); fs(f, ")");
+        dbg_attach(f, (*e).line, (*e).col);
+        fnewline(f);
         (*(*f).cg).used_print_char = true;
         return;
     }
     let wide: str = cast_operand_to_i64(f, v, ty);
     if k == K::Enum || type_is_signed(ty) {
-        fs(f, "  call void @_cx_print_i64(i64 "); fs(f, wide); fs(f, ")\n");
+        fs(f, "  call void @_cx_print_i64(i64 "); fs(f, wide); fs(f, ")");
+        dbg_attach(f, (*e).line, (*e).col);
+        fnewline(f);
         (*(*f).cg).used_print_i64 = true;
     } else {
-        fs(f, "  call void @_cx_print_u64(i64 "); fs(f, wide); fs(f, ")\n");
+        fs(f, "  call void @_cx_print_u64(i64 "); fs(f, wide); fs(f, ")");
+        dbg_attach(f, (*e).line, (*e).col);
+        fnewline(f);
         (*(*f).cg).used_print_u64 = true;
     }
 
@@ -2561,6 +2651,48 @@ fn gen_do_while(f: *mut Fn, st: *mut Stmt) {
     }
 }
 
+// `60` / `231` after casts and unary minus, for `syscall(nr, ...)`.
+fn const_int_is(e: *mut Expr, v: i64) -> bool {
+    unsafe {
+    if e == null {
+        return false;
+    }
+    let k: E = (*e).kind;
+    if k == E::IntLit {
+        return (*e).ival == v;
+    }
+    if k == E::Cast {
+        return const_int_is((*e).lhs, v);
+    }
+    if k == E::Unary && (*e).op == T::Minus {
+        return const_int_is((*e).lhs, 0 - v);
+    }
+    return false;
+
+    }
+}
+
+// True for `syscall(60, ...)` / `syscall(231, ...)`: the process exits and the
+// block must end with `unreachable`, exactly like the oracle. Without this the
+// implicit `_start` fallthrough would emit a second exit call.
+fn is_exit_syscall(e: *mut Expr) -> bool {
+    unsafe {
+    if e == null || (*e).kind != E::Call {
+        return false;
+    }
+    let c: *mut Expr = (*e).lhs;
+    if c == null || (*c).kind != E::Ident || !rt_eq((*c).name, "syscall") {
+        return false;
+    }
+    let a: *mut Expr = (*e).args;
+    if a == null {
+        return false;
+    }
+    return const_int_is(a, 60) || const_int_is(a, 231);
+
+    }
+}
+
 fn gen_stmt(f: *mut Fn, st: *mut Stmt) {
     unsafe {
     let k: S = (*st).kind;
@@ -2623,6 +2755,10 @@ fn gen_stmt(f: *mut Fn, st: *mut Stmt) {
     }
     if k == S::Expr {
         let _ = gen_expr(f, (*st).expr);
+        if is_exit_syscall((*st).expr) {
+            fs(f, "  unreachable\n");
+            (*f).terminated = true;
+        }
         return;
     }
     if k == S::If {
@@ -2714,17 +2850,21 @@ fn gen_stmt(f: *mut Fn, st: *mut Stmt) {
     if k == S::Return {
         let ret: *mut Type = (*(*f).d).ty;
         if (*ret).kind == K::Void {
-            fs(f, "  ret void\n");
+            fs(f, "  ret void");
+            dbg_attach(f, (*st).line, (*st).col);
+            fnewline(f);
         } else if (*st).expr != null {
             let v: Val = gen_expr(f, (*st).expr);
             if is_agg(ret) {
                 let op: str = materialize(f, v, ret);
                 fs(f, "  ret "); fs(f, llty((*f).cg, ret)); fs(f, " ");
-                fs(f, op); fnewline(f);
+                fs(f, op);
             } else {
                 fs(f, "  ret "); fs(f, llty((*f).cg, ret)); fs(f, " ");
-                fs(f, operand(f, v, ret)); fnewline(f);
+                fs(f, operand(f, v, ret));
             }
+            dbg_attach(f, (*st).line, (*st).col);
+            fnewline(f);
         }
         (*f).terminated = true;
         return;
@@ -3012,6 +3152,7 @@ fn const_value(cg: *mut Cg, ty: *mut Type, e: *mut Expr, depth: i32) -> str {
                 arg = (*e).args;
             }
         }
+        let designated: bool = e != null && (*e).kind == E::CompoundLit;
         let mut i: usize = 0;
         while i < n {
             if i > 0 {
@@ -3021,6 +3162,16 @@ fn const_value(cg: *mut Cg, ty: *mut Type, e: *mut Expr, depth: i32) -> str {
             rt_s(abp, " ");
             if rep != null {
                 rt_s(abp, const_value(cg, elem, rep, depth + 1));
+            } else if designated {
+                let mut ae: *mut Expr = null;
+                let mut da: *mut Expr = (*e).args;
+                while da != null {
+                    if (*da).index == i as i32 {
+                        ae = da;
+                    }
+                    da = (*da).next;
+                }
+                rt_s(abp, const_value(cg, elem, ae, depth + 1));
             } else {
                 let mut ae: *mut Expr = null;
                 if arg != null {
@@ -3052,7 +3203,7 @@ fn const_value(cg: *mut Cg, ty: *mut Type, e: *mut Expr, depth: i32) -> str {
             rt_s(obp, llty(cg, (*fld).ty));
             rt_s(obp, " ");
             let mut found: *mut Expr = null;
-            if e != null && (*e).kind == E::StructLit {
+            if e != null && ((*e).kind == E::StructLit || (*e).kind == E::CompoundLit) {
                 let mut a: *mut Expr = (*e).args;
                 while a != null {
                     if rt_eq((*a).sfield, (*fld).name) {
@@ -3089,13 +3240,14 @@ fn const_value(cg: *mut Cg, ty: *mut Type, e: *mut Expr, depth: i32) -> str {
         }
         return float_ll((*cg).a, ty, bits);
     }
-    if k == K::Ptr || k == K::CStr {
+    if k == K::Ptr || k == K::CStr || k == K::Fn {
         if e != null && (*e).kind == E::NullLit {
             return "null";
         }
         if e != null && (*e).kind == E::Unary && (*e).op == T::Amp
             && (*e).lhs != null && (*(*e).lhs).kind == E::Ident
-            && (*(*e).lhs).decl != null && (*(*(*e).lhs).decl).kind == D::Global {
+            && (*(*e).lhs).decl != null
+            && ((*(*(*e).lhs).decl).kind == D::Global || (*(*(*e).lhs).decl).kind == D::Func) {
             let mut pb: Buf = rt_buf((*cg).a);
             let pbp: *mut Buf = &mut pb;
             rt_b(pbp, 64);
@@ -3220,14 +3372,83 @@ fn cg_collect_label_stmt(f: *mut Fn, st: *mut Stmt) {
     }
 }
 
+// One DICompileUnit with a null-typed subroutine type; per-function
+// DISubprograms and DILocations are appended as code is generated.
+fn cg_debug_init(cg: *mut Cg, file: str) {
+    unsafe {
+    (*cg).debug = true;
+    (*cg).dbg_next = 6;
+    let d: *mut Buf = (*cg).dbg;
+    rt_s(d, "!0 = !DIFile(filename: \"");
+    rt_s(d, file);
+    rt_s(d, "\", directory: \"\")\n");
+    rt_s(d, "!1 = distinct !DICompileUnit(language: DW_LANG_C99, file: !0, producer: \"corexc\", isOptimized: false, runtimeVersion: 0, emissionKind: FullDebug)\n");
+    rt_s(d, "!2 = !{i32 7, !\"Dwarf Version\", i32 4}\n");
+    rt_s(d, "!3 = !{i32 2, !\"Debug Info Version\", i32 3}\n");
+    rt_s(d, "!4 = !DISubroutineType(types: !5)\n");
+    rt_s(d, "!5 = !{null}\n");
+    }
+}
+
+fn cg_dbg_loc(cg: *mut Cg, sp: i32, line: i32, col: i32) -> i32 {
+    unsafe {
+    let id: i32 = (*cg).dbg_next;
+    (*cg).dbg_next = (*cg).dbg_next + 1;
+    let d: *mut Buf = (*cg).dbg;
+    rt_s(d, "!");
+    rt_i(d, id as i64);
+    rt_s(d, " = !DILocation(line: ");
+    rt_i(d, line as i64);
+    rt_s(d, ", column: ");
+    let mut c: i32 = col;
+    if c < 1 {
+        c = 1;
+    }
+    rt_i(d, c as i64);
+    rt_s(d, ", scope: !");
+    rt_i(d, sp as i64);
+    rt_s(d, ")\n");
+    return id;
+
+    }
+}
+
+// Append `, !dbg !N` to the instruction just written.
+fn dbg_attach(f: *mut Fn, line: i32, col: i32) {
+    unsafe {
+    if !(*(*f).cg).debug || (*f).dbg_sp == 0 {
+        return;
+    }
+    let loc: i32 = cg_dbg_loc((*f).cg, (*f).dbg_sp, line, col);
+    fs(f, ", !dbg !");
+    fi(f, loc as i64);
+
+    }
+}
+
 fn gen_fn(cg: *mut Cg, d: *mut Decl) {
     unsafe {
     let ret: *mut Type = (*d).ty;
-    let mut f: Fn = Fn { cg: cg, d: d, entry: null, body: null, tmp: 0, lbl: 1, terminated: false, loops: null, labels: null };
+    let mut f: Fn = Fn { cg: cg, d: d, entry: null, body: null, tmp: 0, lbl: 1, terminated: false, dbg_sp: 0, loops: null, labels: null };
     let fp: *mut Fn = &mut f;
     (*fp).entry = cg_buf(cg);
     (*fp).body = cg_buf(cg);
     cg_collect_labels(fp, (*d).body);
+    if (*cg).debug && (*d).has_body {
+        let sp: i32 = (*cg).dbg_next;
+        (*cg).dbg_next = (*cg).dbg_next + 1;
+        (*fp).dbg_sp = sp;
+        let db: *mut Buf = (*cg).dbg;
+        rt_s(db, "!");
+        rt_i(db, sp as i64);
+        rt_s(db, " = distinct !DISubprogram(name: \"");
+        rt_s(db, (*d).name);
+        rt_s(db, "\", scope: !0, file: !0, line: ");
+        rt_i(db, (*d).line as i64);
+        rt_s(db, ", type: !4, scopeLine: ");
+        rt_i(db, (*d).line as i64);
+        rt_s(db, ", spFlags: DISPFlagDefinition, unit: !1)\n");
+    }
     // Header.
     let mut hb: Buf = rt_buf((*cg).a);
     let hp: *mut Buf = &mut hb;
@@ -3263,12 +3484,17 @@ fn gen_fn(cg: *mut Cg, d: *mut Decl) {
     while p != null {
         if i > 0 { rt_s(hp, ", "); }
         rt_s(hp, llty(cg, (*p).ty));
-        rt_s(hp, " %a");
+        rt_s(hp, " %p");
         rt_i(hp, i as i64);
         i = i + 1;
         p = (*p).next;
     }
-    rt_s(hp, ") {\nentry:\n");
+    rt_s(hp, ")");
+    if (*fp).dbg_sp != 0 {
+        rt_s(hp, " !dbg !");
+        rt_i(hp, (*fp).dbg_sp as i64);
+    }
+    rt_s(hp, " {\nentry:\n");
     // Spill parameters into their alloca slots.
     p = (*d).params;
     i = 0;
@@ -3282,7 +3508,7 @@ fn gen_fn(cg: *mut Cg, d: *mut Decl) {
             fs_entry(fp, "\n");
             fs_entry(fp, "  store ");
             fs_entry(fp, llty(cg, (*pd).ty));
-            fs_entry(fp, " %a");
+            fs_entry(fp, " %p");
             let mut nb: Buf = rt_buf((*cg).a);
             let nbp: *mut Buf = &mut nb;
             rt_i(nbp, i as i64);
@@ -3302,7 +3528,7 @@ fn gen_fn(cg: *mut Cg, d: *mut Decl) {
             if (*cg).make_entry && !(*cg).hosted && rt_eq((*d).name, "_start") {
                 // Process entry: returning would pop a nonexistent frame, so
                 // fall through to exit(0) exactly like the oracle.
-                fs(fp, "  %e = call i64 @_cx_syscall(i64 60, i64 0, i64 0, i64 0, i64 0, i64 0, i64 0)\n");
+                fs(fp, "  %e = call i64 @__corex_syscall(i64 60, i64 0, i64 0, i64 0, i64 0, i64 0, i64 0)\n");
                 fs(fp, "  unreachable\n");
                 (*cg).used_syscall = true;
             } else {
@@ -3324,43 +3550,43 @@ fn gen_helpers(cg: *mut Cg) {
     unsafe {
     let mut h: Buf = rt_buf((*cg).a);
     let hp: *mut Buf = &mut h;
-    rt_s(hp, "define internal i64 @_cx_syscall(i64 %nr, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5, i64 %a6) {\nentry:\n  %r = call i64 asm sideeffect \"syscall\", \"={rax},{rax},{rdi},{rsi},{rdx},{r10},{r8},{r9},~{rcx},~{r11},~{memory}\"(i64 %nr, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5, i64 %a6)\n  ret i64 %r\n}\n\n");
+    rt_s(hp, "define internal i64 @__corex_syscall(i64 %nr, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5, i64 %a6) {\nentry:\n  %r = call i64 asm sideeffect \"syscall\", \"={rax},{rax},{rdi},{rsi},{rdx},{r10},{r8},{r9},~{rcx},~{r11},~{memory}\"(i64 %nr, i64 %a1, i64 %a2, i64 %a3, i64 %a4, i64 %a5, i64 %a6)\n  ret i64 %r\n}\n\n");
     if (*cg).used_fatal || (*cg).used_alloc || (*cg).used_print_f64 {
-        rt_s(hp, "define internal void @_cx_fatal(ptr %msg, i64 %len) {\nentry:\n  %mp = ptrtoint ptr %msg to i64\n  %w = call i64 @_cx_syscall(i64 1, i64 2, i64 %mp, i64 %len, i64 0, i64 0, i64 0)\n  %x = call i64 @_cx_syscall(i64 60, i64 101, i64 0, i64 0, i64 0, i64 0, i64 0)\n  unreachable\n}\n\n");
+        rt_s(hp, "define internal void @_cx_fatal(ptr %msg, i64 %len) {\nentry:\n  %mp = ptrtoint ptr %msg to i64\n  %w = call i64 @__corex_syscall(i64 1, i64 2, i64 %mp, i64 %len, i64 0, i64 0, i64 0)\n  %x = call i64 @__corex_syscall(i64 60, i64 101, i64 0, i64 0, i64 0, i64 0, i64 0)\n  unreachable\n}\n\n");
     }
     if (*cg).used_free {
-        rt_s(hp, "define internal void @_cx_free(ptr %p, i64 %n) {\nentry:\n  %pi = ptrtoint ptr %p to i64\n  %r = call i64 @_cx_syscall(i64 11, i64 %pi, i64 %n, i64 0, i64 0, i64 0, i64 0)\n  ret void\n}\n\n");
+        rt_s(hp, "define internal void @_cx_free(ptr %p, i64 %n) {\nentry:\n  %pi = ptrtoint ptr %p to i64\n  %r = call i64 @__corex_syscall(i64 11, i64 %pi, i64 %n, i64 0, i64 0, i64 0, i64 0)\n  ret void\n}\n\n");
     }
     if (*cg).used_alloc {
         let msg: str = "corex: allocation failed\n";
         let id: i32 = add_string(cg, msg);
-        rt_s(hp, "define internal ptr @_cx_alloc(i64 %n) {\nentry:\n  %r = call i64 @_cx_syscall(i64 9, i64 0, i64 %n, i64 3, i64 34, i64 -1, i64 0)\n  %failed = icmp slt i64 %r, 0\n  br i1 %failed, label %fail, label %ok\nfail:\n  call void @_cx_fatal(ptr @.str");
+        rt_s(hp, "define internal ptr @_cx_alloc(i64 %n) {\nentry:\n  %r = call i64 @__corex_syscall(i64 9, i64 0, i64 %n, i64 3, i64 34, i64 -1, i64 0)\n  %failed = icmp slt i64 %r, 0\n  br i1 %failed, label %fail, label %ok\nfail:\n  call void @_cx_fatal(ptr @.str");
         rt_i(hp, id as i64);
         rt_s(hp, ", i64 ");
         rt_i(hp, len(msg) as i64);
         rt_s(hp, ")\n  unreachable\nok:\n  %p = inttoptr i64 %r to ptr\n  ret ptr %p\n}\n\n");
     }
     if (*cg).used_file_io {
-        rt_s(hp, "define internal ptr @_cx_cstr(ptr %data, i64 %len) {\nentry:\n  %n = add i64 %len, 1\n  %p = call ptr @_cx_alloc(i64 %n)\n  %r = call ptr @memcpy(ptr %p, ptr %data, i64 %len)\n  %end = getelementptr inbounds i8, ptr %p, i64 %len\n  store i8 0, ptr %end, align 1\n  ret ptr %p\n}\n\ndefine internal i32 @_cx_write_all(i64 %fd, ptr %data, i64 %len) {\nentry:\n  br label %loop\nloop:\n  %off = phi i64 [ 0, %entry ], [ %next, %more ]\n  %left = sub i64 %len, %off\n  %done = icmp eq i64 %left, 0\n  br i1 %done, label %finish, label %body\nbody:\n  %p = getelementptr inbounds i8, ptr %data, i64 %off\n  %pi = ptrtoint ptr %p to i64\n  %w = call i64 @_cx_syscall(i64 1, i64 %fd, i64 %pi, i64 %left, i64 0, i64 0, i64 0)\n  %bad = icmp sle i64 %w, 0\n  br i1 %bad, label %fail, label %more\nmore:\n  %next = add i64 %off, %w\n  br label %loop\nfinish:\n  ret i32 0\nfail:\n  ret i32 -1\n}\n\n");
-        rt_s(hp, "define internal { ptr, i64, i64 } @_cx_read_file(ptr %path, i64 %plen) {\nentry:\n  %c = call ptr @_cx_cstr(ptr %path, i64 %plen)\n  %ci = ptrtoint ptr %c to i64\n  %fd = call i64 @_cx_syscall(i64 2, i64 %ci, i64 0, i64 0, i64 0, i64 0, i64 0)\n  %bad = icmp slt i64 %fd, 0\n  br i1 %bad, label %fail, label %ok\nfail:\n  %clen0 = add i64 %plen, 1\n  call void @_cx_free(ptr %c, i64 %clen0)\n  ret { ptr, i64, i64 } zeroinitializer\nok:\n  %size = call i64 @_cx_syscall(i64 8, i64 %fd, i64 0, i64 2, i64 0, i64 0, i64 0)\n  %back = call i64 @_cx_syscall(i64 8, i64 %fd, i64 0, i64 0, i64 0, i64 0, i64 0)\n  %empty = icmp sle i64 %size, 0\n  br i1 %empty, label %none, label %alloc\nnone:\n  %cl0 = call i64 @_cx_syscall(i64 3, i64 %fd, i64 0, i64 0, i64 0, i64 0, i64 0)\n  %clen1 = add i64 %plen, 1\n  call void @_cx_free(ptr %c, i64 %clen1)\n  ret { ptr, i64, i64 } zeroinitializer\nalloc:\n  %data = call ptr @_cx_alloc(i64 %size)\n  %datapi = ptrtoint ptr %data to i64\n  %r = call i64 @_cx_syscall(i64 0, i64 %fd, i64 %datapi, i64 %size, i64 0, i64 0, i64 0)\n  %cl = call i64 @_cx_syscall(i64 3, i64 %fd, i64 0, i64 0, i64 0, i64 0, i64 0)\n  %clen2 = add i64 %plen, 1\n  call void @_cx_free(ptr %c, i64 %clen2)\n  %neg = icmp slt i64 %r, 0\n  %len = select i1 %neg, i64 0, i64 %r\n  %v0 = insertvalue { ptr, i64, i64 } zeroinitializer, ptr %data, 0\n  %v1 = insertvalue { ptr, i64, i64 } %v0, i64 %len, 1\n  %v2 = insertvalue { ptr, i64, i64 } %v1, i64 %size, 2\n  ret { ptr, i64, i64 } %v2\n}\n\n");
-        rt_s(hp, "define internal i32 @_cx_write_file(ptr %path, i64 %plen, ptr %data, i64 %dlen) {\nentry:\n  %c = call ptr @_cx_cstr(ptr %path, i64 %plen)\n  %ci = ptrtoint ptr %c to i64\n  %fd = call i64 @_cx_syscall(i64 2, i64 %ci, i64 577, i64 420, i64 0, i64 0, i64 0)\n  %bad = icmp slt i64 %fd, 0\n  br i1 %bad, label %fail, label %ok\nfail:\n  %clen0 = add i64 %plen, 1\n  call void @_cx_free(ptr %c, i64 %clen0)\n  ret i32 -1\nok:\n  %wr = call i32 @_cx_write_all(i64 %fd, ptr %data, i64 %dlen)\n  %cl = call i64 @_cx_syscall(i64 3, i64 %fd, i64 0, i64 0, i64 0, i64 0, i64 0)\n  %clen1 = add i64 %plen, 1\n  call void @_cx_free(ptr %c, i64 %clen1)\n  ret i32 %wr\n}\n\n");
+        rt_s(hp, "define internal ptr @_cx_cstr(ptr %data, i64 %len) {\nentry:\n  %n = add i64 %len, 1\n  %p = call ptr @_cx_alloc(i64 %n)\n  %r = call ptr @memcpy(ptr %p, ptr %data, i64 %len)\n  %end = getelementptr inbounds i8, ptr %p, i64 %len\n  store i8 0, ptr %end, align 1\n  ret ptr %p\n}\n\ndefine internal i32 @_cx_write_all(i64 %fd, ptr %data, i64 %len) {\nentry:\n  br label %loop\nloop:\n  %off = phi i64 [ 0, %entry ], [ %next, %more ]\n  %left = sub i64 %len, %off\n  %done = icmp eq i64 %left, 0\n  br i1 %done, label %finish, label %body\nbody:\n  %p = getelementptr inbounds i8, ptr %data, i64 %off\n  %pi = ptrtoint ptr %p to i64\n  %w = call i64 @__corex_syscall(i64 1, i64 %fd, i64 %pi, i64 %left, i64 0, i64 0, i64 0)\n  %bad = icmp sle i64 %w, 0\n  br i1 %bad, label %fail, label %more\nmore:\n  %next = add i64 %off, %w\n  br label %loop\nfinish:\n  ret i32 0\nfail:\n  ret i32 -1\n}\n\n");
+        rt_s(hp, "define internal { ptr, i64, i64 } @_cx_read_file(ptr %path, i64 %plen) {\nentry:\n  %c = call ptr @_cx_cstr(ptr %path, i64 %plen)\n  %ci = ptrtoint ptr %c to i64\n  %fd = call i64 @__corex_syscall(i64 2, i64 %ci, i64 0, i64 0, i64 0, i64 0, i64 0)\n  %bad = icmp slt i64 %fd, 0\n  br i1 %bad, label %fail, label %ok\nfail:\n  %clen0 = add i64 %plen, 1\n  call void @_cx_free(ptr %c, i64 %clen0)\n  ret { ptr, i64, i64 } zeroinitializer\nok:\n  %size = call i64 @__corex_syscall(i64 8, i64 %fd, i64 0, i64 2, i64 0, i64 0, i64 0)\n  %back = call i64 @__corex_syscall(i64 8, i64 %fd, i64 0, i64 0, i64 0, i64 0, i64 0)\n  %empty = icmp sle i64 %size, 0\n  br i1 %empty, label %none, label %alloc\nnone:\n  %cl0 = call i64 @__corex_syscall(i64 3, i64 %fd, i64 0, i64 0, i64 0, i64 0, i64 0)\n  %clen1 = add i64 %plen, 1\n  call void @_cx_free(ptr %c, i64 %clen1)\n  ret { ptr, i64, i64 } zeroinitializer\nalloc:\n  %data = call ptr @_cx_alloc(i64 %size)\n  %datapi = ptrtoint ptr %data to i64\n  %r = call i64 @__corex_syscall(i64 0, i64 %fd, i64 %datapi, i64 %size, i64 0, i64 0, i64 0)\n  %cl = call i64 @__corex_syscall(i64 3, i64 %fd, i64 0, i64 0, i64 0, i64 0, i64 0)\n  %clen2 = add i64 %plen, 1\n  call void @_cx_free(ptr %c, i64 %clen2)\n  %neg = icmp slt i64 %r, 0\n  %len = select i1 %neg, i64 0, i64 %r\n  %v0 = insertvalue { ptr, i64, i64 } zeroinitializer, ptr %data, 0\n  %v1 = insertvalue { ptr, i64, i64 } %v0, i64 %len, 1\n  %v2 = insertvalue { ptr, i64, i64 } %v1, i64 %size, 2\n  ret { ptr, i64, i64 } %v2\n}\n\n");
+        rt_s(hp, "define internal i32 @_cx_write_file(ptr %path, i64 %plen, ptr %data, i64 %dlen) {\nentry:\n  %c = call ptr @_cx_cstr(ptr %path, i64 %plen)\n  %ci = ptrtoint ptr %c to i64\n  %fd = call i64 @__corex_syscall(i64 2, i64 %ci, i64 577, i64 420, i64 0, i64 0, i64 0)\n  %bad = icmp slt i64 %fd, 0\n  br i1 %bad, label %fail, label %ok\nfail:\n  %clen0 = add i64 %plen, 1\n  call void @_cx_free(ptr %c, i64 %clen0)\n  ret i32 -1\nok:\n  %wr = call i32 @_cx_write_all(i64 %fd, ptr %data, i64 %dlen)\n  %cl = call i64 @__corex_syscall(i64 3, i64 %fd, i64 0, i64 0, i64 0, i64 0, i64 0)\n  %clen1 = add i64 %plen, 1\n  call void @_cx_free(ptr %c, i64 %clen1)\n  ret i32 %wr\n}\n\n");
     }
     let mut need_nl: bool = (*cg).used_print_i64 || (*cg).used_print_u64 || (*cg).used_print_bool || (*cg).used_print_char || (*cg).used_print_str || (*cg).used_print_f64;
     if need_nl {
         let nl: i32 = add_string(cg, "\n");
         rt_s(hp, "define internal void @_cx_newline() {\nentry:\n  %np = ptrtoint ptr @.str");
         rt_i(hp, nl as i64);
-        rt_s(hp, " to i64\n  %w = call i64 @_cx_syscall(i64 1, i64 1, i64 %np, i64 1, i64 0, i64 0, i64 0)\n  ret void\n}\n\n");
+        rt_s(hp, " to i64\n  %w = call i64 @__corex_syscall(i64 1, i64 1, i64 %np, i64 1, i64 0, i64 0, i64 0)\n  ret void\n}\n\n");
     }
     if (*cg).used_print_u64 || (*cg).used_print_i64 || (*cg).used_print_f64 {
-        rt_s(hp, "define internal void @_cx_put_u64(i64 %value) {\nentry:\n  %buf = alloca [20 x i8], align 1\n  %pos = alloca i64, align 8\n  %cur = alloca i64, align 8\n  store i64 20, ptr %pos, align 8\n  store i64 %value, ptr %cur, align 8\n  br label %loop\nloop:\n  %p0 = load i64, ptr %pos, align 8\n  %p1 = sub i64 %p0, 1\n  store i64 %p1, ptr %pos, align 8\n  %c0 = load i64, ptr %cur, align 8\n  %rem = urem i64 %c0, 10\n  %d0 = add i64 %rem, 48\n  %d1 = trunc i64 %d0 to i8\n  %slot = getelementptr inbounds [20 x i8], ptr %buf, i64 0, i64 %p1\n  store i8 %d1, ptr %slot, align 1\n  %next = udiv i64 %c0, 10\n  store i64 %next, ptr %cur, align 8\n  %done = icmp eq i64 %next, 0\n  br i1 %done, label %emit, label %loop\nemit:\n  %p2 = load i64, ptr %pos, align 8\n  %sp = getelementptr inbounds [20 x i8], ptr %buf, i64 0, i64 %p2\n  %bp = ptrtoint ptr %sp to i64\n  %n = sub i64 20, %p2\n  %w = call i64 @_cx_syscall(i64 1, i64 1, i64 %bp, i64 %n, i64 0, i64 0, i64 0)\n  ret void\n}\n\n");
+        rt_s(hp, "define internal void @_cx_put_u64(i64 %value) {\nentry:\n  %buf = alloca [20 x i8], align 1\n  %pos = alloca i64, align 8\n  %cur = alloca i64, align 8\n  store i64 20, ptr %pos, align 8\n  store i64 %value, ptr %cur, align 8\n  br label %loop\nloop:\n  %p0 = load i64, ptr %pos, align 8\n  %p1 = sub i64 %p0, 1\n  store i64 %p1, ptr %pos, align 8\n  %c0 = load i64, ptr %cur, align 8\n  %rem = urem i64 %c0, 10\n  %d0 = add i64 %rem, 48\n  %d1 = trunc i64 %d0 to i8\n  %slot = getelementptr inbounds [20 x i8], ptr %buf, i64 0, i64 %p1\n  store i8 %d1, ptr %slot, align 1\n  %next = udiv i64 %c0, 10\n  store i64 %next, ptr %cur, align 8\n  %done = icmp eq i64 %next, 0\n  br i1 %done, label %emit, label %loop\nemit:\n  %p2 = load i64, ptr %pos, align 8\n  %sp = getelementptr inbounds [20 x i8], ptr %buf, i64 0, i64 %p2\n  %bp = ptrtoint ptr %sp to i64\n  %n = sub i64 20, %p2\n  %w = call i64 @__corex_syscall(i64 1, i64 1, i64 %bp, i64 %n, i64 0, i64 0, i64 0)\n  ret void\n}\n\n");
         rt_s(hp, "define internal void @_cx_print_u64(i64 %value) {\nentry:\n  call void @_cx_put_u64(i64 %value)\n  call void @_cx_newline()\n  ret void\n}\n\n");
     }
     if (*cg).used_print_i64 {
         let minus: i32 = add_string(cg, "-");
         rt_s(hp, "define internal void @_cx_print_i64(i64 %value) {\nentry:\n  %neg = icmp slt i64 %value, 0\n  br i1 %neg, label %minus, label %plain\nminus:\n  %mp = ptrtoint ptr @.str");
         rt_i(hp, minus as i64);
-        rt_s(hp, " to i64\n  %mw = call i64 @_cx_syscall(i64 1, i64 1, i64 %mp, i64 1, i64 0, i64 0, i64 0)\n  %mag = sub i64 0, %value\n  call void @_cx_print_u64(i64 %mag)\n  ret void\nplain:\n  call void @_cx_print_u64(i64 %value)\n  ret void\n}\n\n");
+        rt_s(hp, " to i64\n  %mw = call i64 @__corex_syscall(i64 1, i64 1, i64 %mp, i64 1, i64 0, i64 0, i64 0)\n  %mag = sub i64 0, %value\n  call void @_cx_print_u64(i64 %mag)\n  ret void\nplain:\n  call void @_cx_print_u64(i64 %value)\n  ret void\n}\n\n");
     }
     if (*cg).used_print_bool {
         let t: i32 = add_string(cg, "true");
@@ -3369,13 +3595,13 @@ fn gen_helpers(cg: *mut Cg) {
         rt_i(hp, t as i64);
         rt_s(hp, ", ptr @.str");
         rt_i(hp, fa as i64);
-        rt_s(hp, "\n  %n = select i1 %t, i64 4, i64 5\n  %pi = ptrtoint ptr %p to i64\n  %w = call i64 @_cx_syscall(i64 1, i64 1, i64 %pi, i64 %n, i64 0, i64 0, i64 0)\n  call void @_cx_newline()\n  ret void\n}\n\n");
+        rt_s(hp, "\n  %n = select i1 %t, i64 4, i64 5\n  %pi = ptrtoint ptr %p to i64\n  %w = call i64 @__corex_syscall(i64 1, i64 1, i64 %pi, i64 %n, i64 0, i64 0, i64 0)\n  call void @_cx_newline()\n  ret void\n}\n\n");
     }
     if (*cg).used_print_char {
-        rt_s(hp, "define internal void @_cx_print_char(i8 %value) {\nentry:\n  %buf = alloca i8, align 1\n  store i8 %value, ptr %buf, align 1\n  %p = ptrtoint ptr %buf to i64\n  %w = call i64 @_cx_syscall(i64 1, i64 1, i64 %p, i64 1, i64 0, i64 0, i64 0)\n  call void @_cx_newline()\n  ret void\n}\n\n");
+        rt_s(hp, "define internal void @_cx_print_char(i8 %value) {\nentry:\n  %buf = alloca i8, align 1\n  store i8 %value, ptr %buf, align 1\n  %p = ptrtoint ptr %buf to i64\n  %w = call i64 @__corex_syscall(i64 1, i64 1, i64 %p, i64 1, i64 0, i64 0, i64 0)\n  call void @_cx_newline()\n  ret void\n}\n\n");
     }
     if (*cg).used_print_str {
-        rt_s(hp, "define internal void @_cx_print_str(ptr %p, i64 %n) {\nentry:\n  %pi = ptrtoint ptr %p to i64\n  %w = call i64 @_cx_syscall(i64 1, i64 1, i64 %pi, i64 %n, i64 0, i64 0, i64 0)\n  call void @_cx_newline()\n  ret void\n}\n\n");
+        rt_s(hp, "define internal void @_cx_print_str(ptr %p, i64 %n) {\nentry:\n  %pi = ptrtoint ptr %p to i64\n  %w = call i64 @__corex_syscall(i64 1, i64 1, i64 %pi, i64 %n, i64 0, i64 0, i64 0)\n  call void @_cx_newline()\n  ret void\n}\n\n");
     }
     if (*cg).used_print_f64 {
         let nan: i32 = add_string(cg, "nan\n");
@@ -3384,27 +3610,27 @@ fn gen_helpers(cg: *mut Cg) {
         let minus: i32 = add_string(cg, "-");
         let dot: i32 = add_string(cg, ".");
         let huge: i32 = add_string(cg, "corex: float too large to print\n");
-        rt_s(hp, "define internal void @_cx_put_pad6(i64 %value) {\nentry:\n  %buf = alloca [6 x i8], align 1\n  %r1 = udiv i64 %value, 10\n  %r2 = udiv i64 %r1, 10\n  %r3 = udiv i64 %r2, 10\n  %r4 = udiv i64 %r3, 10\n  %r5 = udiv i64 %r4, 10\n  %d0 = urem i64 %value, 10\n  %d1 = urem i64 %r1, 10\n  %d2 = urem i64 %r2, 10\n  %d3 = urem i64 %r3, 10\n  %d4 = urem i64 %r4, 10\n  %d5 = urem i64 %r5, 10\n  %c0 = add i64 %d0, 48\n  %c1 = add i64 %d1, 48\n  %c2 = add i64 %d2, 48\n  %c3 = add i64 %d3, 48\n  %c4 = add i64 %d4, 48\n  %c5 = add i64 %d5, 48\n  %b0 = trunc i64 %c0 to i8\n  %b1 = trunc i64 %c1 to i8\n  %b2 = trunc i64 %c2 to i8\n  %b3 = trunc i64 %c3 to i8\n  %b4 = trunc i64 %c4 to i8\n  %b5 = trunc i64 %c5 to i8\n  %p0 = getelementptr inbounds [6 x i8], ptr %buf, i64 0, i64 0\n  %p1 = getelementptr inbounds [6 x i8], ptr %buf, i64 0, i64 1\n  %p2 = getelementptr inbounds [6 x i8], ptr %buf, i64 0, i64 2\n  %p3 = getelementptr inbounds [6 x i8], ptr %buf, i64 0, i64 3\n  %p4 = getelementptr inbounds [6 x i8], ptr %buf, i64 0, i64 4\n  %p5 = getelementptr inbounds [6 x i8], ptr %buf, i64 0, i64 5\n  store i8 %b5, ptr %p0, align 1\n  store i8 %b4, ptr %p1, align 1\n  store i8 %b3, ptr %p2, align 1\n  store i8 %b2, ptr %p3, align 1\n  store i8 %b1, ptr %p4, align 1\n  store i8 %b0, ptr %p5, align 1\n  %bp = ptrtoint ptr %buf to i64\n  %w = call i64 @_cx_syscall(i64 1, i64 1, i64 %bp, i64 6, i64 0, i64 0, i64 0)\n  ret void\n}\n\ndefine internal void @_cx_print_f64(double %value) {\nentry:\n  %isnan = fcmp uno double %value, %value\n  br i1 %isnan, label %nan, label %checkinf\nnan:\n  %np = ptrtoint ptr @.str");
+        rt_s(hp, "define internal void @_cx_put_pad6(i64 %value) {\nentry:\n  %buf = alloca [6 x i8], align 1\n  %r1 = udiv i64 %value, 10\n  %r2 = udiv i64 %r1, 10\n  %r3 = udiv i64 %r2, 10\n  %r4 = udiv i64 %r3, 10\n  %r5 = udiv i64 %r4, 10\n  %d0 = urem i64 %value, 10\n  %d1 = urem i64 %r1, 10\n  %d2 = urem i64 %r2, 10\n  %d3 = urem i64 %r3, 10\n  %d4 = urem i64 %r4, 10\n  %d5 = urem i64 %r5, 10\n  %c0 = add i64 %d0, 48\n  %c1 = add i64 %d1, 48\n  %c2 = add i64 %d2, 48\n  %c3 = add i64 %d3, 48\n  %c4 = add i64 %d4, 48\n  %c5 = add i64 %d5, 48\n  %b0 = trunc i64 %c0 to i8\n  %b1 = trunc i64 %c1 to i8\n  %b2 = trunc i64 %c2 to i8\n  %b3 = trunc i64 %c3 to i8\n  %b4 = trunc i64 %c4 to i8\n  %b5 = trunc i64 %c5 to i8\n  %p0 = getelementptr inbounds [6 x i8], ptr %buf, i64 0, i64 0\n  %p1 = getelementptr inbounds [6 x i8], ptr %buf, i64 0, i64 1\n  %p2 = getelementptr inbounds [6 x i8], ptr %buf, i64 0, i64 2\n  %p3 = getelementptr inbounds [6 x i8], ptr %buf, i64 0, i64 3\n  %p4 = getelementptr inbounds [6 x i8], ptr %buf, i64 0, i64 4\n  %p5 = getelementptr inbounds [6 x i8], ptr %buf, i64 0, i64 5\n  store i8 %b5, ptr %p0, align 1\n  store i8 %b4, ptr %p1, align 1\n  store i8 %b3, ptr %p2, align 1\n  store i8 %b2, ptr %p3, align 1\n  store i8 %b1, ptr %p4, align 1\n  store i8 %b0, ptr %p5, align 1\n  %bp = ptrtoint ptr %buf to i64\n  %w = call i64 @__corex_syscall(i64 1, i64 1, i64 %bp, i64 6, i64 0, i64 0, i64 0)\n  ret void\n}\n\ndefine internal void @_cx_print_f64(double %value) {\nentry:\n  %isnan = fcmp uno double %value, %value\n  br i1 %isnan, label %nan, label %checkinf\nnan:\n  %np = ptrtoint ptr @.str");
         rt_i(hp, nan as i64);
-        rt_s(hp, " to i64\n  %nw = call i64 @_cx_syscall(i64 1, i64 1, i64 %np, i64 4, i64 0, i64 0, i64 0)\n  ret void\ncheckinf:\n  %bits = bitcast double %value to i64\n  %absbits = and i64 %bits, 9223372036854775807\n  %isinf = icmp eq i64 %absbits, 9218868437227405312\n  br i1 %isinf, label %inf, label %finite\ninf:\n  %neginf = icmp slt i64 %bits, 0\n  %ip = select i1 %neginf, ptr @.str");
+        rt_s(hp, " to i64\n  %nw = call i64 @__corex_syscall(i64 1, i64 1, i64 %np, i64 4, i64 0, i64 0, i64 0)\n  ret void\ncheckinf:\n  %bits = bitcast double %value to i64\n  %absbits = and i64 %bits, 9223372036854775807\n  %isinf = icmp eq i64 %absbits, 9218868437227405312\n  br i1 %isinf, label %inf, label %finite\ninf:\n  %neginf = icmp slt i64 %bits, 0\n  %ip = select i1 %neginf, ptr @.str");
         rt_i(hp, ninf as i64);
         rt_s(hp, ", ptr @.str");
         rt_i(hp, inf as i64);
-        rt_s(hp, "\n  %in = select i1 %neginf, i64 5, i64 4\n  %ipn = ptrtoint ptr %ip to i64\n  %iw = call i64 @_cx_syscall(i64 1, i64 1, i64 %ipn, i64 %in, i64 0, i64 0, i64 0)\n  ret void\nfinite:\n  %neg = icmp slt i64 %bits, 0\n  br i1 %neg, label %negative, label %positive\nnegative:\n  %mp = ptrtoint ptr @.str");
+        rt_s(hp, "\n  %in = select i1 %neginf, i64 5, i64 4\n  %ipn = ptrtoint ptr %ip to i64\n  %iw = call i64 @__corex_syscall(i64 1, i64 1, i64 %ipn, i64 %in, i64 0, i64 0, i64 0)\n  ret void\nfinite:\n  %neg = icmp slt i64 %bits, 0\n  br i1 %neg, label %negative, label %positive\nnegative:\n  %mp = ptrtoint ptr @.str");
         rt_i(hp, minus as i64);
-        rt_s(hp, " to i64\n  %mw = call i64 @_cx_syscall(i64 1, i64 1, i64 %mp, i64 1, i64 0, i64 0, i64 0)\n  %magn = fneg double %value\n  br label %emit\npositive:\n  br label %emit\nemit:\n  %x = phi double [ %magn, %negative ], [ %value, %positive ]\n  %toolarge = fcmp oge double %x, 1.0e18\n  br i1 %toolarge, label %fail, label %ok\nfail:\n  call void @_cx_fatal(ptr @.str");
+        rt_s(hp, " to i64\n  %mw = call i64 @__corex_syscall(i64 1, i64 1, i64 %mp, i64 1, i64 0, i64 0, i64 0)\n  %magn = fneg double %value\n  br label %emit\npositive:\n  br label %emit\nemit:\n  %x = phi double [ %magn, %negative ], [ %value, %positive ]\n  %toolarge = fcmp oge double %x, 1.0e18\n  br i1 %toolarge, label %fail, label %ok\nfail:\n  call void @_cx_fatal(ptr @.str");
         rt_i(hp, huge as i64);
         rt_s(hp, ", i64 ");
         rt_i(hp, len("corex: float too large to print\n") as i64);
         rt_s(hp, ")\n  unreachable\nok:\n  %i = fptoui double %x to i64\n  %fi = uitofp i64 %i to double\n  %frac = fsub double %x, %fi\n  %scaled = fmul double %frac, 1000000.0\n  %f6 = fptoui double %scaled to i64\n  call void @_cx_put_u64(i64 %i)\n  %dp = ptrtoint ptr @.str");
         rt_i(hp, dot as i64);
-        rt_s(hp, " to i64\n  %dw = call i64 @_cx_syscall(i64 1, i64 1, i64 %dp, i64 1, i64 0, i64 0, i64 0)\n  call void @_cx_put_pad6(i64 %f6)\n  call void @_cx_newline()\n  ret void\n}\n\n");
+        rt_s(hp, " to i64\n  %dw = call i64 @__corex_syscall(i64 1, i64 1, i64 %dp, i64 1, i64 0, i64 0, i64 0)\n  call void @_cx_put_pad6(i64 %f6)\n  call void @_cx_newline()\n  ret void\n}\n\n");
     }
     if (*cg).used_cstr_len || (*cg).used_cstr_str {
         rt_s(hp, "define internal i64 @_cx_cstr_len(ptr %s) {\nentry:\n  br label %loop\nloop:\n  %i = phi i64 [ 0, %entry ], [ %next, %body ]\n  %p = getelementptr inbounds i8, ptr %s, i64 %i\n  %c = load i8, ptr %p, align 1\n  %stop = icmp eq i8 %c, 0\n  br i1 %stop, label %done, label %body\nbody:\n  %next = add i64 %i, 1\n  br label %loop\ndone:\n  ret i64 %i\n}\n\n");
     }
     if (*cg).used_cstr_str {
-        rt_s(hp, "define internal { ptr, i64 } @_cx_cstr_str(ptr %s) {\nentry:\n  %n = call i64 @_cx_cstr_len(ptr %s)\n  %a = insertvalue { ptr, i64 } undef, ptr %s, 0\n  %b = insertvalue { ptr, i64 } %a, i64 %n, 1\n  ret { ptr, i64 } %b\n}\n\n");
+        rt_s(hp, "define internal { ptr, i64 } @_cx_cstr_str(ptr %s) {\nentry:\n  %n = call i64 @_cx_cstr_len(ptr %s)\n  %a = insertvalue { ptr, i64 } zeroinitializer, ptr %s, 0\n  %b = insertvalue { ptr, i64 } %a, i64 %n, 1\n  ret { ptr, i64 } %b\n}\n\n");
     }
     if (*cg).used_assert {
         rt_s(hp, "define internal void @_cx_assert(i1 %c, ptr %m, i64 %n) {\nentry:\n  br i1 %c, label %ok, label %fail\nfail:\n  call void @_cx_fatal(ptr %m, i64 %n)\n  unreachable\nok:\n  ret void\n}\n\n");
@@ -3472,9 +3698,9 @@ fn gen_entry(cg: *mut Cg, out: *mut Buf) {
     }
     if (*m).nparams == 3 {
         rt_s(out, "module asm \".globl _start\"\nmodule asm \"_start:\"\nmodule asm \"  movq %rsp, %rdi\"\nmodule asm \"  andq $-16, %rsp\"\nmodule asm \"  call __corex_entry\"\nmodule asm \"  hlt\"\n");
-        rt_s(out, "define void @__corex_entry(i64 %sp) #0 {\nentry:\n  %argc_p = inttoptr i64 %sp to ptr\n  %argc = load i32, ptr %argc_p, align 4\n  %argv_off = add i64 %sp, 8\n  %argv = inttoptr i64 %argv_off to ptr\n  %argc64 = sext i32 %argc to i64\n  %env_idx = add i64 %argc64, 2\n  %env_off = mul i64 %env_idx, 8\n  %env_addr = add i64 %sp, %env_off\n  %envp = inttoptr i64 %env_addr to ptr\n  %r = call i32 @main(i32 %argc, ptr %argv, ptr %envp)\n  %ext = sext i32 %r to i64\n  %e = call i64 @_cx_syscall(i64 60, i64 %ext, i64 0, i64 0, i64 0, i64 0, i64 0)\n  unreachable\n}\n\n");
+        rt_s(out, "define void @__corex_entry(i64 %sp) #0 {\nentry:\n  %argc_p = inttoptr i64 %sp to ptr\n  %argc = load i32, ptr %argc_p, align 4\n  %argv_off = add i64 %sp, 8\n  %argv = inttoptr i64 %argv_off to ptr\n  %argc64 = sext i32 %argc to i64\n  %env_idx = add i64 %argc64, 2\n  %env_off = mul i64 %env_idx, 8\n  %env_addr = add i64 %sp, %env_off\n  %envp = inttoptr i64 %env_addr to ptr\n  %r = call i32 @main(i32 %argc, ptr %argv, ptr %envp)\n  %ext = sext i32 %r to i64\n  %e = call i64 @__corex_syscall(i64 60, i64 %ext, i64 0, i64 0, i64 0, i64 0, i64 0)\n  unreachable\n}\n\n");
     } else {
-        rt_s(out, "define void @_start() #0 {\nentry:\n  %r = call i32 @main()\n  %ext = sext i32 %r to i64\n  %e = call i64 @_cx_syscall(i64 60, i64 %ext, i64 0, i64 0, i64 0, i64 0, i64 0)\n  unreachable\n}\n\n");
+        rt_s(out, "define void @_start() #0 {\nentry:\n  %r = call i32 @main()\n  %ext = sext i32 %r to i64\n  %e = call i64 @__corex_syscall(i64 60, i64 %ext, i64 0, i64 0, i64 0, i64 0, i64 0)\n  unreachable\n}\n\n");
     }
     (*cg).used_syscall = true;
     }
@@ -3511,6 +3737,9 @@ fn cg_init(a: *mut Arena, sem: *mut Sem, sanitize: bool, hosted: bool,
         (*cg).sanitize = sanitize;
         (*cg).hosted = hosted;
         (*cg).make_entry = make_entry;
+        (*cg).debug = false;
+        (*cg).dbg = cg_buf(cg);
+        (*cg).dbg_next = 0;
         if sanitize {
             rt_s((*cg).decls, "declare {i8, i1} @llvm.sadd.with.overflow.i8(i8, i8)\ndeclare {i8, i1} @llvm.ssub.with.overflow.i8(i8, i8)\ndeclare {i8, i1} @llvm.smul.with.overflow.i8(i8, i8)\n");
             rt_s((*cg).decls, "declare {i16, i1} @llvm.sadd.with.overflow.i16(i16, i16)\ndeclare {i16, i1} @llvm.ssub.with.overflow.i16(i16, i16)\ndeclare {i16, i1} @llvm.smul.with.overflow.i16(i16, i16)\n");
@@ -3551,14 +3780,27 @@ fn cg_module(cg: *mut Cg, ep: *mut Buf) -> str {
     rt_s(op, rt_view((*cg).defs));
     rt_s(op, rt_view(ep));
     rt_s(op, "attributes #0 = { alignstack=16 }\n");
+    if (*cg).debug {
+        rt_s(op, "!llvm.dbg.cu = !{!1}\n!llvm.module.flags = !{!2, !3}\n");
+        rt_s(op, rt_view((*cg).dbg));
+    }
     return rt_view(op);
     }
 }
 
 fn cg_run_ex(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program,
              sem: *mut Sem, sanitize: bool, hosted: bool, make_entry: bool) -> str {
+    return cg_run_dbg(a, d, srcs, prog, sem, sanitize, hosted, make_entry, false, "");
+}
+
+fn cg_run_dbg(a: *mut Arena, d: *mut Diags, srcs: *mut SrcList, prog: *mut Program,
+              sem: *mut Sem, sanitize: bool, hosted: bool, make_entry: bool,
+              debug: bool, dbg_file: str) -> str {
     unsafe {
     let cg: *mut Cg = cg_init(a, sem, sanitize, hosted, make_entry);
+    if debug {
+        cg_debug_init(cg, dbg_file);
+    }
     cg_prelude(cg);
     let mut entry: Buf = rt_buf(a);
     let ep: *mut Buf = &mut entry;
@@ -3632,7 +3874,7 @@ fn cg_test_entry(cg: *mut Cg, out: *mut Buf) {
             rt_i(out, ok_id as i64);
             rt_s(out, " to i64\n  %pw");
             rt_i(out, idx as i64);
-            rt_s(out, " = call i64 @_cx_syscall(i64 1, i64 1, i64 %pok");
+            rt_s(out, " = call i64 @__corex_syscall(i64 1, i64 1, i64 %pok");
             rt_i(out, idx as i64);
             rt_s(out, ", i64 ");
             rt_i(out, len(ok_msg) as i64);
@@ -3646,7 +3888,7 @@ fn cg_test_entry(cg: *mut Cg, out: *mut Buf) {
             rt_i(out, fail_id as i64);
             rt_s(out, " to i64\n  %fw");
             rt_i(out, idx as i64);
-            rt_s(out, " = call i64 @_cx_syscall(i64 1, i64 1, i64 %fp");
+            rt_s(out, " = call i64 @__corex_syscall(i64 1, i64 1, i64 %fp");
             rt_i(out, idx as i64);
             rt_s(out, ", i64 ");
             rt_i(out, len(fail_msg) as i64);
@@ -3667,7 +3909,7 @@ fn cg_test_entry(cg: *mut Cg, out: *mut Buf) {
         }
         g = (*g).next;
     }
-    rt_s(out, "  %fc = load i32, ptr %failures, align 4\n  %bad = icmp ne i32 %fc, 0\n  %code = select i1 %bad, i32 1, i32 0\n  %ext = sext i32 %code to i64\n  %exit = call i64 @_cx_syscall(i64 60, i64 %ext, i64 0, i64 0, i64 0, i64 0, i64 0)\n  unreachable\n}\n\n");
+    rt_s(out, "  %fc = load i32, ptr %failures, align 4\n  %bad = icmp ne i32 %fc, 0\n  %code = select i1 %bad, i32 1, i32 0\n  %ext = sext i32 %code to i64\n  %exit = call i64 @__corex_syscall(i64 60, i64 %ext, i64 0, i64 0, i64 0, i64 0, i64 0)\n  unreachable\n}\n\n");
     }
 }
 

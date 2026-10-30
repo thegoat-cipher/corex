@@ -34,8 +34,8 @@ fn dr_usage_fd(fd: i32) {
 Usage:
   corexc build   <file.cx | -> [-o <output>] [--opt <0-3>]
                  [--emit obj|shared|staticlib] [--hosted] [--shared]
-                 [--sanitize] [-I <dir>] [--cfg <key>] [--link <file>]
-                 [-L <dir>] [-l <lib>]
+                 [--sanitize] [-g|--debug] [--test] [-I <dir>] [--cfg <key>]
+                 [--link <file>] [-L <dir>] [-l <lib>]
   corexc run     <file.cx | -> [-I <dir>] [--cfg <key>] [--hosted]
                  [--sanitize] [--opt <0-3>] [-- <program args>...]
   corexc exec    '<source>' [-I <dir>] [--cfg <key>] [--opt <0-3>]
@@ -102,6 +102,8 @@ struct Opts {
     hosted: bool,
     shared: bool,
     sanitize: bool,
+    test_mode: bool,
+    debug_info: bool,
     links: *mut *u8,
     nlinks: i32,
     lib_paths: *mut *u8,
@@ -129,6 +131,8 @@ fn opts_new(a: *mut Arena, argc: i32) -> Opts {
         hosted: false,
         shared: false,
         sanitize: false,
+        test_mode: false,
+        debug_info: false,
         links: rt_argv(a, argc),
         nlinks: 0,
         lib_paths: rt_argv(a, argc),
@@ -312,9 +316,15 @@ fn dr_parse(a: *mut Arena, argv: **u8, argc: i32, start: i32, allow_out: bool,
                     i = i + 1;
                     continue;
                 }
+                if rt_cstr_eq(arg, "--test") {
+                    (*o).test_mode = true;
+                    i = i + 1;
+                    continue;
+                }
                 if rt_cstr_eq(arg, "-g") || rt_cstr_eq(arg, "--debug") {
-                    dr_errln("error: debug info (`-g`) is not supported by the bootstrap compiler");
-                    return 2;
+                    (*o).debug_info = true;
+                    i = i + 1;
+                    continue;
                 }
                 if rt_cstr_eq(arg, "--emit") {
                     let v: cstr = dr_need(a, argv, argc, i, "--emit");
@@ -1039,9 +1049,77 @@ fn dr_archive(a: *mut Arena, envp: **u8, obj: cstr, out: cstr) -> i32 {
 // Assemble, optimize, lower, and then link (default), copy the object (`--emit
 // obj`), produce a shared object (`--emit shared`), or archive (`--emit
 // staticlib`).
+// `COREX_KEEP_TEMP=1`: keep the build's intermediate artifacts in a private
+// `$TMPDIR/corex-build-<hex>` directory (mode 0700) instead of deleting them.
+// The suffix is the arena address, not the pid: the oracle's kept directory is
+// also pid-free and unpredictable.
+// Last path component, used as the DWARF file name.
+fn dr_basename(a: *mut Arena, path: cstr) -> str {
+    unsafe {
+    let s: str = rt_cstr_str(path as *u8);
+    let mut i: usize = len(s);
+    let mut start: usize = 0;
+    while i > 0 {
+        i = i - 1;
+        if s[i] == 47 {
+            start = i + 1;
+            break;
+        }
+    }
+    return rt_slice(s, start, len(s));
+
+    }
+}
+
+// Lowercase hex for the kept-build directory suffix.
+fn dr_hex(b: *mut Buf, value: u64) {
+    let mut digits: [u8; 18] = [0; 18];
+    let hexes: [u8; 16] = [48, 49, 50, 51, 52, 53, 54, 55, 56, 57, 97, 98, 99, 100, 101, 102];
+    let mut pos: usize = 16;
+    let mut cur: u64 = value;
+    loop {
+        pos = pos - 1;
+        let nib: usize = (cur & 15) as usize;
+        digits[pos] = hexes[nib];
+        cur = cur >> 4;
+        if cur == 0 {
+            break;
+        }
+    }
+    while pos < 16 {
+        rt_b(b, digits[pos]);
+        pos = pos + 1;
+    }
+}
+
+fn dr_keep_dir(a: *mut Arena, envp: **u8) -> str {
+    unsafe {
+    let tmp: cstr = rt_env(envp, "TMPDIR");
+    let mut base: str = "/tmp";
+    if cstr_len(tmp) > 0 {
+        base = rt_cstr_str(tmp as *u8);
+    }
+    let mut b: Buf = rt_buf(a);
+    let bp: *mut Buf = &mut b;
+    rt_s(bp, base);
+    rt_s(bp, "/corex-build-");
+    let salt: u64 = (rt_alloc(a, 8) as u64) >> 4;
+    dr_hex(bp, salt);
+    let dir: str = rt_view(bp);
+    let _ = syscall(83, rt_to_cstr(a, dir) as usize, 448, 0, 0, 0, 0);
+    return dir;
+
+    }
+}
+
 fn dr_build(a: *mut Arena, envp: **u8, ll: cstr, out: cstr, opt: i32,
             o: *mut Opts, pic: bool) -> i32 {
     unsafe {
+        let keep: bool = cstr_len(rt_env(envp, "COREX_KEEP_TEMP")) > 0;
+        let mut keepdir: str = "";
+        if keep {
+            keepdir = dr_keep_dir(a, envp);
+        }
         let bc: cstr = rt_temp_path(a, ".bc");
         let obj: cstr = rt_temp_path(a, ".o");
         if dr_as(a, envp, ll, bc) != 0 {
@@ -1057,6 +1135,10 @@ fn dr_build(a: *mut Arena, envp: **u8, ll: cstr, out: cstr, opt: i32,
         }
         if dr_llc(a, envp, use_bc, obj, opt, pic) != 0 {
             return DR_TOOL_FAIL;
+        }
+        if keep {
+            let _ = dr_copy_file(a, ll, rt_to_cstr(a, rt_join2(a, keepdir, "program.ll")));
+            let _ = dr_copy_file(a, obj, rt_to_cstr(a, rt_join2(a, keepdir, "program.o")));
         }
         rt_unlink(ll);
         if rt_cstr_eq((*o).emit, "obj") {
@@ -1181,7 +1263,7 @@ fn dr_cmd_emit_ir(a: *mut Arena, envp: **u8, argv: **u8, argc: i32, o: *mut Opts
             dr_report_count(a, &mut d);
             return 1;
         }
-        let ir: str = cg_run(a, &mut d, &mut srcs, &mut prog, sem);
+        let ir: str = cg_run_dbg(a, &mut d, &mut srcs, &mut prog, sem, false, false, true, (*o).debug_info, dr_basename(a, (*o).file));
         if d.count > 0 {
             dr_diags(a, &mut d, &mut srcs);
             dr_report_count(a, &mut d);
@@ -1207,15 +1289,29 @@ fn dr_cmd_build(a: *mut Arena, envp: **u8, argv: **u8, argc: i32, o: *mut Opts) 
         // and objects do. `--hosted` keeps the entry but leaves `_start` to the
         // C runtime.
         let is_lib: bool = rt_cstr_eq((*o).emit, "shared") || rt_cstr_eq((*o).emit, "staticlib");
-        let require_entry: bool = !is_lib;
+        let require_entry: bool = !is_lib && !(*o).test_mode;
         let make_entry: bool = require_entry && !(*o).hosted;
-        let sem: *mut Sem = sem_run_ex(a, &mut d, &mut srcs, &mut prog, require_entry);
-        if d.count > 0 {
-            dr_diags(a, &mut d, &mut srcs);
-            dr_report_count(a, &mut d);
-            return 1;
+        let mut sem: *mut Sem = null;
+        let mut ir: str = "";
+        if (*o).test_mode {
+            // `build --test`: link the generated test runner instead of
+            // running it (that is what plain `corexc test` does).
+            sem = sem_run_tests(a, &mut d, &mut srcs, &mut prog);
+            if d.count > 0 {
+                dr_diags(a, &mut d, &mut srcs);
+                dr_report_count(a, &mut d);
+                return 1;
+            }
+            ir = cg_run_tests(a, &mut d, &mut srcs, &mut prog, sem);
+        } else {
+            sem = sem_run_ex(a, &mut d, &mut srcs, &mut prog, require_entry);
+            if d.count > 0 {
+                dr_diags(a, &mut d, &mut srcs);
+                dr_report_count(a, &mut d);
+                return 1;
+            }
+            ir = cg_run_dbg(a, &mut d, &mut srcs, &mut prog, sem, (*o).sanitize, (*o).hosted, make_entry, (*o).debug_info, dr_basename(a, (*o).file));
         }
-        let ir: str = cg_run_ex(a, &mut d, &mut srcs, &mut prog, sem, (*o).sanitize, (*o).hosted, make_entry);
         if d.count > 0 {
             dr_diags(a, &mut d, &mut srcs);
             dr_report_count(a, &mut d);
@@ -1260,7 +1356,7 @@ fn dr_run_source(a: *mut Arena, envp: **u8, d: *mut Diags, srcs: *mut SrcList,
             dr_report_count(a, d);
             return 1;
         }
-        let ir: str = cg_run_ex(a, d, srcs, prog, sem, (*o).sanitize, (*o).hosted, !(*o).hosted);
+        let ir: str = cg_run_dbg(a, d, srcs, prog, sem, (*o).sanitize, (*o).hosted, !(*o).hosted, (*o).debug_info, dr_basename(a, (*o).file));
         if (*d).count > 0 {
             dr_diags(a, d, srcs);
             dr_report_count(a, d);

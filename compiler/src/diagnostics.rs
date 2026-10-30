@@ -179,6 +179,19 @@ impl SourceFile {
         }
     }
 
+    /// Source text of the first unit. For a file returned by
+    /// `driver::load_source` this is the root source before imports were
+    /// concatenated, so an external compiler can rebuild it and resolve the
+    /// imports against their original directory.
+    pub fn root_text(&self) -> &str {
+        let end = self
+            .segments
+            .get(1)
+            .map(|segment| segment.start)
+            .unwrap_or(self.text.len());
+        &self.text[..end]
+    }
+
     /// Build a virtual source file assembled from several real files. Segment
     /// starts must be byte offsets into `text`, in ascending order.
     pub fn with_segments(
@@ -247,6 +260,46 @@ impl SourceFile {
         };
         let (seg_line, _) = self.location(seg.start);
         (seg.name.clone(), global_line - seg_line + 1, col)
+    }
+
+    /// Byte offset for a 1-based `(line, col)` inside the named source unit.
+    /// Used by the external-compiler harness to map `file:line:col`
+    /// diagnostics back into an expanded (`load_source`) buffer.
+    pub fn offset_in(&self, path: &str, line: usize, col: usize) -> usize {
+        let unit = self
+            .segments
+            .iter()
+            .find(|segment| segment.name == path || segment.name.ends_with(path))
+            .or_else(|| {
+                self.segments
+                    .iter()
+                    .find(|segment| path.ends_with(&segment.name))
+            })
+            .or_else(|| self.segments.first());
+        let base = unit.map(|segment| segment.start).unwrap_or(0);
+        let end = self
+            .segments
+            .iter()
+            .map(|segment| segment.start)
+            .filter(|&start| start > base)
+            .min()
+            .unwrap_or(self.text.len());
+        let slice = &self.text[base..end];
+        let bytes = slice.as_bytes();
+        let mut i = 0;
+        let mut current = 1;
+        while i < bytes.len() && current < line {
+            if bytes[i] == b'\n' {
+                current += 1;
+            }
+            i += 1;
+        }
+        let mut column = 1;
+        while i < bytes.len() && column < col && bytes[i] != b'\n' {
+            i += 1;
+            column += 1;
+        }
+        (base + i).min(self.text.len())
     }
 
     pub fn line_text(&self, line: usize) -> &str {
