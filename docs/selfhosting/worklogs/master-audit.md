@@ -351,5 +351,6 @@ suite; no individual blocklist entries were added.
 - Final hashes: Stage 1 `57075bae…`; Stage 2/3/4 `bcf17bc8…`; optimized
   `0745f798…`, `2cd22d29…`, `37d52093…`.
 
-Remaining: SH-043 (push blocked by missing GitHub credentials) and SH-046
-(acceptance depends on SH-043). SH-033/034/037/039/044 are complete.
+Remote CI: branch run `41095491312` passed on `47b60b5`; main was pushed as
+`96c3790` and its push-triggered run `41097021388` completed green. SH-043 and
+SH-046 are complete. SH-033/034/037/039/044 are complete.

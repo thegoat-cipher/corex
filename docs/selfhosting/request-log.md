@@ -35,8 +35,9 @@ command. Timestamps are UTC on the working date.
 
 | REQ-SH-026 | 2026-10-30 | Finish the externalizable 205-row parity suite and DWARF | Blocked-work follow-up | Tooling workstream | SH-036, SH-039 | 137 passed / 0 failed / 68 Rust-internal blocked / 0 timeout; static tables, compound literals, IR text, private items, temp dirs, `--test`, DWARF, `load_source`; Stage 1 `57075bae…`, Stage 2/3/4 `bcf17bc8…` |
 
+| REQ-SH-027 | 2026-10-30 | Push main and run remote CI | User "attempt all still blocked" | Tooling workstream | SH-043, SH-046 | Branch CI `41095491312` green on `47b60b5`; main `96c3790` pushed; main run `41097021388` completed green. |
+
 ## Open items
 
-Outstanding: SH-039 (126 passed/9 failed/70 blocked/0 timeout over 205 rows),
-SH-043 (push blocked by missing GitHub credentials), SH-046 (acceptance).
-SH-033/034/037/044 are complete. Details and evidence are in `tasks.md`.
+Branch and main CI are green. All tracked tasks SH-001…SH-046 are complete;
+no outstanding blockers. Details and evidence are in `tasks.md`.
