@@ -91,18 +91,22 @@ Stage 2/3/4 are byte-identical. Stage 1 is Rust-compiled and differs by design
   `bootstrap-results.md` §3.
 - Optimized reproducibility gate: `repro-opt.sh --corpus` passes at `--opt 1..3`.
 - CI updated for the integrated gates.
+- Remote CI: workflow_dispatch run
+  [41095491312](https://github.com/thegoat-cipher/corex/actions/runs/41095491312)
+  green on `47b60b5` (cargo 205, examples, full bootstrap with ASan,
+  `repro-opt --corpus`, install smoke).
 
 ## 4. Active tasks
 
-See `tasks.md`. Outstanding: **SH-043** (remote push/CI blocked by missing
-GitHub credentials), **SH-046** (full acceptance; SH-037, SH-039, and SH-044
-are complete).
+No tracked task is outstanding. `tasks.md` marks SH-043 (remote CI) and SH-046
+(AC-1…AC-9) complete; the independent master audit is the remaining external
+verification.
 
 ## 5. Blockers
 
-- SH-043: both HTTPS and SSH push attempts were rejected (no credential
-  helper/askpass and no SSH key), so remote CI has not run.
-- SH-046: AC-1…AC-9 cannot complete until SH-043 resolves.
+None. Branch `room/corex-tooling-hang-fix-g3gb` is pushed and remote CI run
+[41095491312](https://github.com/thegoat-cipher/corex/actions/runs/41095491312)
+is green on `47b60b5`.
 
 ## 6. Architectural decisions
 
@@ -139,6 +143,7 @@ concurrency tests: 33 passed, 0 failed
 lib tests: 16 passed, 0 failed
 cargo test: 205 passed, 0 failed
 behavior suite: 137 passed, 0 failed, 68 blocked, 0 timeout (205 rows)
+remote CI: run 41095491312 green (13/13 steps)
 repro-opt: deterministic and self-reproducing at --opt 1..3
 ```
 
