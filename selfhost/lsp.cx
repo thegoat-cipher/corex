@@ -1301,7 +1301,7 @@ fn lsp_handle(a: *mut Arena, st: *mut LSPState, msg: *mut J) -> bool {
         j_set(a, caps, "hoverProvider", j_bool(a, true));
         let info: *mut J = j_obj(a);
         j_set(a, info, "name", j_str(a, "corexc-lsp"));
-        j_set(a, info, "version", j_str(a, "0.3.0"));
+        j_set(a, info, "version", j_str(a, "0.4.0"));
         let result: *mut J = j_obj(a);
         j_set(a, result, "capabilities", caps);
         j_set(a, result, "serverInfo", info);

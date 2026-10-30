@@ -119,5 +119,5 @@ jobs:
           set -euo pipefail
           cargo install --path compiler --locked --root "$RUNNER_TEMP/corex"
           "$RUNNER_TEMP/corex/bin/corex" --version | tee "$RUNNER_TEMP/version.txt"
-          grep -F "corex 0.3.0" "$RUNNER_TEMP/version.txt"
+          grep -F "corex 0.4.0" "$RUNNER_TEMP/version.txt"
           "$RUNNER_TEMP/corex/bin/corex" run examples/hello.cx

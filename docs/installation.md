@@ -1,6 +1,6 @@
 # Installing CoreX
 
-This guide installs the CoreX **0.3.0** compiler from source and verifies it by
+This guide installs the CoreX **0.4.0** compiler from source and verifies it by
 compiling and running real freestanding ELF binaries. It also covers the few
 environment variables that control tool discovery.
 
@@ -132,7 +132,7 @@ not need LLVM development headers or `libLLVM`.
 
 ```bash
 ./target/release/corex --version
-# corex 0.3.0 (LLVM 20 backend)
+# corex 0.4.0 (LLVM 20 backend)
 
 ./target/release/corex run ../examples/hello.cx
 # Hello, World!

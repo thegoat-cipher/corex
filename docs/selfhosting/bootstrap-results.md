@@ -13,7 +13,7 @@ concurrency surface and SH-034 library closure.
 | LLVM | LLVM 20.1.8 (`llvm-as`, `llc`, `opt`) |
 | C driver | cc (Ubuntu 15.2.0-4ubuntu4) 15.2.0 |
 | Target | `x86_64-unknown-linux-gnu` |
-| Stage 0 | `corex 0.3.0 (LLVM 20 backend)` |
+| Stage 0 | `corex 0.4.0 (LLVM 20 backend)` |
 | Link flags | `cc -nostdlib -static -no-pie` |
 
 ## 2. Artifacts and hashes

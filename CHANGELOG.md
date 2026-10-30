@@ -1,7 +1,69 @@
 # Changelog
 
 All notable changes to CoreX are documented here. The compiler package and both
-binaries (`corex`, `corex-lsp`) share one version.
+Rust binaries (`corex`, `corex-lsp`) share one version; the self-hosted
+`corexc` reports the same release.
+
+## [0.4.0] - 2026-10-30
+
+Self-hosted compiler release. The Rust `corex` compiler remains the full-language
+Stage 0 reference; `selfhost/` now builds itself reproducibly. Still zero Rust
+dependencies, LLVM 20 textual-IR backend, Linux x86-64 only.
+
+### Self-hosted bootstrap
+
+- CoreX-written bootstrap compiler: 545 functions / 17,747 lines across 15
+  `selfhost/*.cx` files, built by `selfhost/bootstrap.sh`.
+- Stage 1 is built by Rust `corex`; Stage 2 builds itself, Stage 3 rebuilds it,
+  and Stage 4 repeats the fixed point. Stage 2/3/4 are byte-identical
+  (`sha256 e66cad85…`, 637,200 bytes).
+- Optimized self-builds are deterministic and self-reproducing at `--opt 1..3`
+  (`f463fd3b…`, `0d213b2b…`, `2c1cfb85…`); `selfhost/repro-opt.sh --corpus`
+  gates this.
+- Gates: 270-check corpus on each of Stages 1-3, CLI 80, LSP 35, differential
+  dumps 81, fuzz/ASan 330, concurrency 33, and `lib/corex` 16/16.
+
+### Language, runtime, and tooling
+
+- Self-hosted concurrency surface: `volatile` globals and builtins, all atomic
+  builtins, inline `asm`, and the `std_thread`/`std_tls` thread and TLS runtime.
+- DWARF `-g`/`--debug`: compile unit, per-function `DW_TAG_subprogram`, and
+  line locations.
+- Static function-pointer and `str` tables, compound literals, and designated
+  array/struct initializers.
+- LSP server (`corexc lsp`): diagnostics, hover, definition, references,
+  rename, completion, and formatting; 35 protocol checks in bootstrap and CI.
+- Externalized behavior suite (`tests/selfhosting/behavior.py`): all 205 Rust
+  test rows parameterized, with 137 passed / 0 failed / 68 blocked (`--lib`
+  internals) / 0 timeout.
+
+### Cleanup and audit fixes
+
+- SH-044 bootstrap cleanup: 558 → 534 functions before the tooling merge
+  (545 / 17,747 in the final integrated tree), with redundant unsafe wrappers,
+  dead helpers, and duplicate wrappers removed.
+- P0–P3 master-audit fixes: tool failures and signal-killed tools fail builds
+  with exit 3; built-in `#[cfg]` keys; frontend `--cfg`/`-I` on `check` and
+  `emit-ir`; `E0226` for non-plain aggregate statics; float compound
+  assignment; labels in unreachable blocks; linear-time `check_binary`.
+- Version strings for `corex`, `corexc`, and `corexc-lsp`/`corex-lsp` report
+  `0.4.0`; CI asserts `corex 0.4.0`.
+
+### Readiness
+
+- Second readiness audit verdict: **READY WITH CAVEATS**. AC-2 diagnostic
+  positions or counts differ from the Rust oracle for 13 of 65 negative inputs;
+  AC-4 is externalized for 137 CLI-expressible rows while 68 Rust-internal unit
+  tests are blocked; AC-8 is met with a documented metric. The bootstrap itself
+  is reproducible and passes every executable gate.
+
+### Release engineering
+
+- Package version is now `0.4.0`; `cargo test --locked` reports 205 passed
+  (68 unit, 137 integration).
+- CI runs the Rust suite, examples at every optimization level, the
+  self-hosting bootstrap with ASan, `repro-opt --corpus`, and an install smoke
+  test that asserts the `0.4.0` version.
 
 ## [0.3.0] - 2026-10-22
 
@@ -65,4 +127,5 @@ textual-IR backend, Linux x86-64 only.
   `--opt 0,1,2,3`, and a `cargo install --locked` smoke test.
 - Package version is now `0.3.0`; `corex --version` and `corex-lsp` report it.
 
+[0.4.0]: https://github.com/thegoat-cipher/corex/releases/tag/v0.4.0
 [0.3.0]: https://github.com/thegoat-cipher/corex/releases/tag/v0.3.0

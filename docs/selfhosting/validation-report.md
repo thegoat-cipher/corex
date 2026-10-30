@@ -1,10 +1,10 @@
 # Validation Report — CoreX Self-Hosting
 
 Date: 2026-10-29
-Compiler under test: integrated `selfhost/` with the SH-033 concurrency surface,
-SH-034 library closure, the SH-037 LSP, the SH-039 behaviour suite, and the
-SH-044 cleanup (545 functions, 17,747 lines after this tooling change;
-534 / 17,236 before it).
+Compiler under test: integrated `selfhost/` (released as CoreX 0.4.0) with the
+SH-033 concurrency surface, SH-034 library closure, the SH-037 LSP, the SH-039
+behaviour suite, and the SH-044 cleanup (545 functions, 17,747 lines after this
+tooling change; 534 / 17,236 before it).
 
 ## 1. Result summary
 
@@ -56,7 +56,7 @@ miscompilation) recorded from the differential oracle.
 
 ## 3. Frontend and IR
 
-- `compiler/target/release/corex check selfhost/corexc.cx` → `ok: 534
+- `compiler/target/release/corex check selfhost/corexc.cx` → `ok: 545
   function(s), entry main`; the bootstrap compiler produces the same result.
 - Every build invokes `llvm-as`; malformed IR aborts the build and `build`
   exits nonzero (exit 3 for tool failures) without printing `compiled`.

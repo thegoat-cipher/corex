@@ -1,6 +1,6 @@
 # CoreX Syntax Tutorial
 
-A compact, complete tour of the CoreX 0.3.0 syntax. Snippets are fragments
+A compact, complete tour of the CoreX 0.4.0 syntax. Snippets are fragments
 unless they define `main`. CoreX targets Linux
 x86-64, compiles through LLVM 20, and produces freestanding ELF binaries with no
 libc and no runtime.
