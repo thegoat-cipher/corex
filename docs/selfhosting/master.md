@@ -94,7 +94,10 @@ Stage 2/3/4 are byte-identical. Stage 1 is Rust-compiled and differs by design
 - Remote CI: workflow_dispatch run
   [41095491312](https://github.com/thegoat-cipher/corex/actions/runs/41095491312)
   green on `47b60b5` (cargo 205, examples, full bootstrap with ASan,
-  `repro-opt --corpus`, install smoke).
+  `repro-opt --corpus`, install smoke). Main was pushed as `96c3790`; its
+  push-triggered run
+  [41097021388](https://github.com/thegoat-cipher/corex/actions/runs/41097021388)
+  completed green.
 
 ## 4. Active tasks
 
