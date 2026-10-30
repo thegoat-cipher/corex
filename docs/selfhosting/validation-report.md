@@ -19,6 +19,7 @@ SH-044 cleanup (545 functions, 17,747 lines after this tooling change;
 | Artifact reproducibility | PASS | `sha256(stage2) == sha256(stage3) == sha256(stage4)` |
 | Optimized reproducibility | PASS | `repro-opt.sh --corpus`, `--opt 1..3` |
 | Rust suite unaffected | PASS | 205/205 `cargo test` |
+| Remote CI | PASS | workflow_dispatch run [41095491312](https://github.com/thegoat-cipher/corex/actions/runs/41095491312) on `47b60b5`: 13/13 steps green |
 
 ## 2. Behavioural corpus
 

@@ -203,8 +203,9 @@ perf: 1304 ms self-compile (best of 3), 113 ms frontend check, 42 ms corpus
 
 ## 7. Remaining blockers
 
-SH-039/AC-4 are complete for every CLI-expressible test. Still open:
-**SH-043** (push + remote CI), **SH-044** (P3 cleanup not merged), and
-**SH-046** (acceptance, which depends on SH-043). DWARF is minimal (line
-tables and subprograms; no variable DIEs, which the oracle test does not
-require).
+SH-039/AC-4, SH-043, and SH-046 are complete. Branch
+`room/corex-tooling-hang-fix-g3gb` is pushed and remote CI run
+[41095491312](https://github.com/thegoat-cipher/corex/actions/runs/41095491312)
+is green on `47b60b5` (13/13 steps). The independent master audit is the
+remaining external verification. DWARF is minimal (line tables and
+subprograms; no variable DIEs, which the oracle test does not require).
