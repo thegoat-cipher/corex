@@ -33,6 +33,8 @@ command. Timestamps are UTC on the working date.
 | REQ-SH-024 | 2026-10-29 | Reapply the P3 cleanup on the integrated compiler | Blocked-work workstream | Cleanup workstream | SH-044 | Four commits, 71 unsafe wrappers, 20 dead helpers, `Program` fields, parser cutover; 534 functions/17,236 lines; Stage 2/3/4 `f3e770a3…`; gates unchanged |
 | REQ-SH-025 | 2026-10-29 | Push integrated main and validate remote CI | User "attempt all still blocked" | Master orchestrator | SH-043 | Attempted HTTPS and SSH pushes; both rejected (no askpass/credential helper, no SSH key). Remote CI not run; local gates green. |
 
+| REQ-SH-026 | 2026-10-30 | Finish the externalizable 205-row parity suite and DWARF | Blocked-work follow-up | Tooling workstream | SH-036, SH-039 | 137 passed / 0 failed / 68 Rust-internal blocked / 0 timeout; static tables, compound literals, IR text, private items, temp dirs, `--test`, DWARF, `load_source`; Stage 1 `57075bae…`, Stage 2/3/4 `bcf17bc8…` |
+
 ## Open items
 
 Outstanding: SH-039 (126 passed/9 failed/70 blocked/0 timeout over 205 rows),

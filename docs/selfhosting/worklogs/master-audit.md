@@ -273,6 +273,8 @@ completed; SH-039, SH-043, and SH-046 remain blocked per §8.
 
 ## 8. Blocked-work follow-up (2026-10-29)
 
+> Superseded for SH-039 by §9; the rest of this section remains the 2026-10-29 snapshot.
+
 All remaining blockers were assigned to dedicated workstreams and independently
 re-verified.
 
@@ -329,3 +331,25 @@ cargo test: 205 passed, 0 failed
 behavior: 126 passed, 9 failed, 70 blocked, 0 timeout (205 rows)
 repro-opt: e3e6335e.../9af3b41a.../51c025a0... (full hashes in bootstrap-results)
 ```
+
+
+## 9. SH-039 completion (2026-10-30)
+
+The tooling workstream completed the remaining CLI-expressible behaviour
+suite; no individual blocklist entries were added.
+
+- `behavior.py` over all 205 rows: **137 passed, 0 failed, 68 blocked,
+  0 timeout** (exit 0). The 68 blocked rows are exactly the Rust `--lib` unit
+  tests that call Rust-internal modules and cannot be routed through a CLI.
+- Fixed the 9 divergences: function-pointer/`str` static tables, compound and
+  designated literals, IR text (`%pN`, `@__corex_syscall`, str construction),
+  private module-item diagnostics, `COREX_KEEP_TEMP`, `build --test`, DWARF
+  (`-g`), and the `load_source` external adapter.
+- Regression: 64-term `1+1+…` checks in 0.10 s; per-test 60 s timeout remains.
+- Gates: 270 corpus × Stage 1/2/3, CLI 80, LSP 35, dumps 81, fuzz/ASan 330,
+  concurrency 33, `lib/corex` 16, `cargo test` 205.
+- Final hashes: Stage 1 `57075bae…`; Stage 2/3/4 `bcf17bc8…`; optimized
+  `0745f798…`, `2cd22d29…`, `37d52093…`.
+
+Remaining: SH-043 (push blocked by missing GitHub credentials) and SH-046
+(acceptance depends on SH-043). SH-033/034/037/039/044 are complete.
